@@ -142,3 +142,7 @@ dmypy.json
 !config.json
 logs/
 storage/
+
+# Allow required JSON files
+!ui/package.json
+!ui/package-lock.json
