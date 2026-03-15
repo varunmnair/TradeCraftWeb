@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# Git
+.git/
+.gitignore
+
+# UI node_modules (installed during build)
+ui/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Auth and data (sensitive)
+auth/
+data/
+*.pkl
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Misc
+*.egg-info/
+dist/
+build/
+.DS_Store
+Thumbs.db
+
+# Local development
+*.md
+README*
+LICENSE
+setup.*

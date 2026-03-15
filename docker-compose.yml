@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: bash -c "alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      - DATABASE_URL=sqlite:///./storage/dev.db
+    volumes:
+      - .:/app
+      - ./storage:/app/storage
+    ports:
+      - "8000:8000"
