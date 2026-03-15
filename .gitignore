@@ -138,7 +138,7 @@ dmypy.json
 !name-symbol-mapping.csv
 !*-entry-levels.csv
 *.xlsx
-*.json
+#*.json
 !config.json
 logs/
 storage/
@@ -146,3 +146,13 @@ storage/
 # Allow required JSON files
 !ui/package.json
 !ui/package-lock.json
+
+# Generated / runtime JSON (keep these ignored)
+data/**/*.json
+storage/**/*.json
+logs/**/*.json
+
+# (Optional) ignore common caches anywhere
+**/*cache*.json
+**/*_cache.json
+**/gtt_plan_cache.json
