@@ -109,8 +109,13 @@ export interface RiskApplyRequest {
   plan: Record<string, unknown>[];
 }
 
+export interface GTTOrder {
+  id?: number;
+  [key: string]: unknown;
+}
+
 export interface GTTOrdersResponse {
-  orders: Record<string, unknown>[];
+  orders: GTTOrder[];
 }
 
 export interface GTTPreviewRequest {

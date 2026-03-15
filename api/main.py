@@ -34,6 +34,7 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("tradecraftx.api")
 HOSTED_MODE = os.getenv("HOSTED_MODE", "0") == "1"
+DEV_MODE = os.getenv("DEV_MODE", "0") == "1"
 
 # Path to UI build output
 UI_DIST_PATH = Path(__file__).parent.parent / "ui" / "dist"
@@ -90,10 +91,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="token_encryption_key_missing")
         return {"status": "ready"}
 
-    # Serve static UI files if build exists
-    if UI_DIST_PATH.exists():
-        # Mount static files directory
-        app.mount("/static", StaticFiles(directory=str(UI_DIST_PATH / "static")), name="static")
+    # Serve static UI files if build exists and not in dev mode
+    if DEV_MODE:
+        LOGGER.info("DEV_MODE enabled - skipping UI static file serving")
+    elif UI_DIST_PATH.exists():
+        # Mount static files directory if it exists
+        static_path = UI_DIST_PATH / "static"
+        if static_path.exists():
+            app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
         
         @app.get("/")
         async def serve_index():

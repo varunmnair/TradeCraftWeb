@@ -93,14 +93,19 @@ export default function HoldingsPage() {
       if (typeof value === 'number') type = 'number';
       else if (typeof value === 'boolean') type = 'boolean';
       
-      cols.push({
+      const colDef: GridColDef & { pinned?: 'left' | 'right' } = {
         field: key,
         headerName: key,
         type,
         width: type === 'number' ? 120 : 180,
         flex: type === 'string' ? 1 : 0,
-        pinned: pinnedFields.includes(key) ? 'left' : undefined,
-      });
+      };
+      
+      if (pinnedFields.includes(key)) {
+        colDef.pinned = 'left';
+      }
+      
+      cols.push(colDef);
     });
     
     setColumns(cols);

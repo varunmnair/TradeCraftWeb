@@ -59,7 +59,7 @@ export default function BrokerConnectionsPage() {
   const [connectionStatus, setConnectionStatus] = useState<BrokerStatus | null>(null);
   const [oauthConnectionId, setOauthConnectionId] = useState<number | null>(null);
   
-  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchConnections = async () => {
     try {

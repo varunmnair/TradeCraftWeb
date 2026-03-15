@@ -230,7 +230,7 @@ export default function PlanPage() {
             variant="contained"
             startIcon={generating || (job && !isDone) ? <CircularProgress size={20} color="inherit" /> : <GenerateIcon />}
             onClick={handleGeneratePlan}
-            disabled={generating || (job && !isDone)}
+            disabled={Boolean(generating || (job && !isDone))}
           >
             {generating ? 'Generating...' : job && !isDone ? 'Generating...' : 'Generate Plan'}
           </Button>
@@ -239,7 +239,7 @@ export default function PlanPage() {
             color="warning"
             startIcon={applyingRisk ? <CircularProgress size={20} color="inherit" /> : <RiskIcon />}
             onClick={handleApplyRisk}
-            disabled={applyingRisk || !planData?.plan?.length || (job && !isDone)}
+            disabled={Boolean(applyingRisk || !planData?.plan?.length || (job && !isDone))}
           >
             {applyingRisk ? 'Applying...' : 'Apply Risk'}
           </Button>
@@ -314,8 +314,9 @@ export default function PlanPage() {
               <Paper sx={{ height: 300, width: '100%' }}>
                 <DataGrid
                   rows={planData.skipped.map((item, idx) => {
-                    const symbol = item.symbol || item.Symbol || String(item);
-                    const reason = item.skip_reason || item.reason || '';
+                    const itemRecord = item as unknown as Record<string, unknown>;
+                    const symbol = String(itemRecord?.symbol || itemRecord?.Symbol || item);
+                    const reason = String(itemRecord?.skip_reason || itemRecord?.reason || '');
                     return {
                       id: idx,
                       symbol,

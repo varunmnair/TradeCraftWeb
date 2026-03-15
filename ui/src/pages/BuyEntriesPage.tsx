@@ -580,10 +580,10 @@ export default function BuyEntriesPage() {
     
     try {
       const daPlanMap = new Map(daPlan.map((row) => [getRowKey(row), row]));
-      const selectedItems = daSelectedRows.map(key => daPlanMap.get(key as string)).filter(Boolean);
+      const selectedItems = daSelectedRows.map(key => daPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
       const response = await api.confirmGTT({
         session_id: sessionId,
-        plan: selectedItems,
+        plan: selectedItems as unknown as Record<string, unknown>[],
       });
       setDaConfirmToken(response);
       setDaConfirmDialogOpen(true);
@@ -603,10 +603,10 @@ export default function BuyEntriesPage() {
     
     try {
       const daPlanMap = new Map(daPlan.map((row) => [getRowKey(row), row]));
-      const selectedItems = daSelectedRows.map(key => daPlanMap.get(key as string)).filter(Boolean);
+      const selectedItems = daSelectedRows.map(key => daPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
       const response = await api.applyGTT({
         session_id: sessionId,
-        plan: selectedItems,
+        plan: selectedItems as unknown as Record<string, unknown>[],
         confirmation_token: daConfirmToken.token,
       });
       startJob(response.job_id);
@@ -656,11 +656,11 @@ export default function BuyEntriesPage() {
     
     try {
       const currentPlanMap = new Map(currentPlan.map((row) => [getRowKey(row), row]));
-      const selectedItems = selectedRows.map(key => currentPlanMap.get(key as string)).filter(Boolean);
+      const selectedItems = selectedRows.map(key => currentPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
       console.log('Confirm - sample item fields:', selectedItems[0] ? Object.keys(selectedItems[0]) : 'none');
       const response = await api.confirmGTT({
         session_id: sessionId,
-        plan: selectedItems,
+        plan: selectedItems as unknown as Record<string, unknown>[],
       });
       setConfirmToken(response);
       setConfirmDialogOpen(true);
@@ -680,10 +680,10 @@ export default function BuyEntriesPage() {
     
     try {
       const currentPlanMap = new Map(currentPlan.map((row) => [getRowKey(row), row]));
-      const selectedItems = selectedRows.map(key => currentPlanMap.get(key as string)).filter(Boolean);
+      const selectedItems = selectedRows.map(key => currentPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
       const response = await api.applyGTT({
         session_id: sessionId,
-        plan: selectedItems,
+        plan: selectedItems as unknown as Record<string, unknown>[],
         confirmation_token: confirmToken.token,
       });
       startJob(response.job_id);
@@ -1006,11 +1006,14 @@ export default function BuyEntriesPage() {
                       const currentPlanMap = new Map(currentPlan.map((row) => [getRowKey(row), row]));
                       const item = currentPlanMap.get(key as string);
                       if (!item) return null;
+                      const price = Number(item.price) || 0;
+                      const qty = Number(item.qty) || 0;
+                      const amount = price && qty ? Math.round(price * qty) : 0;
                       return (
                         <TableRow key={key as string}>
                           <TableCell>{String(item.Symbol || item.symbol || item.tradingsymbol || '-')}</TableCell>
                           <TableCell>{String(item.Entry || item.entry || item.entry1 || item.trigger1 || item.level || '-')}</TableCell>
-                          <TableCell>{item.price && item.qty ? `₹${Math.round(item.price * item.qty).toLocaleString()}` : String(item.original_amount || item.Allocated || item.allocated || '-')}</TableCell>
+                          <TableCell>{amount > 0 ? `₹${amount.toLocaleString()}` : String(item.original_amount || item.Allocated || item.allocated || '-')}</TableCell>
                         </TableRow>
                       );
                     })}

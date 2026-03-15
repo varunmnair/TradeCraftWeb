@@ -19,7 +19,7 @@ const JobsContext = createContext<JobsContextType | undefined>(undefined);
 
 export function JobsProvider({ children }: { children: ReactNode }) {
   const [activeJobs, setActiveJobs] = useState<Map<number, JobStatus>>(new Map());
-  const intervalsRef = useRef<Map<number, NodeJS.Timeout>>(new Map());
+  const intervalsRef = useRef<Map<number, ReturnType<typeof setInterval>>>(new Map());
 
   const pollJob = useCallback((jobId: number) => {
     const fetchJob = async () => {

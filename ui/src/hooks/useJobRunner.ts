@@ -53,7 +53,7 @@ export function useJobRunner(options: UseJobRunnerOptions = {}): UseJobRunnerRet
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [jobProgress, setJobProgress] = useState(0);
   
-  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
@@ -92,15 +92,16 @@ export function useJobRunner(options: UseJobRunnerOptions = {}): UseJobRunnerRet
           setIsError(false);
           setErrorMessage(null);
           if (optionsRef.current.onSuccess) {
-            optionsRef.current.onSuccess(job as JobResult);
+            optionsRef.current.onSuccess(job as unknown as JobResult);
           }
         } else {
           setIsError(true);
           setIsSuccess(false);
-          const errMsg = job.error?.message || 'Job failed';
+          const jobRecord = job as unknown as Record<string, unknown>;
+          const errMsg = (jobRecord?.error as Record<string, unknown>)?.message as string || 'Job failed';
           setErrorMessage(errMsg);
           if (optionsRef.current.onError) {
-            optionsRef.current.onError(errMsg, job as JobResult);
+            optionsRef.current.onError(errMsg, job as unknown as JobResult);
           }
         }
       }

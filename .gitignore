@@ -156,3 +156,5 @@ logs/**/*.json
 **/*cache*.json
 **/*_cache.json
 **/gtt_plan_cache.json
+
+*.tsbuildinfo

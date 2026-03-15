@@ -31,6 +31,7 @@ import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
 
 interface GTTOrder {
+  id?: string | number;
   'GTT ID': string;
   Symbol: string;
   Exchange: string;
@@ -258,7 +259,7 @@ export default function GTTPage() {
     
     try {
       // selectedRows contains row IDs, not indices - find matching orders
-      const selectedOrders = orders.filter(o => selectedRows.includes(o.id));
+      const selectedOrders = orders.filter(o => o.id !== undefined && selectedRows.includes(o.id));
       const orderIds = selectedOrders.map(o => String(o['GTT ID'] || o.Symbol));
       
       const result = await api.deleteGTTOrders(sessionId, orderIds);
@@ -289,7 +290,7 @@ export default function GTTPage() {
     
     try {
       // selectedRows contains row IDs, not indices
-      const selectedOrders = orders.filter(o => selectedRows.includes(o.id));
+      const selectedOrders = orders.filter(o => o.id !== undefined && selectedRows.includes(o.id));
       const orderIds = selectedOrders.map(o => String(o['GTT ID'] || o.Symbol));
       
       const result = await api.adjustGTTOrders(sessionId, orderIds, targetVariance);
