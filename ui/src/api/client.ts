@@ -33,6 +33,8 @@ import {
   UploadHistoryResponse,
   VersionListResponse,
   RestoreVersionResponse,
+  BulkSuggestRevisionResponse,
+  BulkApplyRevisionResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -358,6 +360,30 @@ class ApiClient {
       {
         method: 'PATCH',
         body: JSON.stringify({ levels }),
+      }
+    );
+  }
+
+  async suggestRevisionBulk(symbols: string[], sessionId: string, method?: string, pctAdjustment?: number): Promise<BulkSuggestRevisionResponse> {
+    return this.request<BulkSuggestRevisionResponse>(
+      `/entry-strategies/suggest-revision/bulk?session_id=${sessionId}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          symbols,
+          method: method || 'align_to_cmp',
+          pct_adjustment: pctAdjustment || 5.0,
+        }),
+      }
+    );
+  }
+
+  async applyRevisionBulk(updates: Array<{ symbol: string; levels: Array<{ level_no: number; new_price: number }> }>, sessionId: string): Promise<BulkApplyRevisionResponse> {
+    return this.request<BulkApplyRevisionResponse>(
+      `/entry-strategies/apply-revision/bulk?session_id=${sessionId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ updates }),
       }
     );
   }

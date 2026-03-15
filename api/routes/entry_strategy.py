@@ -28,6 +28,12 @@ from api.schemas.entry_strategy import (
     VersionItem,
     RestoreVersionRequest,
     RestoreVersionResponse,
+    BulkSuggestRevisionRequest,
+    BulkSuggestRevisionResponse,
+    BulkSuggestRevisionItem,
+    BulkApplyRevisionRequest,
+    BulkApplyRevisionResponse,
+    BulkApplyRevisionResult,
 )
 from core.auth.context import UserContext
 from core.runtime.session_registry import SessionRegistry
@@ -974,4 +980,263 @@ def apply_revision(
         symbol=strategy.symbol,
         updated_levels=updated_level_nos,
         updated_at=now,
+    )
+
+
+@router.post("/suggest-revision/bulk", response_model=BulkSuggestRevisionResponse)
+def suggest_revision_bulk(
+    payload: BulkSuggestRevisionRequest,
+    session_id: str = Query(..., description="Active session ID"),
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+    registry: SessionRegistry = Depends(get_session_registry),
+):
+    """Suggest revised entry levels for multiple symbols based on current market price or adjustment."""
+    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+
+    if not payload.symbols:
+        raise HTTPException(status_code=400, detail="No symbols provided")
+
+    if len(payload.symbols) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 symbols allowed per request")
+
+    suggestions: list[BulkSuggestRevisionItem] = []
+    symbols_upper = [s.upper() for s in payload.symbols]
+
+    for symbol in symbols_upper:
+        strategy = (
+            db.query(EntryStrategy)
+            .filter(
+                EntryStrategy.tenant_id == current_user.tenant_id,
+                EntryStrategy.user_id == current_user.user_id,
+                EntryStrategy.broker == broker,
+                EntryStrategy.broker_user_id == broker_user_id,
+                EntryStrategy.symbol == symbol,
+            )
+            .first()
+        )
+
+        if not strategy:
+            suggestions.append(BulkSuggestRevisionItem(
+                symbol=symbol,
+                cmp_price=None,
+                revised_levels=[],
+            ))
+            continue
+
+        levels = (
+            db.query(EntryLevel)
+            .filter(EntryLevel.strategy_id == strategy.id)
+            .order_by(EntryLevel.level_no)
+            .all()
+        )
+
+        if not levels:
+            suggestions.append(BulkSuggestRevisionItem(
+                symbol=symbol,
+                cmp_price=None,
+                revised_levels=[],
+            ))
+            continue
+
+        cmp_price: float | None = None
+        try:
+            from core.services.entry_strategy_service import get_entry_strategy_service
+            service = get_entry_strategy_service()
+            cmp_data = service.get_cmp_for_symbol(strategy.symbol, current_user.tenant_id, current_user.user_id)
+            if cmp_data:
+                cmp_price = cmp_data.get("last_price")
+        except Exception:
+            pass
+
+        revised_levels: list[SuggestedRevision] = []
+        method = payload.method
+        pct_adjustment = payload.pct_adjustment
+
+        if method == "align_to_cmp" and cmp_price:
+            for level in levels:
+                if level.level_no == 1:
+                    suggested = cmp_price
+                    rationale = f"CMP aligned to Level 1 (CMP: ₹{cmp_price:.2f})"
+                else:
+                    gap_pct = (level.level_no - 1) * 5
+                    suggested = cmp_price * (1 - gap_pct / 100)
+                    rationale = f"Level {level.level_no} at {gap_pct}% below CMP"
+                revised_levels.append(
+                    SuggestedRevision(
+                        level_no=level.level_no,
+                        original_price=level.price,
+                        suggested_price=round(suggested, 2),
+                        rationale=rationale,
+                    )
+                )
+        elif method == "volatility_band":
+            for level in levels:
+                suggested = level.price * (1 + (level.level_no - 1) * pct_adjustment / 100)
+                rationale = f"Volatility adjustment: {pct_adjustment}% per level"
+                revised_levels.append(
+                    SuggestedRevision(
+                        level_no=level.level_no,
+                        original_price=level.price,
+                        suggested_price=round(suggested, 2),
+                        rationale=rationale,
+                    )
+                )
+        elif method == "gap_fill":
+            sorted_levels = sorted(levels, key=lambda x: x.price)
+            base_price = sorted_levels[0].price if sorted_levels else 0
+            for level in levels:
+                gap = (level.price - base_price) / len(levels) if len(levels) > 1 else 0
+                suggested = base_price + gap * level.level_no
+                rationale = f"Even gap distribution from base ₹{base_price:.2f}"
+                revised_levels.append(
+                    SuggestedRevision(
+                        level_no=level.level_no,
+                        original_price=level.price,
+                        suggested_price=round(suggested, 2),
+                        rationale=rationale,
+                    )
+                )
+        else:
+            for level in levels:
+                adjustment = pct_adjustment / 100
+                suggested = level.price * (1 - adjustment)
+                rationale = f"Fixed {pct_adjustment}% downward adjustment"
+                revised_levels.append(
+                    SuggestedRevision(
+                        level_no=level.level_no,
+                        original_price=level.price,
+                        suggested_price=round(suggested, 2),
+                        rationale=rationale,
+                    )
+                )
+
+        suggestions.append(BulkSuggestRevisionItem(
+            symbol=strategy.symbol,
+            cmp_price=cmp_price,
+            revised_levels=revised_levels,
+        ))
+
+    return BulkSuggestRevisionResponse(suggestions=suggestions)
+
+
+@router.patch("/apply-revision/bulk", response_model=BulkApplyRevisionResponse)
+def apply_revision_bulk(
+    payload: BulkApplyRevisionRequest,
+    session_id: str = Query(..., description="Active session ID"),
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+    registry: SessionRegistry = Depends(get_session_registry),
+):
+    """Apply selected level revisions to multiple symbols in the database."""
+    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+
+    if not payload.updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
+    if len(payload.updates) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 symbols allowed per request")
+
+    results: list[BulkApplyRevisionResult] = []
+    total_updated = 0
+    total_failed = 0
+
+    for update in payload.updates:
+        symbol = update.symbol.upper()
+
+        strategy = (
+            db.query(EntryStrategy)
+            .filter(
+                EntryStrategy.tenant_id == current_user.tenant_id,
+                EntryStrategy.user_id == current_user.user_id,
+                EntryStrategy.broker == broker,
+                EntryStrategy.broker_user_id == broker_user_id,
+                EntryStrategy.symbol == symbol,
+            )
+            .first()
+        )
+
+        if not strategy:
+            results.append(BulkApplyRevisionResult(
+                symbol=symbol,
+                success=False,
+                error="Strategy not found",
+            ))
+            total_failed += 1
+            continue
+
+        if not update.levels:
+            results.append(BulkApplyRevisionResult(
+                symbol=symbol,
+                success=False,
+                error="No levels provided",
+            ))
+            total_failed += 1
+            continue
+
+        updated_level_nos: list[int] = []
+        now = datetime.utcnow()
+
+        try:
+            old_levels = db.query(EntryLevel).filter(EntryLevel.strategy_id == strategy.id).all()
+
+            for item in update.levels:
+                if item.new_price <= 0:
+                    raise HTTPException(status_code=400, detail=f"Invalid price for level {item.level_no}: must be > 0")
+
+                level = (
+                    db.query(EntryLevel)
+                    .filter(EntryLevel.strategy_id == strategy.id, EntryLevel.level_no == item.level_no)
+                    .first()
+                )
+
+                if not level:
+                    raise HTTPException(status_code=404, detail=f"Level {item.level_no} not found")
+
+                level.price = item.new_price
+                level.updated_at = now
+                updated_level_nos.append(item.level_no)
+
+            strategy.updated_at = now
+
+            if old_levels:
+                _create_version(
+                    db=db,
+                    strategy=strategy,
+                    action="revision_bulk",
+                    changes_summary=f"Bulk updated {len(updated_level_nos)} levels: {updated_level_nos}",
+                    levels=old_levels,
+                )
+
+            db.commit()
+
+            results.append(BulkApplyRevisionResult(
+                symbol=strategy.symbol,
+                success=True,
+                updated_levels=updated_level_nos,
+                updated_at=now,
+            ))
+            total_updated += 1
+
+        except HTTPException:
+            db.rollback()
+            results.append(BulkApplyRevisionResult(
+                symbol=symbol,
+                success=False,
+                error="Validation failed",
+            ))
+            total_failed += 1
+        except Exception as e:
+            db.rollback()
+            results.append(BulkApplyRevisionResult(
+                symbol=symbol,
+                success=False,
+                error=str(e),
+            ))
+            total_failed += 1
+
+    return BulkApplyRevisionResponse(
+        results=results,
+        total_updated=total_updated,
+        total_failed=total_failed,
     )

@@ -88,6 +88,45 @@ class ApplyRevisionResponse(BaseModel):
     updated_at: datetime
 
 
+class BulkSuggestRevisionRequest(BaseModel):
+    symbols: list[str]
+    method: str = "align_to_cmp"
+    pct_adjustment: float = 5.0
+
+
+class BulkSuggestRevisionItem(BaseModel):
+    symbol: str
+    cmp_price: float | None = None
+    revised_levels: list[SuggestedRevision]
+
+
+class BulkSuggestRevisionResponse(BaseModel):
+    suggestions: list[BulkSuggestRevisionItem]
+
+
+class BulkApplyRevisionItem(BaseModel):
+    symbol: str
+    levels: list[ApplyRevisionItem]
+
+
+class BulkApplyRevisionRequest(BaseModel):
+    updates: list[BulkApplyRevisionItem]
+
+
+class BulkApplyRevisionResult(BaseModel):
+    symbol: str
+    success: bool
+    updated_levels: list[int] = []
+    updated_at: datetime | None = None
+    error: str | None = None
+
+
+class BulkApplyRevisionResponse(BaseModel):
+    results: list[BulkApplyRevisionResult]
+    total_updated: int
+    total_failed: int
+
+
 class UploadHistoryItem(BaseModel):
     id: int
     filename: str

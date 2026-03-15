@@ -366,3 +366,88 @@ class TestVersioning:
         )
         assert response.symbol == "RELIANCE"
         assert response.restored_to_version == 2
+
+
+class TestBulkRevisionSchemas:
+    """Tests for bulk revision schemas."""
+
+    def test_bulk_suggest_revision_request(self):
+        """Test bulk suggest revision request schema."""
+        from api.schemas.entry_strategy import BulkSuggestRevisionRequest
+        
+        req = BulkSuggestRevisionRequest(
+            symbols=["RELIANCE", "TCS"],
+            method="align_to_cmp",
+            pct_adjustment=5.0,
+        )
+        assert len(req.symbols) == 2
+        assert req.method == "align_to_cmp"
+        assert req.pct_adjustment == 5.0
+
+    def test_bulk_suggest_revision_request_defaults(self):
+        """Test bulk suggest revision request with default values."""
+        from api.schemas.entry_strategy import BulkSuggestRevisionRequest
+        
+        req = BulkSuggestRevisionRequest(symbols=["RELIANCE"])
+        assert req.method == "align_to_cmp"
+        assert req.pct_adjustment == 5.0
+
+    def test_bulk_apply_revision_request(self):
+        """Test bulk apply revision request schema."""
+        from api.schemas.entry_strategy import BulkApplyRevisionRequest, BulkApplyRevisionItem, ApplyRevisionItem
+        
+        req = BulkApplyRevisionRequest(
+            updates=[
+                BulkApplyRevisionItem(
+                    symbol="RELIANCE",
+                    levels=[ApplyRevisionItem(level_no=1, new_price=2500.0)],
+                ),
+            ]
+        )
+        assert len(req.updates) == 1
+        assert req.updates[0].symbol == "RELIANCE"
+        assert len(req.updates[0].levels) == 1
+
+    def test_bulk_apply_revision_result(self):
+        """Test bulk apply revision result schema."""
+        from api.schemas.entry_strategy import BulkApplyRevisionResult
+        from datetime import datetime
+        
+        result = BulkApplyRevisionResult(
+            symbol="RELIANCE",
+            success=True,
+            updated_levels=[1, 2],
+            updated_at=datetime.now(),
+            error=None,
+        )
+        assert result.success is True
+        assert len(result.updated_levels) == 2
+        assert result.error is None
+
+    def test_bulk_apply_revision_result_failure(self):
+        """Test bulk apply revision result with failure."""
+        from api.schemas.entry_strategy import BulkApplyRevisionResult
+        
+        result = BulkApplyRevisionResult(
+            symbol="INVALID",
+            success=False,
+            error="Strategy not found",
+        )
+        assert result.success is False
+        assert result.error == "Strategy not found"
+
+    def test_bulk_apply_revision_response(self):
+        """Test bulk apply revision response schema."""
+        from api.schemas.entry_strategy import BulkApplyRevisionResponse, BulkApplyRevisionResult
+        
+        resp = BulkApplyRevisionResponse(
+            results=[
+                BulkApplyRevisionResult(symbol="RELIANCE", success=True, updated_levels=[1], updated_at=None, error=None),
+                BulkApplyRevisionResult(symbol="INVALID", success=False, error="Not found"),
+            ],
+            total_updated=1,
+            total_failed=1,
+        )
+        assert resp.total_updated == 1
+        assert resp.total_failed == 1
+        assert len(resp.results) == 2

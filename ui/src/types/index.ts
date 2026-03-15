@@ -255,6 +255,35 @@ export interface ApplyRevisionResponse {
   updated_at: string;
 }
 
+export interface BulkSuggestRevisionItem {
+  symbol: string;
+  cmp_price: number | null;
+  revised_levels: SuggestedRevision[];
+}
+
+export interface BulkSuggestRevisionResponse {
+  suggestions: BulkSuggestRevisionItem[];
+}
+
+export interface BulkApplyRevisionItem {
+  symbol: string;
+  levels: ApplyRevisionItem[];
+}
+
+export interface BulkApplyRevisionResult {
+  symbol: string;
+  success: boolean;
+  updated_levels: number[];
+  updated_at: string | null;
+  error: string | null;
+}
+
+export interface BulkApplyRevisionResponse {
+  results: BulkApplyRevisionResult[];
+  total_updated: number;
+  total_failed: number;
+}
+
 export interface UploadHistoryItem {
   id: number;
   filename: string;

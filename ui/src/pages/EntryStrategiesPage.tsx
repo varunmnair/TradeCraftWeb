@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import {
   Box,
   Typography,
@@ -22,13 +21,14 @@ import {
   Download as DownloadIcon,
   Refresh as RefreshIcon,
   Delete as DeleteIcon,
+  Edit as EditIcon,
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { EntryStrategySummary } from '../types';
 import { useSession } from '../context/SessionContext';
+import { BulkRevisionModal } from '../components/BulkRevisionModal';
 
 export default function EntryStrategiesPage() {
-  const navigate = useNavigate();
   const { sessionId } = useSession();
   const [strategies, setStrategies] = useState<EntryStrategySummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -38,6 +38,7 @@ export default function EntryStrategiesPage() {
   const [fileInputKey, setFileInputKey] = useState(0);
   const [selected, setSelected] = useState<string[]>([]);
   const [deleting, setDeleting] = useState(false);
+  const [revisionModalOpen, setRevisionModalOpen] = useState(false);
 
   useEffect(() => {
     if (sessionId) {
@@ -105,6 +106,19 @@ export default function EntryStrategiesPage() {
     } finally {
       setDeleting(false);
     }
+  };
+
+  const handleOpenRevisionModal = () => {
+    if (selected.length === 0) return;
+    setRevisionModalOpen(true);
+  };
+
+  const handleRevisionModalClose = () => {
+    setRevisionModalOpen(false);
+  };
+
+  const handleRevisionApplied = () => {
+    fetchStrategies();
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -239,6 +253,15 @@ export default function EntryStrategiesPage() {
                 {selected.length} selected
               </MuiTypography>
               <Button
+                color="primary"
+                variant="contained"
+                startIcon={<EditIcon />}
+                onClick={handleOpenRevisionModal}
+                sx={{ mr: 1 }}
+              >
+                Revise Entry Levels
+              </Button>
+              <Button
                 color="error"
                 startIcon={<DeleteIcon />}
                 onClick={handleDeleteSelected}
@@ -273,7 +296,6 @@ export default function EntryStrategiesPage() {
                   <TableCell>DA E3</TableCell>
                     <TableCell>DA Offset</TableCell>
                     <TableCell>Updated</TableCell>
-                    <TableCell>Action</TableCell>
                   </TableRow>
               </TableHead>
               <TableBody>
@@ -290,24 +312,36 @@ export default function EntryStrategiesPage() {
                         onChange={() => handleSelectOne(strategy.symbol)}
                       />
                     </TableCell>
-                    <TableCell>
-                      {new Date(strategy.updated_at).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        onClick={() => navigate(`/entry-strategies/${encodeURIComponent(strategy.symbol)}`)}
-                      >
-                        Revise
-                      </Button>
-                    </TableCell>
+                    <TableCell>{strategy.symbol}</TableCell>
+                    <TableCell>{strategy.allocated != null ? `₹${strategy.allocated.toLocaleString()}` : '-'}</TableCell>
+                    <TableCell>{strategy.quality || '-'}</TableCell>
+                    <TableCell>{strategy.exchange || '-'}</TableCell>
+                    <TableCell>{strategy.entry1 != null ? `₹${strategy.entry1.toFixed(2)}` : '-'}</TableCell>
+                    <TableCell>{strategy.entry2 != null ? `₹${strategy.entry2.toFixed(2)}` : '-'}</TableCell>
+                    <TableCell>{strategy.entry3 != null ? `₹${strategy.entry3.toFixed(2)}` : '-'}</TableCell>
+                    <TableCell>{strategy.da_enabled ? 'Y' : 'N'}</TableCell>
+                    <TableCell>{strategy.da_legs ?? '-'}</TableCell>
+                    <TableCell>{strategy.da_e1_buyback ?? '-'}</TableCell>
+                    <TableCell>{strategy.da_e2_buyback ?? '-'}</TableCell>
+                    <TableCell>{strategy.da_e3_buyback ?? '-'}</TableCell>
+                    <TableCell>{strategy.da_trigger_offset ?? '-'}</TableCell>
+                    <TableCell>{new Date(strategy.updated_at).toLocaleDateString()}</TableCell>
                   </TableRow>
-              ))}
-            </TableBody>
+                ))}
+              </TableBody>
           </Table>
           </TableContainer>
         </Paper>
+      )}
+
+      {sessionId && (
+        <BulkRevisionModal
+          open={revisionModalOpen}
+          onClose={handleRevisionModalClose}
+          selectedSymbols={selected}
+          sessionId={sessionId}
+          onApply={handleRevisionApplied}
+        />
       )}
     </Box>
   );
