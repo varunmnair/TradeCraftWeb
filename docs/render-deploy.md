@@ -23,12 +23,34 @@ This guide covers deploying TradeCraftX to Render.com with ephemeral SQLite.
 
 Add these environment variables in Render dashboard:
 
+### Required Security Variables
+
 | Variable | Value | Description |
 |----------|-------|-------------|
 | `APP_MODE` | `prod` | Run in production mode |
 | `DATABASE_URL` | `sqlite:////app/data/tradecraftx.db` | Ephemeral SQLite path |
 | `JWT_SECRET` | `<generate-random-32-chars>` | Production JWT secret (min 32 chars) |
 | `TOKEN_ENCRYPTION_KEY` | `<generate-base64-32-byte-key>` | Encryption key for tokens |
+| `DEV_MODE` | `false` | **MUST be false in production** |
+| `BOOTSTRAP_ADMIN_EMAIL` | `admin@yourdomain.com` | First admin user email |
+
+### Optional: Broker Credentials (for trading)
+
+| Variable | Value |
+|----------|-------|
+| `KITE_API_KEY` | Your Zerodha API key |
+| `KITE_API_SECRET` | Your Zerodha API secret |
+| `KITE_REDIRECT_URI` | `https://your-service.onrender.com/brokers/zerodha/callback` |
+| `UPSTOX_API_KEY` | Your Upstox API key |
+| `UPSTOX_API_SECRET` | Your Upstox API secret |
+| `UPSTOX_REDIRECT_URI` | `https://your-service.onrender.com/brokers/upstox/callback` |
+
+### Optional: AI Features
+
+| Variable | Value |
+|----------|-------|
+| `GEMINI_API_KEY` | Your Google Gemini API key |
+| `GROQ_API_KEY` | Your Groq API key |
 
 ### Generating Secrets
 
@@ -128,5 +150,6 @@ curl -X POST https://your-service.onrender.com/auth/login \
 - [ ] JWT_SECRET is long (32+ chars)
 - [ ] TOKEN_ENCRYPTION_KEY is set
 - [ ] APP_MODE=prod
-- [ ] DEV_MODE not set (backward compat override)
-- [ ] Allowed origins configured for CORS
+- [ ] DEV_MODE=false (NOT true)
+- [ ] BOOTSTRAP_ADMIN_EMAIL is set
+- [ ] Broker redirect URIs updated to Render URL (if using broker features)

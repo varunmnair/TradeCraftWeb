@@ -127,10 +127,8 @@ def upstox_callback(
     state_service: BrokerAuthStateService = Depends(get_broker_auth_state_service),
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     session_manager: SessionManager = Depends(get_session_manager),
-    current_user: UserContext = Depends(get_current_user),
 ):
-    if config.IS_DEV and not current_user.user_id:
-        return _render_html("Authorization failed: DEV user missing", success=False)
+    # State contains tenant_id, user_id, connection_id - no auth needed
     try:
         state_info = state_service.consume_state(state)
     except ValueError as exc:
