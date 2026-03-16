@@ -29,7 +29,7 @@ export default function DashboardPage() {
     refreshUser();
     const interval = setInterval(() => setLastRefresh(new Date()), 60000);
     return () => clearInterval(interval);
-  }, [refreshUser]);
+  }, []);
 
   return (
     <Box>

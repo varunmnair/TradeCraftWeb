@@ -79,20 +79,20 @@ class GTTManager:
     def analyze_gtt_buy_orders(self) -> List[Dict]:
         try:
             gtts = self.session.get_gtt_cache()
-            logging.info(f"=== GTT Cache: {len(gtts)} GTTs total ===")
+            logging.debug(f"=== GTT Cache: {len(gtts)} GTTs total ===")
             
             orders = []
 
             for i, g in enumerate(gtts):
                 details = self._parse_gtt(g)
-                logging.info(f"GTT[{i}] parsed: status={details.get('status')}, type={details.get('transaction_type')}, symbol={details.get('symbol')}, exchange={details.get('exchange')}, trigger={details.get('trigger')}")
+                logging.debug(f"GTT[{i}] parsed: status={details.get('status')}, type={details.get('transaction_type')}, symbol={details.get('symbol')}, exchange={details.get('exchange')}, trigger={details.get('trigger')}")
                 
                 if details.get("status") != "active":
-                    logging.info(f"  -> Skipped: status is {details.get('status')}")
+                    logging.debug(f"  -> Skipped: status is {details.get('status')}")
                     continue
                 
                 if details.get("transaction_type") != self.broker.TRANSACTION_TYPE_BUY:
-                    logging.info(f"  -> Skipped: transaction_type={details.get('transaction_type')} (not BUY)")
+                    logging.debug(f"  -> Skipped: transaction_type={details.get('transaction_type')} (not BUY)")
                     continue
 
                 symbol = details.get("symbol")
@@ -100,11 +100,11 @@ class GTTManager:
                 trigger = details.get("trigger")
 
                 if not symbol or not exchange or trigger is None:
-                    logging.info(f"  -> Skipped: missing data - symbol={symbol}, exchange={exchange}, trigger={trigger}")
+                    logging.debug(f"  -> Skipped: missing data - symbol={symbol}, exchange={exchange}, trigger={trigger}")
                     continue
 
                 ltp = self.cmp_manager.get_cmp(exchange, symbol)
-                logging.info(f"  -> CMP for {symbol}: {ltp}")
+                logging.debug(f"  -> CMP for {symbol}: {ltp}")
                 if ltp is None:
                     logging.warning(f"  -> Skipping {symbol} due to missing LTP.")
                     continue
@@ -127,7 +127,7 @@ class GTTManager:
                     }
                 )
 
-            logging.info(f"=== Returning {len(orders)} GTT orders after filtering ===")
+            logging.debug(f"=== Returning {len(orders)} GTT orders after filtering ===")
             return sorted(orders, key=lambda x: x["Variance (%)"])
 
         except Exception as e:
@@ -275,7 +275,7 @@ class GTTManager:
         deleted_ids = []
         try:
             gtts = self.session.get_gtt_cache()
-            logging.info(f"delete_gtts_by_ids: received ids={gtt_ids}, cache has {len(gtts)} GTTs")
+            logging.debug(f"delete_gtts_by_ids: received ids={gtt_ids}, cache has {len(gtts)} GTTs")
             ids_to_delete_set = set(str(gid) for gid in gtt_ids if gid)
             
             # Also build a symbol-to-GTT mapping for fallback
@@ -304,14 +304,14 @@ class GTTManager:
                     logging.warning(f"Error parsing GTT for ID match: {e}")
                     continue
             
-            logging.info(f"delete_gtts_by_ids: matched {len(gtts_to_process)} GTTs by ID")
+            logging.debug(f"delete_gtts_by_ids: matched {len(gtts_to_process)} GTTs by ID")
             
             # If no matches by ID, try matching by symbol
             if not gtts_to_process:
                 for gid in gtt_ids:
                     if gid in symbol_to_gtt:
                         gtts_to_process.extend(symbol_to_gtt[gid])
-                logging.info(f"delete_gtts_by_ids: matched {len(gtts_to_process)} GTTs by symbol")
+                logging.debug(f"delete_gtts_by_ids: matched {len(gtts_to_process)} GTTs by symbol")
 
             for g in gtts_to_process:
                 details = self._parse_gtt(g)

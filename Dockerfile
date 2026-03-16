@@ -22,7 +22,8 @@ FROM python:3.11-slim AS backend
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8000
+    PORT=8000 \
+    APP_MODE=prod
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \

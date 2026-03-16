@@ -5,11 +5,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    command: bash -c "alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8000"
+    command: sh -c "python -m alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8000"
     environment:
-      - DATABASE_URL=sqlite:///./storage/dev.db
+      - APP_MODE=prod
+      - DATABASE_URL=sqlite:////app/data/tradecraftx.db
     volumes:
-      - .:/app
-      - ./storage:/app/storage
+      - app_data:/app/data
     ports:
       - "8000:8000"
+
+volumes:
+  app_data:

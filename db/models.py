@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, func, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from db.database import Base
@@ -27,12 +27,46 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     email = Column(String(255), nullable=False, unique=True)
-    hashed_password = Column(String(255), nullable=False, default="disabled")
+    first_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
+    phone = Column(String(20), nullable=True)
     role = Column(String(32), nullable=False, default="user")
+    trading_enabled = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     tenant = relationship("Tenant", back_populates="users")
     broker_connections = relationship("BrokerConnection", back_populates="user", cascade="all, delete-orphan")
+    identities = relationship("UserIdentity", back_populates="user", cascade="all, delete-orphan")
+    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
+
+
+class UserIdentity(Base):
+    __tablename__ = "user_identities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    provider = Column(String(50), nullable=False, default="password")
+    password_hash = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="identities")
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String(255), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    ip_address = Column(String(45), nullable=True)
+
+    user = relationship("User", back_populates="refresh_tokens")
 
 
 class BrokerConnection(Base):
@@ -41,7 +75,7 @@ class BrokerConnection(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    broker_name = Column(String(50), nullable=False)
+    broker_name = Column(String(50), nullable=False)  # 'upstox' or 'zerodha'
     broker_user_id = Column(String(255), nullable=True)
     encrypted_tokens = Column(LargeBinary, nullable=True)
     metadata_json = Column(Text, nullable=True)
@@ -50,6 +84,10 @@ class BrokerConnection(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     user = relationship("User", back_populates="broker_connections")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "broker_name", "broker_user_id", name="uq_user_broker_broker_user_id"),
+    )
 
     def metadata_dict(self):
         try:
@@ -83,10 +121,13 @@ class AuditEvent(Base):
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     action = Column(String(255), nullable=False)
-    entity_type = Column(String(100), nullable=False)
-    entity_id = Column(String(255), nullable=True)
-    request_json = Column(Text, nullable=True)
-    response_json = Column(Text, nullable=True)
+    resource_type = Column(String(100), nullable=False)
+    resource_id = Column(String(255), nullable=True)
+    broker_connection_id = Column(Integer, ForeignKey("broker_connections.id"), nullable=True)
+    metadata_json = Column(Text, nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    request_id = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

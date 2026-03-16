@@ -36,7 +36,6 @@ import {
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { EntryStrategyFull, SuggestRevisionResponse, VersionItem } from '../types';
-import { useSession } from '../context/SessionContext';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -56,7 +55,6 @@ function TabPanel(props: TabPanelProps) {
 export default function StrategyDetailPage() {
   const { symbol } = useParams<{ symbol: string }>();
   const navigate = useNavigate();
-  const { sessionId } = useSession();
   const [strategy, setStrategy] = useState<EntryStrategyFull | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -85,10 +83,10 @@ export default function StrategyDetailPage() {
   const [applySuccess, setApplySuccess] = useState('');
 
   useEffect(() => {
-    if (symbol && sessionId) {
+    if (symbol) {
       fetchStrategy();
     }
-  }, [symbol, sessionId]);
+  }, [symbol]);
 
   useEffect(() => {
     if (tabValue === 1 && symbol) {
@@ -97,10 +95,10 @@ export default function StrategyDetailPage() {
   }, [tabValue, symbol]);
 
   const fetchStrategy = async () => {
-    if (!symbol || !sessionId) return;
+    if (!symbol) return;
     setLoading(true);
     try {
-      const data = await api.getEntryStrategy(decodeURIComponent(symbol), sessionId);
+      const data = await api.getEntryStrategy(decodeURIComponent(symbol));
       setStrategy(data);
       setError('');
     } catch (err) {
@@ -111,11 +109,11 @@ export default function StrategyDetailPage() {
   };
 
   const fetchVersionHistory = async () => {
-    if (!symbol || !sessionId) return;
+    if (!symbol) return;
     setVersionsLoading(true);
     setVersionsError('');
     try {
-      const data = await api.getVersionHistory(decodeURIComponent(symbol), sessionId);
+      const data = await api.getVersionHistory(decodeURIComponent(symbol));
       setVersions(data.versions);
     } catch (err) {
       setVersionsError(err instanceof Error ? err.message : 'Failed to load version history');
@@ -165,7 +163,7 @@ export default function StrategyDetailPage() {
   };
 
   const fetchRevisionSuggestions = async (method?: string, pct?: number) => {
-    if (!symbol || !sessionId) return;
+    if (!symbol) return;
     setRevisionLoading(true);
     setRevisionError('');
     try {
@@ -173,7 +171,6 @@ export default function StrategyDetailPage() {
       const effectivePct = pct !== undefined ? pct : pctAdjustment;
       const data = await api.suggestRevision(
         decodeURIComponent(symbol), 
-        sessionId, 
         effectiveMethod, 
         effectivePct
       );
@@ -196,7 +193,7 @@ export default function StrategyDetailPage() {
   };
 
   const handleApplyRevision = async () => {
-    if (!symbol || !sessionId || selectedLevels.size === 0) return;
+    if (!symbol || selectedLevels.size === 0) return;
     setApplyLoading(true);
     setApplyError('');
     setApplySuccess('');
@@ -208,7 +205,7 @@ export default function StrategyDetailPage() {
           new_price: revision?.suggested_price || 0,
         };
       });
-      const result = await api.applyRevision(decodeURIComponent(symbol), sessionId, levelsToUpdate);
+      const result = await api.applyRevision(decodeURIComponent(symbol), levelsToUpdate);
       setApplySuccess(`Updated ${result.updated_levels.length} levels successfully`);
       setTimeout(() => {
         handleCloseRevision();
@@ -227,11 +224,11 @@ export default function StrategyDetailPage() {
   };
 
   const handleConfirmRestore = async () => {
-    if (!symbol || !sessionId || !selectedVersion) return;
+    if (!symbol || !selectedVersion) return;
     setRestoreLoading(true);
     setRestoreSuccess('');
     try {
-      const result = await api.restoreVersion(decodeURIComponent(symbol), sessionId, selectedVersion.id);
+      const result = await api.restoreVersion(decodeURIComponent(symbol), selectedVersion.id);
       setRestoreSuccess(`Restored to version ${result.restored_to_version}`);
       setTimeout(() => {
         setRestoreDialogOpen(false);

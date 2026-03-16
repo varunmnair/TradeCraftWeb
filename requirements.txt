@@ -14,5 +14,6 @@ pytest
 email-validator
 cryptography
 python-jose[cryptography]
-passlib[bcrypt]
+passlib[argon2]
+argon2-cffi
 python-multipart

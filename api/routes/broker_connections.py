@@ -34,7 +34,7 @@ def create_connection(
     connection = service.create_connection(
         tenant_id=current_user.tenant_id,
         user_id=target_user_id,
-        broker_name=payload.broker_name,
+        broker=payload.broker_name,
         tokens=payload.tokens,
         metadata=payload.metadata,
     )

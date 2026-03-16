@@ -41,24 +41,22 @@ export default function EntryStrategiesPage() {
   const [revisionModalOpen, setRevisionModalOpen] = useState(false);
 
   useEffect(() => {
-    if (sessionId) {
-      fetchStrategies();
-    }
-  }, [sessionId]);
+    fetchStrategies();
+  }, []);
 
   const fetchStrategies = async () => {
-    if (!sessionId) {
-      setError('No active session. Please start a session first.');
-      return;
-    }
     setLoading(true);
     try {
-      const data = await api.listEntryStrategies(sessionId);
+      const data = await api.listEntryStrategies();
       setStrategies(data.strategies);
       setSelected([]);
       setError('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load strategies');
+      const errMsg = err instanceof Error ? err.message : 'Failed to load strategies';
+      setError(errMsg);
+      if (errMsg.includes('No active broker connection')) {
+        setStrategies([]);
+      }
     } finally {
       setLoading(false);
     }
@@ -82,10 +80,6 @@ export default function EntryStrategiesPage() {
 
   const handleDeleteSelected = async () => {
     if (selected.length === 0) return;
-    if (!sessionId) {
-      setError('No active session. Please start a session first.');
-      return;
-    }
     
     if (!window.confirm(`Delete ${selected.length} selected strategy(ies)?`)) {
       return;
@@ -95,7 +89,7 @@ export default function EntryStrategiesPage() {
     setError('');
     
     try {
-      const result = await api.bulkDeleteEntryStrategies(selected, sessionId);
+      const result = await api.bulkDeleteEntryStrategies(selected);
       setSuccess(`Deleted ${result.deleted_count} strategy(ies)`);
       if (result.not_found.length > 0) {
         setError(`Not found: ${result.not_found.join(', ')}`);
@@ -124,17 +118,13 @@ export default function EntryStrategiesPage() {
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!sessionId) {
-      setError('No active session. Please start a session first.');
-      return;
-    }
 
     setUploading(true);
     setError('');
     setSuccess('');
 
     try {
-      const result = await api.uploadEntryStrategyCSV(file, sessionId);
+      const result = await api.uploadEntryStrategyCSV(file);
       let msg = `Upload complete: ${result.created_count} created, ${result.updated_count} updated`;
       if (result.errors.length > 0) {
         msg += `. ${result.errors.length} errors`;
@@ -334,12 +324,11 @@ export default function EntryStrategiesPage() {
         </Paper>
       )}
 
-      {sessionId && (
+      {revisionModalOpen && (
         <BulkRevisionModal
           open={revisionModalOpen}
           onClose={handleRevisionModalClose}
           selectedSymbols={selected}
-          sessionId={sessionId}
           onApply={handleRevisionApplied}
         />
       )}

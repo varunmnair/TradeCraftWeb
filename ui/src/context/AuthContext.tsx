@@ -1,12 +1,12 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { MeResponse, AuthUser } from '../types';
+import { MeResponse } from '../types';
 import { api } from '../api/client';
 
 interface AuthContextType {
-  user: AuthUser | null;
+  user: MeResponse | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (tenantName: string, email: string, password: string) => Promise<void>;
+  register: (email: string, password: string, firstName?: string, lastName?: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -14,17 +14,17 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
+  const [user, setUser] = useState<MeResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refreshUser = async () => {
     try {
       const userData = await api.me();
       setUser(userData);
-      localStorage.setItem('user', JSON.stringify(userData));
+      sessionStorage.setItem('user', JSON.stringify(userData));
     } catch {
       setUser(null);
-      localStorage.removeItem('user');
+      sessionStorage.removeItem('user');
     }
   };
 
@@ -33,8 +33,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await refreshUser();
   };
 
-  const register = async (tenantName: string, email: string, password: string) => {
-    await api.register({ tenant_name: tenantName, email, password });
+  const register = async (email: string, password: string, firstName?: string, lastName?: string) => {
+    await api.register({ email, password, first_name: firstName, last_name: lastName });
   };
 
   const logout = async () => {
@@ -42,7 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await api.logout();
     } finally {
       setUser(null);
-      localStorage.removeItem('user');
+      sessionStorage.removeItem('user');
     }
   };
 

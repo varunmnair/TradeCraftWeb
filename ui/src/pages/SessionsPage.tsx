@@ -21,7 +21,7 @@ import {
 import { PlayArrow as StartIcon, Refresh as RefreshIcon, Check as CheckIcon, Warning as WarningIcon } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
-import { BrokerConnectionResponse, SessionResponse, UpstoxConnectionStatus, ZerodhaConnectionStatus } from '../types';
+import { BrokerConnectionResponse, SessionResponse, UpstoxConnectionStatus, ZerodhaConnectionStatus, ActiveConnectionResponse } from '../types';
 
 const SESSION_STORAGE_KEY = 'tradecraftx_session_id';
 
@@ -39,6 +39,7 @@ export default function SessionsPage() {
     zerodha: Map<number, ZerodhaConnectionStatus>;
   }>({ upstox: new Map(), zerodha: new Map() });
   const [currentSession, setCurrentSession] = useState<SessionResponse | null>(null);
+  const [activeConnection, setActiveConnection] = useState<ActiveConnectionResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [starting, setStarting] = useState(false);
@@ -94,6 +95,14 @@ export default function SessionsPage() {
     try {
       const conns = await api.listBrokerConnections();
       setConnections(conns);
+      
+      // Fetch active connection
+      try {
+        const activeConn = await api.getActiveConnection();
+        setActiveConnection(activeConn);
+      } catch (err) {
+        console.warn('No active connection:', err);
+      }
       
       // Fetch status for each connection
       const upstoxStatusMap = new Map<number, UpstoxConnectionStatus>();
@@ -208,6 +217,9 @@ export default function SessionsPage() {
         tenant_id: session.tenant_id,
       });
       localStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
+      
+      // Set active broker connection for all trading data endpoints
+      await api.setActiveConnection(selectedTradingConnectionId as number);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start session');
     } finally {

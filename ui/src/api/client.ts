@@ -35,23 +35,26 @@ import {
   RestoreVersionResponse,
   BulkSuggestRevisionResponse,
   BulkApplyRevisionResponse,
+  ActiveConnectionResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 class ApiClient {
   private token: string | null = null;
+  private isRefreshing = false;
+  private refreshSubscribers: ((token: string) => void)[] = [];
 
   constructor() {
-    this.token = localStorage.getItem('access_token');
+    this.token = sessionStorage.getItem('access_token');
   }
 
   setToken(token: string | null) {
     this.token = token;
     if (token) {
-      localStorage.setItem('access_token', token);
+      sessionStorage.setItem('access_token', token);
     } else {
-      localStorage.removeItem('access_token');
+      sessionStorage.removeItem('access_token');
     }
   }
 
@@ -59,9 +62,19 @@ class ApiClient {
     return this.token;
   }
 
+  private subscribeToRefresh(callback: (token: string) => void) {
+    this.refreshSubscribers.push(callback);
+  }
+
+  private onTokenRefreshed(token: string) {
+    this.refreshSubscribers.forEach(callback => callback(token));
+    this.refreshSubscribers = [];
+  }
+
   private async request<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit & { retryRefresh?: boolean } = {},
+    retryRefresh = true
   ): Promise<T> {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
@@ -75,12 +88,46 @@ class ApiClient {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
       ...options,
       headers,
+      credentials: 'include',
     });
 
-    if (response.status === 401) {
-      this.setToken(null);
-      window.location.href = '/login';
-      throw new Error('Unauthorized');
+    if (response.status === 401 && retryRefresh) {
+      if (this.isRefreshing) {
+        return new Promise((resolve, reject) => {
+          this.subscribeToRefresh((token: string) => {
+            this.request<T>(endpoint, { ...options, retryRefresh: false })
+              .then(resolve)
+              .catch(reject);
+          });
+        });
+      }
+
+      this.isRefreshing = true;
+      
+      try {
+        const refreshResponse = await fetch(`${API_BASE_URL}/auth/refresh`, {
+          method: 'POST',
+          credentials: 'include',
+        });
+
+        if (refreshResponse.ok) {
+          const data: AuthResponse = await refreshResponse.json();
+          this.setToken(data.access_token);
+          this.isRefreshing = false;
+          this.onTokenRefreshed(data.access_token);
+          
+          return this.request<T>(endpoint, { ...options, retryRefresh: false });
+        } else {
+          this.setToken(null);
+          window.location.href = '/login';
+          throw new Error('Session expired');
+        }
+      } catch (error) {
+        this.isRefreshing = false;
+        this.setToken(null);
+        window.location.href = '/login';
+        throw error;
+      }
     }
 
     if (!response.ok) {
@@ -100,7 +147,6 @@ class ApiClient {
     return response.json();
   }
 
-  // Auth
   async register(data: RegisterRequest): Promise<MeResponse> {
     return this.request<MeResponse>('/auth/register', {
       method: 'POST',
@@ -112,21 +158,23 @@ class ApiClient {
     const response = await this.request<AuthResponse>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(data),
-    });
+    }, false);
     this.setToken(response.access_token);
     return response;
   }
 
   async logout(): Promise<void> {
-    await this.request('/auth/logout', { method: 'POST' });
-    this.setToken(null);
+    try {
+      await this.request('/auth/logout', { method: 'POST' }, false);
+    } finally {
+      this.setToken(null);
+    }
   }
 
   async me(): Promise<MeResponse> {
     return this.request<MeResponse>('/auth/me');
   }
 
-  // Broker Connections
   async listBrokerConnections(userId?: number): Promise<BrokerConnectionResponse[]> {
     const params = userId ? `?user_id=${userId}` : '';
     return this.request<BrokerConnectionResponse[]>(`/broker-connections${params}`);
@@ -159,7 +207,6 @@ class ApiClient {
     return this.request<ZerodhaStatusResponse>(`/brokers/zerodha/status${params}`);
   }
 
-  // Sessions
   async createSession(data: SessionCreate): Promise<SessionResponse> {
     return this.request<SessionResponse>('/api/v1/sessions', {
       method: 'POST',
@@ -184,7 +231,17 @@ class ApiClient {
     });
   }
 
-  // Jobs
+  async setActiveConnection(brokerConnectionId: number): Promise<ActiveConnectionResponse> {
+    return this.request<ActiveConnectionResponse>('/session/active-connection', {
+      method: 'POST',
+      body: JSON.stringify({ broker_connection_id: brokerConnectionId }),
+    });
+  }
+
+  async getActiveConnection(): Promise<ActiveConnectionResponse> {
+    return this.request<ActiveConnectionResponse>('/session/active-connection');
+  }
+
   async getJob(jobId: number): Promise<JobStatusResponse> {
     return this.request<JobStatusResponse>(`/jobs/${jobId}`);
   }
@@ -194,7 +251,6 @@ class ApiClient {
     return this.request<JobListResponse>(`/jobs${params}`);
   }
 
-  // Holdings
   async analyzeHoldings(data: HoldingsAnalyzeRequest): Promise<JobQueuedResponse> {
     return this.request<JobQueuedResponse>('/holdings/analyze', {
       method: 'POST',
@@ -206,7 +262,6 @@ class ApiClient {
     return this.request<HoldingsLatestResponse>(`/holdings/${sessionId}/latest`);
   }
 
-  // Plan
   async generatePlan(data: PlanGenerateRequest): Promise<JobQueuedResponse> {
     return this.request<JobQueuedResponse>('/plan/generate', {
       method: 'POST',
@@ -218,7 +273,6 @@ class ApiClient {
     return this.request<PlanLatestResponse>(`/plan/${sessionId}/latest`);
   }
 
-  // Dynamic Averaging
   async generateDynamicAvgPlan(sessionId: string): Promise<JobQueuedResponse> {
     return this.request<JobQueuedResponse>('/dynamic-avg/generate', {
       method: 'POST',
@@ -230,7 +284,6 @@ class ApiClient {
     return this.request<PlanLatestResponse>(`/dynamic-avg/${sessionId}/latest`);
   }
 
-  // Risk
   async applyRisk(sessionId: string, plan: Record<string, unknown>[]): Promise<JobQueuedResponse> {
     return this.request<JobQueuedResponse>('/risk/apply', {
       method: 'POST',
@@ -242,7 +295,6 @@ class ApiClient {
     return this.request<PlanLatestResponse>(`/risk/${sessionId}/latest`);
   }
 
-  // GTT
   async getGTTOrders(sessionId: string): Promise<GTTOrdersResponse> {
     return this.request<GTTOrdersResponse>(`/gtt/${sessionId}`);
   }
@@ -289,29 +341,28 @@ class ApiClient {
     });
   }
 
-  // Entry Strategies
-  async listEntryStrategies(sessionId: string): Promise<EntryStrategyListResponse> {
-    return this.request<EntryStrategyListResponse>(`/entry-strategies?session_id=${sessionId}`);
+  async listEntryStrategies(): Promise<EntryStrategyListResponse> {
+    return this.request<EntryStrategyListResponse>(`/entry-strategies`);
   }
 
-  async getEntryStrategy(symbol: string, sessionId: string): Promise<EntryStrategyFull> {
-    return this.request<EntryStrategyFull>(`/entry-strategies/${encodeURIComponent(symbol)}?session_id=${sessionId}`);
+  async getEntryStrategy(symbol: string): Promise<EntryStrategyFull> {
+    return this.request<EntryStrategyFull>(`/entry-strategies/${encodeURIComponent(symbol)}`);
   }
 
-  async deleteEntryStrategy(symbol: string, sessionId: string): Promise<{ deleted: string; success: boolean }> {
-    return this.request<{ deleted: string; success: boolean }>(`/entry-strategies/${encodeURIComponent(symbol)}?session_id=${sessionId}`, {
+  async deleteEntryStrategy(symbol: string): Promise<{ deleted: string; success: boolean }> {
+    return this.request<{ deleted: string; success: boolean }>(`/entry-strategies/${encodeURIComponent(symbol)}`, {
       method: 'DELETE',
     });
   }
 
-  async bulkDeleteEntryStrategies(symbols: string[], sessionId: string): Promise<{ deleted_count: number; not_found: string[]; success: boolean }> {
-    return this.request<{ deleted_count: number; not_found: string[]; success: boolean }>(`/entry-strategies/bulk-delete?session_id=${sessionId}`, {
+  async bulkDeleteEntryStrategies(symbols: string[]): Promise<{ deleted_count: number; not_found: string[]; success: boolean }> {
+    return this.request<{ deleted_count: number; not_found: string[]; success: boolean }>(`/entry-strategies/bulk-delete`, {
       method: 'POST',
       body: JSON.stringify(symbols),
     });
   }
 
-  async uploadEntryStrategyCSV(file: File, sessionId: string): Promise<EntryStrategyUploadResponse> {
+  async uploadEntryStrategyCSV(file: File): Promise<EntryStrategyUploadResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -320,7 +371,7 @@ class ApiClient {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
-    const response = await fetch(`${API_BASE_URL}/entry-strategies/upload-csv?session_id=${sessionId}`, {
+    const response = await fetch(`${API_BASE_URL}/entry-strategies/upload-csv`, {
       method: 'POST',
       headers,
       body: formData,
@@ -343,20 +394,19 @@ class ApiClient {
     return this.request<Record<string, unknown>>('/entry-strategies/template.csv');
   }
 
-  async suggestRevision(symbol: string, sessionId: string, method?: string, pctAdjustment?: number): Promise<SuggestRevisionResponse> {
+  async suggestRevision(symbol: string, method?: string, pctAdjustment?: number): Promise<SuggestRevisionResponse> {
     const params = new URLSearchParams();
-    params.append('session_id', sessionId);
     if (method) params.append('method', method);
     if (pctAdjustment !== undefined) params.append('pct_adjustment', String(pctAdjustment));
     const query = params.toString();
     return this.request<SuggestRevisionResponse>(
-      `/entry-strategies/${encodeURIComponent(symbol)}/suggest-revision?${query}`
+      `/entry-strategies/${encodeURIComponent(symbol)}/suggest-revision${query ? '?' + query : ''}`
     );
   }
 
-  async applyRevision(symbol: string, sessionId: string, levels: Array<{ level_no: number; new_price: number }>): Promise<ApplyRevisionResponse> {
+  async applyRevision(symbol: string, levels: Array<{ level_no: number; new_price: number }>): Promise<ApplyRevisionResponse> {
     return this.request<ApplyRevisionResponse>(
-      `/entry-strategies/${encodeURIComponent(symbol)}/apply-revision?session_id=${sessionId}`,
+      `/entry-strategies/${encodeURIComponent(symbol)}/apply-revision`,
       {
         method: 'PATCH',
         body: JSON.stringify({ levels }),
@@ -364,9 +414,9 @@ class ApiClient {
     );
   }
 
-  async suggestRevisionBulk(symbols: string[], sessionId: string, method?: string, pctAdjustment?: number): Promise<BulkSuggestRevisionResponse> {
+  async suggestRevisionBulk(symbols: string[], method?: string, pctAdjustment?: number): Promise<BulkSuggestRevisionResponse> {
     return this.request<BulkSuggestRevisionResponse>(
-      `/entry-strategies/suggest-revision/bulk?session_id=${sessionId}`,
+      `/entry-strategies/suggest-revision/bulk`,
       {
         method: 'POST',
         body: JSON.stringify({
@@ -378,9 +428,9 @@ class ApiClient {
     );
   }
 
-  async applyRevisionBulk(updates: Array<{ symbol: string; levels: Array<{ level_no: number; new_price: number }> }>, sessionId: string): Promise<BulkApplyRevisionResponse> {
+  async applyRevisionBulk(updates: Array<{ symbol: string; levels: Array<{ level_no: number; new_price: number }> }>): Promise<BulkApplyRevisionResponse> {
     return this.request<BulkApplyRevisionResponse>(
-      `/entry-strategies/apply-revision/bulk?session_id=${sessionId}`,
+      `/entry-strategies/apply-revision/bulk`,
       {
         method: 'PATCH',
         body: JSON.stringify({ updates }),
@@ -393,16 +443,14 @@ class ApiClient {
     return this.request<UploadHistoryResponse>(`/entry-strategies/uploads${params}`);
   }
 
-  async getVersionHistory(symbol: string, sessionId: string, limit?: number): Promise<VersionListResponse> {
-    const params = new URLSearchParams();
-    params.append('session_id', sessionId);
-    if (limit) params.append('limit', String(limit));
-    return this.request<VersionListResponse>(`/entry-strategies/${encodeURIComponent(symbol)}/versions?${params.toString()}`);
+  async getVersionHistory(symbol: string, limit?: number): Promise<VersionListResponse> {
+    const params = limit ? `?limit=${limit}` : '';
+    return this.request<VersionListResponse>(`/entry-strategies/${encodeURIComponent(symbol)}/versions${params}`);
   }
 
-  async restoreVersion(symbol: string, sessionId: string, versionId: number): Promise<RestoreVersionResponse> {
+  async restoreVersion(symbol: string, versionId: number): Promise<RestoreVersionResponse> {
     return this.request<RestoreVersionResponse>(
-      `/entry-strategies/${encodeURIComponent(symbol)}/restore/${versionId}?session_id=${sessionId}`,
+      `/entry-strategies/${encodeURIComponent(symbol)}/restore/${versionId}`,
       {
         method: 'POST',
       }

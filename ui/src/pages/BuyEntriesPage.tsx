@@ -253,7 +253,7 @@ export default function BuyEntriesPage() {
         generateColumns(planWithMeta);
       }
     } catch (err) {
-      console.log('Fetch plan error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch plan');
     } finally {
       setLoading(false);
     }

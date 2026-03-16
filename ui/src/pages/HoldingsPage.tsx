@@ -43,7 +43,7 @@ export default function HoldingsPage() {
       setLastUpdated(new Date());
       setError('');
     } catch (err) {
-      console.log('Fetch holdings error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch holdings');
     } finally {
       setLoading(false);
     }

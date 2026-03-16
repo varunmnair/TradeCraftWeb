@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict
 
 from fastapi import Depends, Request
 
+from api import config
 from api.errors import ServiceError
 from core.auth.context import UserContext
 from core.runtime.job_runner import JobRunner
@@ -27,8 +27,6 @@ from core.services.session_service import SessionService
 from db.database import SessionLocal, get_db
 
 
-DEV_MODE = os.getenv("DEV_MODE", "1") in ("1", "true")
-
 JOB_HOLDINGS_ANALYZE = "holdings_analyze"
 JOB_PLAN_GENERATE = "plan_generate"
 JOB_DYNAMIC_AVG_GENERATE = "dynamic_avg_generate"
@@ -37,7 +35,7 @@ JOB_GTT_PREVIEW = "gtt_preview"
 JOB_GTT_APPLY = "gtt_apply"
 
 
-_session_manager = SessionManager(dev_mode=DEV_MODE)
+_session_manager = SessionManager(dev_mode=config.IS_DEV)
 _session_registry = SessionRegistry(session_manager=_session_manager)
 _session_service = SessionService(registry=_session_registry)
 _holdings_service = HoldingsService(_session_registry)
@@ -162,9 +160,11 @@ def get_current_user(
     request: Request,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> UserContext:
+    from core.auth.active_connection_store import get_active_connection_store
+    
     auth_header = request.headers.get("Authorization")
     if not auth_header:
-        if DEV_MODE:
+        if config.IS_DEV:
             return auth_service.ensure_dev_user()
         raise ServiceError("Missing Authorization header", error_code="unauthorized", http_status=401)
 
@@ -172,7 +172,11 @@ def get_current_user(
     if scheme.lower() != "bearer" or not token:
         raise ServiceError("Invalid authorization header", error_code="unauthorized", http_status=401)
     try:
-        return auth_service.decode_token(token)
+        user_context = auth_service.decode_token(token)
+        active_store = get_active_connection_store()
+        active_connection_id = active_store.get_active_connection(user_context.user_id)
+        user_context.active_broker_connection_id = active_connection_id
+        return user_context
     except TokenError as exc:
         raise ServiceError("Invalid access token", error_code="unauthorized", http_status=401) from exc
 
@@ -180,3 +184,13 @@ def get_current_user(
 def require_admin(user: UserContext) -> None:
     if not user.is_admin():
         raise ServiceError("Admin privileges required", error_code="forbidden", http_status=403)
+
+
+def require_trading_enabled(user: UserContext) -> None:
+    """Require that trading is enabled for the user."""
+    if not user.trading_enabled:
+        raise ServiceError(
+            "Read-only mode. Trading is disabled. Contact admin to enable trading.",
+            error_code="trading_disabled",
+            http_status=403,
+        )

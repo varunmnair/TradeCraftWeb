@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -13,8 +15,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
+from api import config
 from api.errors import ServiceError, generic_error_handler, service_error_handler
 from api.routes import auth as auth_routes
+from api.routes import admin as admin_routes
 from api.routes import broker_connections as broker_connection_routes
 from api.routes import brokers as brokers_routes
 from api.routes import holdings as holdings_routes
@@ -29,12 +33,10 @@ from db.database import SessionLocal
 
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.LOG_LEVEL),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 LOGGER = logging.getLogger("tradecraftx.api")
-HOSTED_MODE = os.getenv("HOSTED_MODE", "0") == "1"
-DEV_MODE = os.getenv("DEV_MODE", "0") == "1"
 
 # Path to UI build output
 UI_DIST_PATH = Path(__file__).parent.parent / "ui" / "dist"
@@ -43,25 +45,31 @@ UI_DIST_PATH = Path(__file__).parent.parent / "ui" / "dist"
 def create_app() -> FastAPI:
     app = FastAPI(title="TradeCraftX API", version="0.2.0")
 
+    cors_config = config.get_cors_config()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        **cors_config,
     )
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):  # type: ignore[override]
-        LOGGER.info("%s %s", request.method, request.url.path)
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        request.state.request_id = request_id
+        
+        # Add request_id to log context
+        extra = {"request_id": request_id}
+        
+        LOGGER.info("%s %s [request_id=%s]", request.method, request.url.path, request_id, extra=extra)
         response = await call_next(request)
-        LOGGER.info("%s %s -> %s", request.method, request.url.path, response.status_code)
+        response.headers["X-Request-ID"] = request_id
+        LOGGER.info("%s %s -> %s [request_id=%s]", request.method, request.url.path, response.status_code, request_id, extra=extra)
         return response
 
     app.add_exception_handler(ServiceError, service_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, generic_error_handler)  # type: ignore[arg-type]
 
     app.include_router(auth_routes.router)
+    app.include_router(admin_routes.router)
     app.include_router(broker_connection_routes.router)
     app.include_router(brokers_routes.router)
     app.include_router(brokers_routes.zerodha_router)
@@ -75,9 +83,20 @@ def create_app() -> FastAPI:
     app.include_router(ai_routes.router)
     app.include_router(entry_strategy_routes.router)
 
+    @app.on_event("startup")
+    async def startup_event():
+        from core.services.auth_service import AuthService
+        auth_service = AuthService()
+        if config.BOOTSTRAP_ADMIN_EMAIL:
+            auth_service.bootstrap_admin(config.BOOTSTRAP_ADMIN_EMAIL)
+
     @app.get("/health")
     def health_check():
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "time": datetime.now(timezone.utc).isoformat(),
+            "version": "0.2.0",
+        }
 
     @app.get("/ready")
     def readiness_check():
@@ -87,12 +106,12 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=503, detail="database_unavailable") from exc
 
-        if HOSTED_MODE and not os.getenv("TOKEN_ENCRYPTION_KEY"):
+        if config.IS_PROD and not config.TOKEN_ENCRYPTION_KEY and not config.ALLOW_INSECURE_TOKENS:
             raise HTTPException(status_code=503, detail="token_encryption_key_missing")
         return {"status": "ready"}
 
     # Serve static UI files if build exists and not in dev mode
-    if DEV_MODE:
+    if config.IS_DEV:
         LOGGER.info("DEV_MODE enabled - skipping UI static file serving")
     elif UI_DIST_PATH.exists():
         # Mount static files directory if it exists

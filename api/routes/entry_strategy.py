@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.orm import Session
 
-from api.dependencies import get_current_user, get_db_session, get_session_registry
+from api.dependencies import get_current_user, get_db_session, get_session_registry, require_trading_enabled
 from api.errors import ServiceError
 from api.schemas.entry_strategy import (
     EntryLevelSchema,
@@ -84,15 +84,60 @@ def _get_broker_scope_from_session(
     return broker, broker_user_id
 
 
+def _require_active_connection_scope(
+    current_user: UserContext,
+    db: Session,
+) -> tuple[int, str, str]:
+    """Get broker_connection_id, broker, and broker_user_id from active connection.
+    
+    Returns tuple of (connection_id, broker, broker_user_id)
+    
+    Raises ServiceError with 409 if no active connection is set.
+    """
+    from api.dependencies import get_broker_connection_service
+    from core.auth.active_connection_store import get_active_connection_store
+    
+    if current_user.active_broker_connection_id is None:
+        raise ServiceError(
+            "No active broker connection. Connect/select a broker first.",
+            error_code="no_active_connection",
+            http_status=409,
+        )
+    
+    connection_service = get_broker_connection_service()
+    connection = connection_service.get_connection(current_user.active_broker_connection_id)
+    
+    if not connection:
+        raise ServiceError(
+            "Active broker connection not found. Please select a valid connection.",
+            error_code="connection_not_found",
+            http_status=409,
+        )
+    
+    if connection.tenant_id != current_user.tenant_id:
+        raise ServiceError(
+            "Active broker connection belongs to another tenant.",
+            error_code="forbidden",
+            http_status=403,
+        )
+    
+    if connection.user_id != current_user.user_id:
+        raise ServiceError(
+            "Active broker connection belongs to another user.",
+            error_code="forbidden",
+            http_status=403,
+        )
+    
+    return connection.id, connection.broker_name, connection.broker_user_id
+
+
 @router.get("", response_model=EntryStrategyListResponse)
 def list_entry_strategies(
-    session_id: str = Query(..., description="Active session ID to scope the strategies"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
-    """List entry strategies scoped to the active session (broker + broker_user_id)."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    """List entry strategies scoped to the active broker connection."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     strategies = (
         db.query(EntryStrategy)
@@ -172,13 +217,11 @@ def list_entry_strategies(
 @router.delete("/{symbol}")
 def delete_entry_strategy(
     symbol: str,
-    session_id: str = Query(..., description="Active session ID to scope the strategies"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
-    """Delete a single entry strategy by symbol, scoped to the active session."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    """Delete a single entry strategy by symbol, scoped to the active broker connection."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     strategy = (
         db.query(EntryStrategy)
@@ -204,13 +247,11 @@ def delete_entry_strategy(
 @router.post("/bulk-delete")
 def bulk_delete_entry_strategies(
     symbols: list[str],
-    session_id: str = Query(..., description="Active session ID to scope the strategies"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
-    """Delete multiple entry strategies by symbols, scoped to the active session."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    """Delete multiple entry strategies by symbols, scoped to the active broker connection."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     deleted_count = 0
     not_found = []
@@ -246,13 +287,11 @@ def bulk_delete_entry_strategies(
 @router.get("/{symbol}", response_model=EntryStrategyFullSchema)
 def get_entry_strategy(
     symbol: str,
-    session_id: str = Query(..., description="Active session ID to scope the strategies"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
-    """Get a single entry strategy, scoped to the active session."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    """Get a single entry strategy, scoped to the active broker connection."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     strategy = (
         db.query(EntryStrategy)
@@ -302,13 +341,11 @@ def get_entry_strategy(
 @router.post("/upload-csv", response_model=EntryStrategyUploadResponse)
 async def upload_csv(
     file: UploadFile = File(...),
-    session_id: str = Query(..., description="Active session ID to scope the strategies"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
-    """Upload CSV to create/update entry strategies, scoped to the active session."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    """Upload CSV to create/update entry strategies, scoped to the active broker connection."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a CSV")
@@ -671,14 +708,12 @@ def get_upload_history(
 @router.get("/{symbol}/versions", response_model=VersionListResponse)
 def get_version_history(
     symbol: str,
-    session_id: str = Query(..., description="Active session ID"),
     limit: int = 20,
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
-    """Get version history for a specific strategy, scoped to the active session."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    """Get version history for a specific strategy, scoped to the active broker connection."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     strategy = (
         db.query(EntryStrategy)
@@ -729,13 +764,11 @@ def get_version_history(
 def restore_version(
     symbol: str,
     version_id: int,
-    session_id: str = Query(..., description="Active session ID"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
-    """Restore a strategy to a previous version, scoped to the active session."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    """Restore a strategy to a previous version, scoped to the active broker connection."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     strategy = (
         db.query(EntryStrategy)
@@ -799,15 +832,13 @@ def restore_version(
 @router.post("/{symbol}/suggest-revision", response_model=SuggestRevisionResponse)
 def suggest_revision(
     symbol: str,
-    session_id: str = Query(..., description="Active session ID"),
     method: str = "align_to_cmp",
     pct_adjustment: float = 5.0,
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
     """Suggest revised entry levels based on current market price or adjustment."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     strategy = (
         db.query(EntryStrategy)
@@ -915,13 +946,11 @@ def suggest_revision(
 def apply_revision(
     symbol: str,
     payload: ApplyRevisionRequest,
-    session_id: str = Query(..., description="Active session ID"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
     """Apply selected level revisions to the database."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
     
     strategy = (
         db.query(EntryStrategy)
@@ -986,13 +1015,11 @@ def apply_revision(
 @router.post("/suggest-revision/bulk", response_model=BulkSuggestRevisionResponse)
 def suggest_revision_bulk(
     payload: BulkSuggestRevisionRequest,
-    session_id: str = Query(..., description="Active session ID"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
     """Suggest revised entry levels for multiple symbols based on current market price or adjustment."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
 
     if not payload.symbols:
         raise HTTPException(status_code=400, detail="No symbols provided")
@@ -1123,13 +1150,11 @@ def suggest_revision_bulk(
 @router.patch("/apply-revision/bulk", response_model=BulkApplyRevisionResponse)
 def apply_revision_bulk(
     payload: BulkApplyRevisionRequest,
-    session_id: str = Query(..., description="Active session ID"),
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
-    registry: SessionRegistry = Depends(get_session_registry),
 ):
     """Apply selected level revisions to multiple symbols in the database."""
-    broker, broker_user_id = _get_broker_scope_from_session(session_id, registry, current_user)
+    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
 
     if not payload.updates:
         raise HTTPException(status_code=400, detail="No updates provided")

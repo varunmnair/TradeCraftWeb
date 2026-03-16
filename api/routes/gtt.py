@@ -10,6 +10,7 @@ from api.dependencies import (
     get_gtt_service,
     get_job_runner,
     get_session_registry,
+    require_trading_enabled,
 )
 from api.errors import ServiceError
 from api.schemas.common import JobQueuedResponse
@@ -19,6 +20,7 @@ from core.runtime.job_runner import JobRunner
 from core.runtime.session_registry import SessionRegistry
 from core.security.confirm_token_store import ConfirmTokenStore
 from core.services.gtt_service import GTTService
+from core.audit import log_audit
 
 
 router = APIRouter(prefix="/gtt", tags=["gtt"])
@@ -45,7 +47,16 @@ def preview_gtt(
     registry: SessionRegistry = Depends(get_session_registry),
     current_user: UserContext = Depends(get_current_user),
 ):
+    require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
+    
+    log_audit(
+        action="gtt_preview",
+        user=current_user,
+        resource_type="gtt",
+        resource_id=payload.session_id,
+    )
+    
     job_id = job_runner.start_job(
         session_id=payload.session_id,
         job_type=JOB_GTT_PREVIEW,
@@ -61,7 +72,16 @@ def confirm_gtt(
     registry: SessionRegistry = Depends(get_session_registry),
     current_user: UserContext = Depends(get_current_user),
 ):
+    require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
+    
+    log_audit(
+        action="gtt_confirm",
+        user=current_user,
+        resource_type="gtt",
+        resource_id=payload.session_id,
+    )
+    
     issued = confirm_store.issue(session_id=payload.session_id, user_id=current_user.user_id, payload=payload.plan)
     return GTTConfirmResponse(**issued)
 
@@ -74,7 +94,9 @@ def apply_gtt(
     registry: SessionRegistry = Depends(get_session_registry),
     current_user: UserContext = Depends(get_current_user),
 ):
+    require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
+    
     try:
         confirm_store.verify(
             token=payload.confirmation_token,
@@ -84,6 +106,15 @@ def apply_gtt(
         )
     except ValueError as exc:
         raise ServiceError(str(exc), error_code="invalid_token", http_status=400) from exc
+    
+    log_audit(
+        action="gtt_apply",
+        user=current_user,
+        resource_type="gtt",
+        resource_id=payload.session_id,
+        metadata={"symbols": [p.get("symbol") for p in payload.plan if p.get("symbol")]},
+    )
+    
     job_id = job_runner.start_job(
         session_id=payload.session_id,
         job_type=JOB_GTT_APPLY,
@@ -99,7 +130,17 @@ def delete_gtt_orders(
     registry: SessionRegistry = Depends(get_session_registry),
     current_user: UserContext = Depends(get_current_user),
 ):
+    require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
+    
+    log_audit(
+        action="gtt_delete",
+        user=current_user,
+        resource_type="gtt",
+        resource_id=payload.session_id,
+        metadata={"order_ids": payload.order_ids},
+    )
+    
     try:
         result = service.delete_orders_by_ids(payload.session_id, payload.order_ids)
         return GTTDeleteResponse(
@@ -117,7 +158,17 @@ def adjust_gtt_orders(
     registry: SessionRegistry = Depends(get_session_registry),
     current_user: UserContext = Depends(get_current_user),
 ):
+    require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
+    
+    log_audit(
+        action="gtt_adjust",
+        user=current_user,
+        resource_type="gtt",
+        resource_id=payload.session_id,
+        metadata={"order_ids": payload.order_ids, "target_variance": payload.target_variance},
+    )
+    
     try:
         result = service.adjust_orders_by_ids(
             payload.session_id, 

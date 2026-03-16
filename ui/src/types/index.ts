@@ -3,6 +3,8 @@ export interface AuthUser {
   tenant_id: number;
   email: string;
   role: string;
+  first_name?: string;
+  last_name?: string;
 }
 
 export interface AuthResponse {
@@ -11,12 +13,24 @@ export interface AuthResponse {
   user: AuthUser;
 }
 
-export interface MeResponse extends AuthUser {}
+export interface MeResponse extends AuthUser {
+  broker_connections: BrokerConnectionSummary[];
+}
+
+export interface BrokerConnectionSummary {
+  id: number;
+  broker_name: string;
+  broker_user_id: string | null;
+  created_at: string | null;
+  token_updated_at: string | null;
+}
 
 export interface RegisterRequest {
-  tenant_name: string;
   email: string;
   password: string;
+  first_name?: string;
+  last_name?: string;
+  phone?: string;
 }
 
 export interface LoginRequest {
@@ -37,6 +51,16 @@ export interface BrokerConnectionCreate {
   tokens: Record<string, unknown>;
   metadata: Record<string, unknown>;
   user_id?: number;
+}
+
+export interface ActiveConnectionResponse {
+  broker_connection_id: number | null;
+  broker_name: string | null;
+  broker_user_id: string | null;
+}
+
+export interface ActiveConnectionSetRequest {
+  broker_connection_id: number;
 }
 
 export interface SessionResponse {

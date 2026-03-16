@@ -30,7 +30,6 @@ interface BulkRevisionModalProps {
   open: boolean;
   onClose: () => void;
   selectedSymbols: string[];
-  sessionId: string;
   onApply: () => void;
 }
 
@@ -51,7 +50,6 @@ export function BulkRevisionModal({
   open,
   onClose,
   selectedSymbols,
-  sessionId,
   onApply,
 }: BulkRevisionModalProps) {
   const [loading, setLoading] = useState(false);
@@ -76,7 +74,6 @@ export function BulkRevisionModal({
     try {
       const response = await api.suggestRevisionBulk(
         selectedSymbols,
-        sessionId,
         method,
         pctAdjustment
       );
@@ -159,7 +156,7 @@ export function BulkRevisionModal({
         return;
       }
 
-      const result = await api.applyRevisionBulk(updates, sessionId);
+      const result = await api.applyRevisionBulk(updates);
       setApplyResult(result);
       
       if (result.total_failed === 0) {

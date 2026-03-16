@@ -10,13 +10,15 @@ from typing import Any, Dict
 
 from cryptography.fernet import Fernet
 
+# Import from centralized config
+from api import config
+
 
 class TokenEncryptor:
     def __init__(self, key: str | None = None) -> None:
-        env_key = key or os.getenv("TOKEN_ENCRYPTION_KEY")
+        env_key = key or config.TOKEN_ENCRYPTION_KEY
         if not env_key:
-            allow_insecure = os.getenv("ALLOW_INSECURE_TOKENS", "1") == "1"
-            if not allow_insecure:
+            if not config.ALLOW_INSECURE_TOKENS:
                 raise RuntimeError("TOKEN_ENCRYPTION_KEY not configured")
             env_key = base64.urlsafe_b64encode(b"tradecraftx-dev-key".ljust(32, b"0")).decode()
         if len(env_key) != 44:

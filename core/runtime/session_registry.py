@@ -181,7 +181,7 @@ class SessionRegistry:
             )
             if not bundle:
                 raise ValueError("Token bundle missing for broker connection")
-            metadata = connection.metadata_dict()
+            metadata = connection.metadata_dict() if hasattr(connection, 'metadata_dict') else {}
             config = self._build_broker_config(bundle, metadata, connection_id)
             broker_name = connection.broker_name
             broker_user_id = (

@@ -13,7 +13,8 @@ import {
 import { api } from '../api/client';
 
 export default function RegisterPage() {
-  const [tenantName, setTenantName] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -25,11 +26,8 @@ export default function RegisterPage() {
     if (!emailRegex.test(email)) {
       return 'Please enter a valid email address';
     }
-    if (password.length < 4) {
-      return 'Password must be at least 4 characters';
-    }
-    if (!tenantName.trim()) {
-      return 'Tenant name is required';
+    if (password.length < 10) {
+      return 'Password must be at least 10 characters long';
     }
     return null;
   };
@@ -44,7 +42,12 @@ export default function RegisterPage() {
     setError('');
     setLoading(true);
     try {
-      await api.register({ tenant_name: tenantName, email, password });
+      await api.register({ 
+        email, 
+        password, 
+        first_name: firstName || undefined, 
+        last_name: lastName || undefined 
+      });
       navigate('/login', { state: { message: 'Registration successful. Please login.' } });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');
@@ -75,11 +78,17 @@ export default function RegisterPage() {
           <form onSubmit={handleSubmit}>
             <TextField
               fullWidth
-              label="Tenant Name"
-              value={tenantName}
-              onChange={(e) => setTenantName(e.target.value)}
+              label="First Name (optional)"
+              value={firstName}
+              onChange={(e) => setFirstName(e.target.value)}
               margin="normal"
-              required
+            />
+            <TextField
+              fullWidth
+              label="Last Name (optional)"
+              value={lastName}
+              onChange={(e) => setLastName(e.target.value)}
+              margin="normal"
             />
             <TextField
               fullWidth
@@ -98,6 +107,7 @@ export default function RegisterPage() {
               onChange={(e) => setPassword(e.target.value)}
               margin="normal"
               required
+              helperText="Must be at least 10 characters"
             />
             <Button
               fullWidth

@@ -13,8 +13,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import HTMLResponse
 
+from api import config
 from api.dependencies import (
-    DEV_MODE,
     get_auth_service,
     get_broker_auth_state_service,
     get_broker_connection_service,
@@ -58,9 +58,10 @@ class BrokerStatusResponse(BaseModel):
 
 
 def _get_upstox_env() -> tuple[str, str, str]:
-    client_id = os.getenv("UPSTOX_API_KEY")
-    client_secret = os.getenv("UPSTOX_API_SECRET")
-    redirect_uri = os.getenv("UPSTOX_REDIRECT_URI")
+    from api import config
+    client_id = config.UPSTOX_API_KEY
+    client_secret = config.UPSTOX_API_SECRET
+    redirect_uri = config.UPSTOX_REDIRECT_URI
     if not client_id or not client_secret or not redirect_uri:
         raise ServiceError(
             "Upstox API env vars missing",
@@ -128,7 +129,7 @@ def upstox_callback(
     session_manager: SessionManager = Depends(get_session_manager),
     current_user: UserContext = Depends(get_current_user),
 ):
-    if DEV_MODE and not current_user.user_id:
+    if config.IS_DEV and not current_user.user_id:
         return _render_html("Authorization failed: DEV user missing", success=False)
     try:
         state_info = state_service.consume_state(state)
@@ -263,9 +264,10 @@ KITE_TOKEN_URL = "https://api.kite.trade/session/token"
 
 
 def _get_kite_env() -> tuple[str, str, str]:
-    api_key = os.getenv("KITE_API_KEY")
-    api_secret = os.getenv("KITE_API_SECRET")
-    redirect_uri = os.getenv("KITE_REDIRECT_URI")
+    from api import config
+    api_key = config.KITE_API_KEY
+    api_secret = config.KITE_API_SECRET
+    redirect_uri = config.KITE_REDIRECT_URI
     if not api_key or not api_secret or not redirect_uri:
         raise ServiceError(
             "Kite API env vars missing",
@@ -427,8 +429,8 @@ def zerodha_status(
         if bundle and bundle.access_token:
             try:
                 from brokers.zerodha_broker import ZerodhaBroker
-                import os
-                api_key = os.getenv("KITE_API_KEY", "")
+                from api import config
+                api_key = config.KITE_API_KEY or ""
                 broker = ZerodhaBroker(
                     user_id=str(conn.user_id),
                     api_key=api_key,

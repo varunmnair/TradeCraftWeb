@@ -25,9 +25,12 @@ def upgrade():
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("tenant_id", sa.Integer(), sa.ForeignKey("tenants.id"), nullable=False),
         sa.Column("email", sa.String(255), nullable=False, unique=True),
-        sa.Column("hashed_password", sa.String(255), nullable=False),
+        sa.Column("first_name", sa.String(100), nullable=True),
+        sa.Column("last_name", sa.String(100), nullable=True),
+        sa.Column("phone", sa.String(20), nullable=True),
         sa.Column("role", sa.String(32), nullable=False, server_default="user"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
     )
 
     op.create_table(
