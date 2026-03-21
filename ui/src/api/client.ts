@@ -13,6 +13,8 @@ import {
   JobQueuedResponse,
   HoldingsLatestResponse,
   HoldingsAnalyzeRequest,
+  HoldingsRow,
+  OrderHistoryStatus,
   PlanLatestResponse,
   PlanGenerateRequest,
   GTTOrdersResponse,
@@ -323,6 +325,63 @@ class ApiClient {
     }
 
     return response.json();
+  }
+
+  // New Holdings API (session-scoped)
+  async getHoldings(sessionId: string): Promise<{
+    session_id: string;
+    broker: string;
+    broker_user_id: string;
+    holdings: HoldingsRow[];
+    order_history: OrderHistoryStatus;
+  }> {
+    return this.request<{
+      session_id: string;
+      broker: string;
+      broker_user_id: string;
+      holdings: HoldingsRow[];
+      order_history: OrderHistoryStatus;
+    }>(`/holdings/${sessionId}`);
+  }
+
+  async getOrderHistoryStatus(sessionId: string): Promise<OrderHistoryStatus> {
+    return this.request<OrderHistoryStatus>(`/holdings/${sessionId}/order-history`);
+  }
+
+  async fetchOrderHistory(sessionId: string, days: number = 100): Promise<OrderHistoryStatus> {
+    return this.request<OrderHistoryStatus>(`/holdings/${sessionId}/order-history/fetch`, {
+      method: 'POST',
+      body: JSON.stringify({ days }),
+    });
+  }
+
+  async uploadOrderHistory(sessionId: string, file: File): Promise<OrderHistoryStatus> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers: HeadersInit = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(`${API_BASE_URL}/holdings/${sessionId}/order-history/upload`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ message: 'Upload failed' }));
+      throw new Error(error.message || 'Upload failed');
+    }
+
+    return response.json();
+  }
+
+  async clearOrderHistory(sessionId: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>(`/holdings/${sessionId}/order-history`, {
+      method: 'DELETE',
+    });
   }
 
   async generatePlan(data: PlanGenerateRequest): Promise<JobQueuedResponse> {

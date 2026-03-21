@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
+from typing import Dict, List, Optional
 
 from core.cmp import CMPManager
 
@@ -17,6 +19,7 @@ class SessionCache:
         market_data_connection_id: int = None,
         ttl: int = 300,
         user_id: int = None,
+        session_id: str = None,
     ):
         self.ttl = ttl
         self.last_refreshed = 0
@@ -29,6 +32,133 @@ class SessionCache:
         self.cmp_manager = None
         self.gtt_cache = []
         self.user_id = user_id
+        self.session_id = session_id
+        
+        # Order history management (session-scoped)
+        self._order_history: Dict[str, List[Dict]] = {}  # symbol -> list of trades
+        self._order_history_fetched_at: Optional[datetime] = None
+        self._order_history_source: Optional[str] = None  # "upstox_api" or "zerodha_csv"
+
+    def set_order_history(self, trades: List[Dict], source: str):
+        """Store order history for this session, grouped by symbol."""
+        self._order_history = {}
+        for trade in trades:
+            symbol = trade.get("symbol", "").strip().upper()
+            if symbol:
+                if symbol not in self._order_history:
+                    self._order_history[symbol] = []
+                self._order_history[symbol].append(trade)
+        self._order_history_fetched_at = datetime.now()
+        self._order_history_source = source
+        logging.info(f"Stored {len(trades)} trades for {len(self._order_history)} symbols")
+
+    def get_order_history(self, symbol: Optional[str] = None) -> Optional[List[Dict]]:
+        """Get order history, optionally filtered by symbol."""
+        if symbol:
+            return self._order_history.get(symbol.strip().upper(), [])
+        return self._order_history
+
+    def get_order_history_status(self) -> Dict:
+        """Get the current status of order history for this session."""
+        return {
+            "available": bool(self._order_history),
+            "trade_count": sum(len(trades) for trades in self._order_history.values()),
+            "symbol_count": len(self._order_history),
+            "fetched_at": self._order_history_fetched_at,
+            "source": self._order_history_source,
+        }
+
+    def clear_order_history(self):
+        """Clear order history for this session."""
+        self._order_history = {}
+        self._order_history_fetched_at = None
+        self._order_history_source = None
+        logging.info("Cleared order history for session")
+
+    def get_holdings_enriched(self) -> List[Dict]:
+        """
+        Get holdings enriched with order history data.
+        Uses broker CMP if available, otherwise marks as None.
+        """
+        holdings = self.get_holdings()
+        enriched = []
+        
+        for h in holdings:
+            symbol = h.get("symbol") or h.get("tradingsymbol", "")
+            symbol = symbol.strip().upper()
+            
+            enriched_h = {
+                "symbol": symbol,
+                "exchange": h.get("exchange", "NSE"),
+                "quantity": h.get("quantity", 0),
+                "average_price": h.get("average_price", 0),
+                "last_price": h.get("last_price"),  # May be None if not from broker
+                "invested": h.get("quantity", 0) * h.get("average_price", 0),
+            }
+            
+            # Calculate P&L if last_price is available
+            if enriched_h["last_price"] is not None:
+                enriched_h["pnl"] = (enriched_h["last_price"] - enriched_h["average_price"]) * enriched_h["quantity"]
+                if enriched_h["average_price"] > 0:
+                    enriched_h["pnl_pct"] = ((enriched_h["last_price"] - enriched_h["average_price"]) / enriched_h["average_price"]) * 100
+                else:
+                    enriched_h["pnl_pct"] = None
+            else:
+                enriched_h["pnl"] = None
+                enriched_h["pnl_pct"] = None
+            
+            # Add order history data if available
+            trades = self._order_history.get(symbol, [])
+            if trades:
+                buy_trades = [t for t in trades if t.get("side", "").upper() == "BUY"]
+                sell_trades = [t for t in trades if t.get("side", "").upper() == "SELL"]
+                
+                total_buy_qty = sum(t.get("quantity", 0) for t in buy_trades)
+                total_sell_qty = sum(t.get("quantity", 0) for t in sell_trades)
+                total_buy_value = sum(t.get("quantity", 0) * t.get("price", 0) for t in buy_trades)
+                total_sell_value = sum(t.get("quantity", 0) * t.get("price", 0) for t in sell_trades)
+                
+                enriched_h["avg_buy_price"] = total_buy_value / total_buy_qty if total_buy_qty > 0 else None
+                enriched_h["total_buy_qty"] = total_buy_qty
+                enriched_h["avg_sell_price"] = total_sell_value / total_sell_qty if total_sell_qty > 0 else None
+                enriched_h["total_sell_qty"] = total_sell_qty
+                enriched_h["buy_value"] = total_buy_value
+                enriched_h["sell_value"] = total_sell_value
+                enriched_h["net_value"] = total_buy_value - total_sell_value
+                
+                # Parse dates
+                dates = []
+                for t in buy_trades:
+                    d = t.get("trade_date")
+                    if isinstance(d, str):
+                        dates.append(d)
+                    elif isinstance(d, datetime):
+                        dates.append(d.strftime("%Y-%m-%d"))
+                
+                if dates:
+                    dates.sort()
+                    enriched_h["first_buy_date"] = dates[0] if dates else None
+                    enriched_h["last_buy_date"] = dates[-1] if dates else None
+            else:
+                # Order history not available
+                enriched_h["avg_buy_price"] = None
+                enriched_h["total_buy_qty"] = None
+                enriched_h["avg_sell_price"] = None
+                enriched_h["total_sell_qty"] = None
+                enriched_h["buy_value"] = None
+                enriched_h["sell_value"] = None
+                enriched_h["net_value"] = None
+                enriched_h["first_buy_date"] = None
+                enriched_h["last_buy_date"] = None
+            
+            # ROI/Trend fields (empty for now)
+            enriched_h["trend"] = None
+            enriched_h["trend_days"] = None
+            enriched_h["trend_roi"] = None
+            
+            enriched.append(enriched_h)
+        
+        return enriched
 
     def is_stale(self) -> bool:
         return (time.time() - self.last_refreshed) > self.ttl

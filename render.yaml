@@ -1,11 +1,53 @@
+# TradeCraftX Deployment Configuration for Render
+# Docs: https://render.com/docs/yaml
+
 services:
   - type: web
-    name: tradecraft-service
-    env: python
+    name: tradecraftx
+    env: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn core.api:app --host 0.0.0.0 --port 10000
+    dockerfilePath: ./Dockerfile
     envVars:
+      # Application Mode
+      - key: APP_MODE
+        value: prod
+
+      # Python Version
       - key: PYTHON_VERSION
-        value: 3.10
-    autoDeploy: true
+        value: "3.10"
+
+      # Security - Set ALLOW_INSECURE_TOKENS=0 in production
+      - key: ALLOW_INSECURE_TOKENS
+        value: "0"
+
+      # Database - SQLite for free tier
+      - key: DATABASE_URL
+        value: sqlite:////app/data/tradecraftx.db
+
+      # CORS - Allow all origins (update to specific domain for production)
+      - key: CORS_ALLOWED_ORIGINS
+        value: "*"
+
+      # ========================================================================
+      # BROKER CREDENTIALS
+      # Set these in Render Dashboard as SECRET environment variables:
+      # - Upstox API credentials (UPSTOX_API_KEY, UPSTOX_API_SECRET)
+      # - Zerodha API credentials (KITE_API_KEY, KITE_API_SECRET)
+      # - Redirect URIs (update with your actual Render app URL)
+      # ========================================================================
+
+      # Upstox Redirect URI - Update 'tradecraftx' with your actual app name
+      - key: UPSTOX_REDIRECT_URI
+        value: https://tradecraftx.onrender.com/brokers/upstox/callback
+
+      # Zerodha Redirect URI - Update 'tradecraftx' with your actual app name
+      - key: KITE_REDIRECT_URI
+        value: https://tradecraftx.onrender.com/brokers/zerodha/callback
+
+      # ========================================================================
+      # SECURITY KEYS (Generate these!)
+      # Run these commands locally to generate secure keys:
+      #   JWT_SECRET: openssl rand -hex 32
+      #   TOKEN_ENCRYPTION_KEY: python -c "import secrets; print(secrets.token_urlsafe(32))"
+      # Then add them as SECRET environment variables in Render Dashboard
+      # ========================================================================

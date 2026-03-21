@@ -274,10 +274,11 @@ class UserTrade(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, nullable=False)
+    session_id = Column(String(36), nullable=True, index=True)  # Session-scoped trades
     broker = Column(String(20), nullable=False)
-    symbol = Column(String(50), nullable=False)
+    symbol = Column(String(50), nullable=False, index=True)
     isin = Column(String(50), nullable=True)
-    trade_date = Column(String(10), nullable=False)
+    trade_date = Column(String(10), nullable=False, index=True)
     exchange = Column(String(10), nullable=True)
     segment = Column(String(10), nullable=True)
     series = Column(String(10), nullable=True)
@@ -292,4 +293,5 @@ class UserTrade(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "broker", "trade_id", name="uq_user_broker_trade_id"),
+        Index("ix_trades_session_symbol", "session_id", "symbol"),
     )

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box,
   Typography,
@@ -6,57 +6,69 @@ import {
   Alert,
   CircularProgress,
   Button,
-  TextField,
   Chip,
-  InputAdornment,
   LinearProgress,
 } from '@mui/material';
-import { DataGrid, GridColDef } from '@mui/x-data-grid';
+import { DataGrid, GridColDef, GridSortModel } from '@mui/x-data-grid';
 import { 
-  PlayArrow as AnalyzeIcon, 
-  Search as SearchIcon,
+  Refresh as RefreshIcon,
   CloudSync as SyncIcon,
   Upload as UploadIcon,
+  Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
-import { useJobRunner } from '../hooks/useJobRunner';
+import type { HoldingsRow, OrderHistoryStatus } from '../types';
 
-interface ReadinessStatus {
-  broker: string;
-  market_data_ready: boolean;
-  trades_ready: boolean;
-  ready_to_analyze: boolean;
-  blocking_reason: string | null;
-  missing: { cmp: string[]; candles: string[]; trades: string[] };
-}
+const HOLDINGS_COLUMNS: GridColDef[] = [
+  { field: 'symbol', headerName: 'Symbol', width: 120, sortable: true },
+  { field: 'exchange', headerName: 'Exchange', width: 80, sortable: true },
+  { field: 'quantity', headerName: 'Qty', type: 'number', width: 80, sortable: true },
+  { field: 'average_price', headerName: 'Avg Price', type: 'number', width: 100, sortable: true },
+  { field: 'last_price', headerName: 'CMP', type: 'number', width: 100, sortable: true },
+  { field: 'invested', headerName: 'Invested', type: 'number', width: 110, sortable: true },
+  { field: 'pnl', headerName: 'P&L', type: 'number', width: 100, sortable: true },
+  { field: 'pnl_pct', headerName: 'P&L %', type: 'number', width: 80, sortable: true },
+  { field: 'avg_buy_price', headerName: 'Avg Buy', type: 'number', width: 100, sortable: true },
+  { field: 'total_buy_qty', headerName: 'Buy Qty', type: 'number', width: 90, sortable: true },
+  { field: 'buy_value', headerName: 'Buy Value', type: 'number', width: 110, sortable: true },
+  { field: 'avg_sell_price', headerName: 'Avg Sell', type: 'number', width: 100, sortable: true },
+  { field: 'total_sell_qty', headerName: 'Sell Qty', type: 'number', width: 90, sortable: true },
+  { field: 'sell_value', headerName: 'Sell Value', type: 'number', width: 110, sortable: true },
+  { field: 'net_value', headerName: 'Net Value', type: 'number', width: 110, sortable: true },
+  { field: 'first_buy_date', headerName: 'First Buy', width: 110, sortable: true },
+  { field: 'last_buy_date', headerName: 'Last Buy', width: 110, sortable: true },
+  { field: 'trend', headerName: 'Trend', width: 80, sortable: true },
+  { field: 'trend_days', headerName: 'Trend Days', type: 'number', width: 100, sortable: true },
+  { field: 'trend_roi', headerName: 'Trend ROI', type: 'number', width: 100, sortable: true },
+];
 
 export default function HoldingsPage() {
   const { sessionId, sessionInfo } = useSession();
   
-  const [holdings, setHoldings] = useState<Record<string, unknown>[]>([]);
+  const [holdings, setHoldings] = useState<HoldingsRow[]>([]);
   const [columns, setColumns] = useState<GridColDef[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [searchText, setSearchText] = useState('');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [readiness, setReadiness] = useState<ReadinessStatus | null>(null);
-  const [readinessLoading, setReadinessLoading] = useState(false);
-  const [syncJobId, setSyncJobId] = useState<number | null>(null);
-  const [syncJobStatus, setSyncJobStatus] = useState<string | null>(null);
-  const [uploadMessage, setUploadMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [orderHistory, setOrderHistory] = useState<OrderHistoryStatus | null>(null);
+  const [fetchingOrderHistory, setFetchingOrderHistory] = useState(false);
+  const [uploadingOrderHistory, setUploadingOrderHistory] = useState(false);
+  const [sortModel, setSortModel] = useState<GridSortModel>([
+    { field: 'symbol', sort: 'asc' },
+  ]);
 
   const fetchHoldings = useCallback(async () => {
     if (!sessionId || loading) return;
     setLoading(true);
     try {
-      const data = await api.getHoldingsLatest(sessionId);
-      const itemsWithId = data.items.map((item, index) => ({
-        id: item.Symbol || index,
-        ...item
+      const data = await api.getHoldings(sessionId);
+      const itemsWithId = data.holdings.map((item, index) => ({
+        id: item.symbol || index,
+        ...item,
       }));
       setHoldings(itemsWithId);
-      generateColumns(data.items);
+      setOrderHistory(data.order_history);
       setLastUpdated(new Date());
       setError('');
     } catch (err) {
@@ -66,185 +78,78 @@ export default function HoldingsPage() {
     }
   }, [sessionId]);
 
-  const fetchReadiness = useCallback(async () => {
-    if (!sessionId) return;
-    setReadinessLoading(true);
-    try {
-      const data = await api.getHoldingsAnalyzeStatus(sessionId);
-      setReadiness(data);
-    } catch (err) {
-      console.error('Failed to fetch readiness:', err);
-    } finally {
-      setReadinessLoading(false);
-    }
-  }, [sessionId]);
-
-  // Poll sync job status
-  useEffect(() => {
-    if (!syncJobId) return;
-
-    const pollJob = async () => {
-      try {
-        const data = await api.getJob(syncJobId);
-        setSyncJobStatus(data.job.status);
-        if (data.job.status === 'succeeded' || data.job.status === 'failed') {
-          setSyncJobId(null);
-          fetchReadiness();
-        }
-      } catch (err) {
-        console.error('Failed to poll sync job:', err);
-      }
-    };
-
-    pollJob();
-    const interval = setInterval(pollJob, 2000);
-    return () => clearInterval(interval);
-  }, [syncJobId, fetchReadiness]);
-
-  const {
-    isRunning: isAnalyzing,
-    isSuccess: analyzeSuccess,
-    isError: analyzeError,
-    errorMessage,
-    jobStatus,
-    jobProgress,
-    run: runAnalyze,
-    reset: resetAnalyze,
-  } = useJobRunner({
-    onSuccess: () => {
-      fetchHoldings();
-    },
-    onError: (msg) => {
-      setError(msg);
-    },
-  });
-
-  // Fetch holdings and readiness when session changes
   useEffect(() => {
     if (sessionId) {
       fetchHoldings();
-      fetchReadiness();
     }
-  }, [sessionId, fetchHoldings, fetchReadiness]);
+  }, [sessionId, fetchHoldings]);
 
-  const handleSyncTrades = async () => {
+  const handleRefresh = () => {
+    fetchHoldings();
+  };
+
+  const handleFetchOrderHistory = async () => {
+    if (!sessionId) return;
+    setFetchingOrderHistory(true);
+    setError('');
     try {
-      const result = await api.syncUpstoxTrades(400);
-      setSyncJobId(result.job_id);
-      setSyncJobStatus('pending');
+      const result = await api.fetchOrderHistory(sessionId, 400);
+      setOrderHistory(result);
+      fetchHoldings();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start sync');
+      setError(err instanceof Error ? err.message : 'Failed to fetch order history');
+    } finally {
+      setFetchingOrderHistory(false);
     }
   };
 
-  const handleUploadTradebook = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUploadOrderHistory = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) return;
+    if (!file || !sessionId) return;
 
-    setUploadMessage(null);
+    setUploadingOrderHistory(true);
+    setError('');
     try {
-      const result = await api.uploadZerodhaTradebook(file);
-      if (result.errors && result.errors.length > 0) {
-        setUploadMessage({
-          type: 'error',
-          text: `Uploaded ${result.rows_ingested} rows with errors: ${result.errors.join(', ')}`,
-        });
-      } else {
-        setUploadMessage({
-          type: 'success',
-          text: `Uploaded ${result.rows_ingested} trades for ${result.symbols_covered} symbols`,
-        });
-      }
-      fetchReadiness();
+      const result = await api.uploadOrderHistory(sessionId, file);
+      setOrderHistory(result);
+      fetchHoldings();
     } catch (err) {
-      setUploadMessage({
-        type: 'error',
-        text: err instanceof Error ? err.message : 'Failed to upload tradebook',
-      });
+      setError(err instanceof Error ? err.message : 'Failed to upload order history');
+    } finally {
+      setUploadingOrderHistory(false);
     }
     event.target.value = '';
   };
 
-  const generateColumns = (items: Record<string, unknown>[]) => {
-    if (items.length === 0) {
-      setColumns([]);
-      return;
-    }
-    
-    const firstRow = items[0];
-    const cols: GridColDef[] = [];
-    
-    // Pin Symbol and Name columns
-    const pinnedFields = ['Symbol', 'Name'];
-    
-    Object.keys(firstRow).map((key) => {
-      const value = firstRow[key];
-      let type: 'string' | 'number' | 'boolean' | 'date' = 'string';
-      
-      if (typeof value === 'number') type = 'number';
-      else if (typeof value === 'boolean') type = 'boolean';
-      
-      const colDef: GridColDef & { pinned?: 'left' | 'right' } = {
-        field: key,
-        headerName: key,
-        type,
-        width: type === 'number' ? 120 : 180,
-        flex: type === 'string' ? 1 : 0,
-      };
-      
-      if (pinnedFields.includes(key)) {
-        colDef.pinned = 'left';
-      }
-      
-      cols.push(colDef);
-    });
-    
-    setColumns(cols);
-  };
-
-  const handleAnalyze = async () => {
-    if (!sessionId) {
-      setError('No active session. Please start a session first.');
-      return;
-    }
-
-    if (readiness && !readiness.ready_to_analyze) {
-      setError(`Cannot analyze: ${readiness.blocking_reason || 'Missing required data'}`);
-      return;
-    }
-    
-    resetAnalyze();
-    setError('');
-    
+  const handleClearOrderHistory = async () => {
+    if (!sessionId) return;
     try {
-      const response = await api.analyzeHoldings({
-        session_id: sessionId,
-        filters: {},
-        sort_by: 'ROI/Day',
+      await api.clearOrderHistory(sessionId);
+      setOrderHistory({
+        available: false,
+        trade_count: 0,
+        symbol_count: 0,
+        fetched_at: null,
+        source: null,
       });
-      await runAnalyze(() => Promise.resolve({ job_id: response.job_id }));
+      fetchHoldings();
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to start analysis';
-      if (errorMsg.includes('NOT_READY')) {
-        setError('Not ready to analyze. Please sync trades or upload tradebook first.');
-        fetchReadiness();
-      } else {
-        setError(errorMsg);
-      }
+      setError(err instanceof Error ? err.message : 'Failed to clear order history');
     }
   };
 
-  // Client-side filtered holdings
-  const filteredHoldings = useMemo(() => {
-    if (!searchText) return holdings;
-    
-    const search = searchText.toLowerCase();
-    return holdings.filter(row => 
-      Object.values(row).some(val => 
-        String(val).toLowerCase().includes(search)
-      )
-    );
-  }, [holdings, searchText]);
+  const formatNumber = (value: number | null, decimals: number = 2) => {
+    if (value === null || value === undefined) return '-';
+    return value.toFixed(decimals);
+  };
+
+  const formatCurrency = (value: number | null) => {
+    if (value === null || value === undefined) return '-';
+    return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  const broker = sessionInfo?.broker || 'upstox';
+  const isUpstox = broker === 'upstox';
 
   if (!sessionId) {
     return (
@@ -265,11 +170,21 @@ export default function HoldingsPage() {
         <Typography variant="h4">
           Holdings
         </Typography>
-        {lastUpdated && (
-          <Typography variant="body2" color="text.secondary">
-            Last updated: {lastUpdated.toLocaleTimeString()}
-          </Typography>
-        )}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          {lastUpdated && (
+            <Typography variant="body2" color="text.secondary">
+              Last updated: {lastUpdated.toLocaleTimeString()}
+            </Typography>
+          )}
+          <Button
+            variant="outlined"
+            startIcon={loading ? <CircularProgress size={20} /> : <RefreshIcon />}
+            onClick={handleRefresh}
+            disabled={loading}
+          >
+            Refresh
+          </Button>
+        </Box>
       </Box>
 
       {error && (
@@ -278,124 +193,77 @@ export default function HoldingsPage() {
         </Alert>
       )}
 
-      {/* Readiness Banner */}
-      {(readinessLoading || syncJobId) && (
-        <Paper sx={{ p: 2, mb: 2 }}>
-          {readinessLoading ? (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <CircularProgress size={20} />
-              <Typography variant="body2">Checking readiness...</Typography>
-            </Box>
-          ) : syncJobId ? (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <SyncIcon />
-              <Typography variant="body2">
-                Syncing trades... <Chip label={syncJobStatus || 'pending'} size="small" />
-              </Typography>
-              <LinearProgress sx={{ flexGrow: 1, ml: 2 }} />
-            </Box>
-          ) : null}
-        </Paper>
-      )}
-
-      {/* Trades Sync / Upload Section */}
-      {readiness && !readiness.trades_ready && (
-        <Paper sx={{ p: 2, mb: 2 }}>
-          <Typography variant="subtitle1" gutterBottom>
-            {readiness.broker === 'upstox' 
-              ? 'Fetch Order History from Upstox'
-              : 'Upload Tradebook'}
-          </Typography>
+      {/* Order History Section */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
+          <Box>
+            <Typography variant="h6" gutterBottom>
+              Order History
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              {orderHistory?.available 
+                ? `${orderHistory.trade_count} trades for ${orderHistory.symbol_count} symbols`
+                : 'No order history loaded'}
+              {orderHistory?.fetched_at && (
+                <span> (fetched {new Date(orderHistory.fetched_at).toLocaleString()})</span>
+              )}
+              {orderHistory?.source && (
+                <Chip 
+                  label={orderHistory.source === 'upstox_api' ? 'Upstox API' : 'Zerodha CSV'} 
+                  size="small" 
+                  sx={{ ml: 1 }} 
+                />
+              )}
+            </Typography>
+          </Box>
           
-          {readiness && readiness.broker === 'upstox' && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              <Typography variant="body2" color="text.secondary">
-                {readiness.blocking_reason === 'TRADES_SYNC_REQUIRED' 
-                  ? 'Order history needs to be synced before analysis.'
-                  : 'Click to sync 400 days of order history.'}
-              </Typography>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            {isUpstox ? (
               <Button
                 variant="contained"
                 color="primary"
-                startIcon={<SyncIcon />}
-                onClick={handleSyncTrades}
-                disabled={Boolean(syncJobId)}
+                startIcon={fetchingOrderHistory ? <CircularProgress size={20} color="inherit" /> : <SyncIcon />}
+                onClick={handleFetchOrderHistory}
+                disabled={fetchingOrderHistory}
               >
-                {syncJobId ? 'Syncing...' : 'Sync Order History'}
+                {fetchingOrderHistory ? 'Fetching...' : 'Fetch from Upstox'}
               </Button>
-            </Box>
-          )}
-
-          {readiness && readiness.broker === 'zerodha' && (
-            <Box>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                Upload your Zerodha tradebook CSV to enable analysis.
-                Required columns: symbol,isin,trade_date,exchange,segment,series,trade_type,auction,quantity,price,trade_id,order_id,order_execution_time
-              </Typography>
+            ) : (
               <Button
                 variant="contained"
                 component="label"
-                startIcon={<UploadIcon />}
+                startIcon={uploadingOrderHistory ? <CircularProgress size={20} color="inherit" /> : <UploadIcon />}
+                disabled={uploadingOrderHistory}
               >
-                Upload Tradebook
+                {uploadingOrderHistory ? 'Uploading...' : 'Upload CSV'}
                 <input
                   type="file"
                   accept=".csv"
                   hidden
-                  onChange={handleUploadTradebook}
+                  onChange={handleUploadOrderHistory}
                 />
               </Button>
-              {uploadMessage && (
-                <Alert severity={uploadMessage.type} sx={{ mt: 2 }} onClose={() => setUploadMessage(null)}>
-                  {uploadMessage.text}
-                </Alert>
-              )}
-            </Box>
-          )}
-        </Paper>
-      )}
-
-      {/* Market Data Missing Warning */}
-      {readiness && readiness.blocking_reason === 'MARKET_DATA_MISSING' && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
-          Market data is not fully loaded. Missing: {readiness.missing.candles.length} symbols for candles, {readiness.missing.cmp.length} symbols for CMP. 
-          Please run "Refresh Market Data" from the Administration page.
-        </Alert>
-      )}
-
-      {/* Controls */}
-      <Paper sx={{ p: 2, mb: 2 }}>
-        <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
-          {/* Analyze Button */}
-          <Button
-            variant="contained"
-            startIcon={isAnalyzing ? <CircularProgress size={20} color="inherit" /> : <AnalyzeIcon />}
-            onClick={handleAnalyze}
-            disabled={isAnalyzing || !readiness?.ready_to_analyze}
-          >
-            {isAnalyzing ? 'Analyzing...' : holdings.length > 0 ? 'Refresh' : 'Analyze'}
-          </Button>
-          {!readiness?.ready_to_analyze && readiness && (
-            <Chip label="Not Ready" color="warning" size="small" />
-          )}
-        </Box>
-
-        {/* Job Status */}
-        {isAnalyzing && (
-          <Box sx={{ mt: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Chip 
-              label={jobStatus || 'processing'} 
-              color={jobStatus === 'completed' ? 'success' : jobStatus === 'failed' ? 'error' : 'info'}
-              size="small"
-            />
-            <Typography variant="body2" color="text.secondary">
-              Analyzing... {(jobProgress * 100).toFixed(0)}% complete
-            </Typography>
+            )}
+            
+            {orderHistory?.available && (
+              <Button
+                variant="outlined"
+                color="error"
+                startIcon={<DeleteIcon />}
+                onClick={handleClearOrderHistory}
+              >
+                Clear
+              </Button>
+            )}
           </Box>
+        </Box>
+        
+        {fetchingOrderHistory && (
+          <LinearProgress sx={{ mt: 2 }} />
         )}
       </Paper>
 
-      {/* Results */}
+      {/* Holdings Table */}
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
           <CircularProgress />
@@ -403,44 +271,28 @@ export default function HoldingsPage() {
       ) : holdings.length === 0 ? (
         <Paper sx={{ p: 4, textAlign: 'center' }}>
           <Typography variant="body1" color="text.secondary">
-            No holdings data. Click "Analyze" to fetch holdings for your session.
+            No holdings data. Click "Refresh" to fetch holdings from your broker.
           </Typography>
         </Paper>
       ) : (
         <Paper sx={{ height: 600, width: '100%' }}>
           <DataGrid
-            rows={filteredHoldings}
-            columns={columns}
+            rows={holdings}
+            columns={columns.length > 0 ? columns : HOLDINGS_COLUMNS}
+            sortModel={sortModel}
+            onSortModelChange={setSortModel}
             initialState={{
               pagination: {
                 paginationModel: { pageSize: 25 },
               },
-              sorting: {
-                sortModel: [{ field: 'ROI/Day', sort: 'desc' }],
-              },
             }}
             pageSizeOptions={[10, 25, 50, 100]}
             disableRowSelectionOnClick
+            density="comfortable"
             slots={{
-              toolbar: () => (
-                <Box sx={{ p: 1, display: 'flex', gap: 2, alignItems: 'center' }}>
-                  <TextField
-                    size="small"
-                    placeholder="Search..."
-                    value={searchText}
-                    onChange={(e) => setSearchText(e.target.value)}
-                    InputProps={{
-                      startAdornment: (
-                        <InputAdornment position="start">
-                          <SearchIcon />
-                        </InputAdornment>
-                      ),
-                    }}
-                    sx={{ width: 250 }}
-                  />
-                  <Typography variant="body2" color="text.secondary">
-                    {filteredHoldings.length} of {holdings.length} rows
-                  </Typography>
+              noRowsOverlay: () => (
+                <Box sx={{ p: 2, textAlign: 'center' }}>
+                  <Typography color="text.secondary">No holdings to display</Typography>
                 </Box>
               ),
             }}

@@ -25,6 +25,7 @@ from api.routes import brokers as brokers_routes
 from api.routes import entry_strategy as entry_strategy_routes
 from api.routes import gtt as gtt_routes
 from api.routes import holdings as holdings_routes
+from api.routes import holdings_v2 as holdings_v2_routes
 from api.routes import jobs as jobs_routes
 from api.routes import market as market_routes
 from api.routes import plan as plan_routes
@@ -89,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(brokers_routes.zerodha_router)
     app.include_router(session_routes.router)
     app.include_router(holdings_routes.router)
+    app.include_router(holdings_v2_routes.router)
     app.include_router(plan_routes.router)
     app.include_router(plan_routes.dynamic_avg_router)
     app.include_router(risk_routes.router)

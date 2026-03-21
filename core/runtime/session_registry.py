@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -15,6 +16,8 @@ from core.session_manager import SessionManager
 from core.session_tokens import TokenBundle
 from db import models
 from db.database import SessionLocal
+
+logger = logging.getLogger("tradecraftx.session")
 
 if TYPE_CHECKING:
     from brokers.base_broker import BaseBroker
@@ -227,7 +230,25 @@ class SessionRegistry:
             if context.expires_at and context.expires_at < datetime.now(timezone.utc):
                 del self._records[session_id]
                 return None
+            
+            # Load order history from DB if not already loaded
+            if context.session_cache and not context.session_cache.get_order_history_status()["available"]:
+                self._load_session_order_history(context)
+            
             return context
+
+    def _load_session_order_history(self, context: "SessionContext") -> None:
+        """Load order history from database into session cache."""
+        try:
+            from api.routes.holdings_v2 import _load_trades_from_db
+            
+            trades = _load_trades_from_db(context.session_id)
+            if trades:
+                source = trades[0].get("source", "unknown") if trades else None
+                context.session_cache.set_order_history(trades, source=source)
+                logger.info(f"Loaded {len(trades)} trades from DB for session {context.session_id}")
+        except Exception as e:
+            logger.warning(f"Failed to load order history from DB: {e}")
 
     def refresh_session(self, session_id: str) -> Optional[SessionContext]:
         context = self.get_session(session_id)
@@ -236,6 +257,12 @@ class SessionRegistry:
         return context
 
     def evict(self, session_id: str) -> None:
+        """Evict a session and clear all session-scoped data."""
+        context = self._records.get(session_id)
+        if context:
+            # Clear session-scoped holdings and order history
+            self._clear_session_data(context)
+        
         with self._lock:
             self._records.pop(session_id, None)
 
@@ -249,8 +276,26 @@ class SessionRegistry:
                 or ctx.market_data_connection_id == broker_connection_id
             ]
             for sid in to_evict:
+                ctx = self._records.get(sid)
+                if ctx:
+                    self._clear_session_data(ctx)
                 del self._records[sid]
             return len(to_evict)
+
+    def _clear_session_data(self, context: "SessionContext") -> None:
+        """Clear all session-scoped data including holdings and order history."""
+        try:
+            # Clear order history from session cache
+            if hasattr(context, 'session_cache') and context.session_cache:
+                context.session_cache.clear_order_history()
+            
+            # Clear holdings (set to empty list)
+            if hasattr(context, 'session_cache') and context.session_cache:
+                context.session_cache.holdings = []
+            
+            logging.info(f"Cleared session data for session: {context.session_id}")
+        except Exception as e:
+            logging.warning(f"Failed to clear session data: {e}")
 
     def active_sessions(self) -> int:
         with self._lock:

@@ -118,6 +118,45 @@ export interface HoldingsAnalyzeRequest {
   sort_by?: string;
 }
 
+export interface OrderHistoryStatus {
+  available: boolean;
+  trade_count: number;
+  symbol_count: number;
+  fetched_at: string | null;
+  source: string | null;
+}
+
+export interface HoldingsRow {
+  symbol: string;
+  exchange: string;
+  quantity: number;
+  average_price: number;
+  last_price: number | null;
+  invested: number;
+  pnl: number | null;
+  pnl_pct: number | null;
+  avg_buy_price: number | null;
+  total_buy_qty: number | null;
+  avg_sell_price: number | null;
+  total_sell_qty: number | null;
+  buy_value: number | null;
+  sell_value: number | null;
+  net_value: number | null;
+  first_buy_date: string | null;
+  last_buy_date: string | null;
+  trend: string | null;
+  trend_days: number | null;
+  trend_roi: number | null;
+}
+
+export interface HoldingsResponse {
+  session_id: string;
+  broker: string;
+  broker_user_id: string;
+  holdings: HoldingsRow[];
+  order_history: OrderHistoryStatus;
+}
+
 export interface PlanLatestResponse {
   strategy_type: 'multi_level' | 'dynamic_averaging';
   plan: Record<string, unknown>[];
