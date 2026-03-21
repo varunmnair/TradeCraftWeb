@@ -33,12 +33,19 @@ class ConfirmTokenStore:
         payload_hash = _hash_payload(payload)
         token = secrets.token_urlsafe(24)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
-        entry = ConfirmEntry(session_id=session_id, user_id=user_id, payload_hash=payload_hash, expires_at=expires_at)
+        entry = ConfirmEntry(
+            session_id=session_id,
+            user_id=user_id,
+            payload_hash=payload_hash,
+            expires_at=expires_at,
+        )
         with self._lock:
             self._entries[token] = entry
         return {"token": token, "expires_at": expires_at.isoformat()}
 
-    def verify(self, *, token: str, session_id: str, user_id: int | None, payload) -> None:
+    def verify(
+        self, *, token: str, session_id: str, user_id: int | None, payload
+    ) -> None:
         payload_hash = _hash_payload(payload)
         with self._lock:
             entry = self._entries.get(token)

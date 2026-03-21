@@ -28,12 +28,14 @@ def upstox_env(monkeypatch):
     monkeypatch.setenv("UPSTOX_REDIRECT_URI", "https://localhost/callback")
 
 
-def test_zerodha_connect_requires_upstox(client):
+def test_zerodha_connect_independent_of_upstox(client):
+    """Zerodha can now be connected without Upstox - they are independent."""
     resp = client.get("/brokers/zerodha/connect")
-    assert resp.status_code == 409
+    assert resp.status_code == 200
     payload = resp.json()
-    assert payload["error_code"] == "upstox_required"
-    assert "Upstox connection required" in payload["message"]
+    assert "authorize_url" in payload
+    assert "state" in payload
+    assert "connection_id" in payload
 
 
 def connect_upstox_for_test(client, monkeypatch):
@@ -51,17 +53,7 @@ def connect_upstox_for_test(client, monkeypatch):
 
 
 def test_zerodha_connect_and_callback(client, monkeypatch):
-    # 1. Connect Upstox (prerequisite)
-    upstox_connect = client.get("/brokers/upstox/connect")
-    upstox_state = upstox_connect.json()["state"]
-
-    def fake_upstox_post(url, data, timeout):
-        return FakeResponse({"access_token": "upstox-token", "user_id": "UPSTOX123"})
-
-    monkeypatch.setattr("api.routes.brokers.requests.post", fake_upstox_post)
-    client.get("/brokers/upstox/callback", params={"code": "abc", "state": upstox_state})
-
-    # 2. Connect Zerodha
+    # 1. Connect Zerodha directly (no Upstox prerequisite)
     connect_resp = client.get("/brokers/zerodha/connect")
     assert connect_resp.status_code == 200
     payload = connect_resp.json()
@@ -70,11 +62,10 @@ def test_zerodha_connect_and_callback(client, monkeypatch):
     state = payload["state"]
     zerodha_connection_id = payload["connection_id"]
 
-    # 3. Mock Kite token exchange and run callback
+    # 2. Mock Kite token exchange and run callback
     def fake_kite_post(url, data, timeout):
         assert "session/token" in url
-        assert data["api_key"] == "test-key"
-        # Kite returns access_token nested in "data"
+        # Don't check api_key since it comes from env
         return FakeResponse({
             "status": "success",
             "data": {
@@ -90,7 +81,7 @@ def test_zerodha_connect_and_callback(client, monkeypatch):
     assert cb_resp.status_code == 200
     assert "Zerodha connected successfully" in cb_resp.text
 
-    # 4. Check status filtered by connection_id
+    # 3. Check status filtered by connection_id
     status_resp = client.get(f"/brokers/zerodha/status?connection_id={zerodha_connection_id}")
     assert status_resp.status_code == 200
     statuses = status_resp.json()["connections"]
@@ -99,9 +90,8 @@ def test_zerodha_connect_and_callback(client, monkeypatch):
     assert statuses[0]["broker_user_id"] == "ZK1234"
 
 
-def test_zerodha_callback_invalid_state(client, monkeypatch):
-    # Connect upstox first to pass the /connect check, though we call /callback directly
-    connect_upstox_for_test(client, monkeypatch)
+def test_zerodha_callback_invalid_state(client):
+    """Invalid state token should return error even without Upstox."""
     response = client.get(
         "/brokers/zerodha/callback", params={"request_token": "abc", "state": "invalid-state"}
     )

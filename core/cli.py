@@ -1,43 +1,49 @@
-import math
-import typer
 import json
-import os
 import logging
 import traceback
 
+import typer
+
 from core.entry import detect_duplicates
-from core.multilevel_entry import MultiLevelEntryStrategy
 from core.gtt_manage import GTTManager
 from core.holdings import HoldingsAnalyzer
+from core.multilevel_entry import MultiLevelEntryStrategy
 from core.utils import print_table
 
 app = typer.Typer()
 
 current_session = None
 
+
 def set_current_session(s):
     global current_session
     current_session = s
 
+
 def get_holdings_analyzer():
     if current_session:
-        if hasattr(current_session, 'broker'):
+        if hasattr(current_session, "broker"):
             if current_session.broker:
                 broker = current_session.broker
-                has_user_id = hasattr(broker, 'user_id')
-                has_broker_name = hasattr(broker, 'broker_name')
-                logging.debug(f"get_holdings_analyzer: broker has user_id: {has_user_id}, broker_name: {has_broker_name}")
+                has_user_id = hasattr(broker, "user_id")
+                has_broker_name = hasattr(broker, "broker_name")
+                logging.debug(
+                    f"get_holdings_analyzer: broker has user_id: {has_user_id}, broker_name: {has_broker_name}"
+                )
                 if has_user_id and has_broker_name:
                     return HoldingsAnalyzer(broker.user_id, broker.broker_name)
     logging.info("get_holdings_analyzer: returning None")
     return None
 
+
 GTT_PLAN_CACHE_PATH = "data/gtt_plan_cache.json"
 
 from core.utils import setup_logging
+
 setup_logging(logging.INFO)
 
 # ──────────────── Commands ──────────────── #
+
 
 @app.command()
 def write_roi():
@@ -47,6 +53,7 @@ def write_roi():
     holdings_analyzer = get_holdings_analyzer()
     if holdings_analyzer:
         holdings_analyzer.write_roi_results(results)
+
 
 @app.command()
 def check_duplicates():
@@ -61,12 +68,17 @@ def check_duplicates():
     else:
         print("\n✅ No duplicate entries found.")
 
+
 @app.command()
-def list_entry_levels(filter_ltp: float = typer.Option(None, help="Filter orders with LTP greater than this value")):
+def list_entry_levels(
+    filter_ltp: float = typer.Option(
+        None, help="Filter orders with LTP greater than this value"
+    )
+):
     """List GTT orders based on multi-level entry strategy."""
     try:
         current_session.refresh_all_caches()
-        
+
         duplicates = detect_duplicates(current_session.get_entry_levels())
         if duplicates:
             print("\n⚠️ Duplicate entries found in entry_levels.csv:")
@@ -80,50 +92,74 @@ def list_entry_levels(filter_ltp: float = typer.Option(None, help="Filter orders
             cmp_manager=current_session.get_cmp_manager(),
             holdings=current_session.get_holdings(),
             entry_levels=current_session.get_entry_levels(),
-            gtt_cache=current_session.get_gtt_cache()
+            gtt_cache=current_session.get_gtt_cache(),
         )
 
         # 2. Identify candidates and generate the plan
         candidates = planner.identify_candidates()
-        new_orders = planner.generate_plan(candidates, apply_risk_management=False)
-        skipped_orders = planner.skipped_orders
+        plan_result = planner.generate_plan(candidates, apply_risk_management=False)
+        new_orders = plan_result.get("plan", [])
+        pending_cmp = plan_result.get("pending_cmp", [])
+        skipped_orders = plan_result.get("skipped", [])
 
-        # 3. Display skipped orders
-        # if skipped_orders:
-        #     display_skipped = [{"Symbol": o["symbol"], "Skip Reason": o["skip_reason"]} for o in skipped_orders]
-        #     print_table(
-        #         sorted(display_skipped, key=lambda item: item['Symbol']),
-        #         ["Symbol", "Skip Reason"],
-        #         title="📌 Skipped Multi-Level Entry Symbols",
-        #         spacing=6
-        #     )
+        # 3. Display pending CMP orders
+        if pending_cmp:
+            display_pending = [{"Symbol": o["symbol"], "Entry Levels": o["entry_levels"], "Reason": o["skip_reason"]} for o in pending_cmp]
+            print_table(
+                sorted(display_pending, key=lambda item: item["Symbol"]),
+                ["Symbol", "Entry Levels", "Reason"],
+                title="⏳ Pending CMP (symbols without current market price)",
+                spacing=6
+            )
 
-        # 4. Write plan to cache
+        # 4. Display skipped orders
+        if skipped_orders:
+            display_skipped = [{"Symbol": o["symbol"], "Skip Reason": o["skip_reason"]} for o in skipped_orders]
+            print_table(
+                sorted(display_skipped, key=lambda item: item["Symbol"]),
+                ["Symbol", "Skip Reason"],
+                title="📌 Skipped Multi-Level Entry Symbols",
+                spacing=6
+            )
+
+        # 5. Write plan to cache
         current_session.write_gtt_plan(new_orders)
 
         # 5. Filter and display the plan
         if filter_ltp is not None:
-            new_orders = [o for o in new_orders if o.get("ltp") and o["ltp"] > filter_ltp]
+            new_orders = [
+                o for o in new_orders if o.get("ltp") and o["ltp"] > filter_ltp
+            ]
 
         if new_orders:
             display_orders = []
             for order in new_orders:
                 order_amount = round(order["price"] * order["qty"], 2)
-                display_orders.append({
-                    "Symbol": order["symbol"],
-                    "Order Price": order["price"],
-                    "Trigger Price": order["trigger"],
-                    "LTP": order["ltp"],
-                    "Order Amount": order_amount,
-                    "Entry Level": order["entry"],
-                    "Risk Adj.": order.get("risk_adj", "N/A")
-                })
+                display_orders.append(
+                    {
+                        "Symbol": order["symbol"],
+                        "Order Price": order["price"],
+                        "Trigger Price": order["trigger"],
+                        "LTP": order["ltp"],
+                        "Order Amount": order_amount,
+                        "Entry Level": order["entry"],
+                        "Risk Adj.": order.get("risk_adj", "N/A"),
+                    }
+                )
 
             print_table(
-                sorted(display_orders, key=lambda item: item['Symbol']),
-                ["Symbol", "Order Price", "Trigger Price", "LTP", "Order Amount", "Entry Level", "Risk Adj."],
+                sorted(display_orders, key=lambda item: item["Symbol"]),
+                [
+                    "Symbol",
+                    "Order Price",
+                    "Trigger Price",
+                    "LTP",
+                    "Order Amount",
+                    "Entry Level",
+                    "Risk Adj.",
+                ],
                 title="📊 Draft GTT Plan - Multi-Level Entry Strategy",
-                spacing=6
+                spacing=6,
             )
         else:
             print("\nℹ️  No Multi-Level Entry plans to display.")
@@ -131,6 +167,7 @@ def list_entry_levels(filter_ltp: float = typer.Option(None, help="Filter orders
     except Exception as e:
         typer.echo(f"❌ Exception in list_entry_levels: {e}")
         traceback.print_exc()
+
 
 @app.command()
 def apply_risk_management():
@@ -147,33 +184,36 @@ def apply_risk_management():
             cmp_manager=current_session.get_cmp_manager(),
             holdings=current_session.get_holdings(),
             entry_levels=current_session.get_entry_levels(),
-            gtt_cache=current_session.get_gtt_cache()
+            gtt_cache=current_session.get_gtt_cache(),
         )
 
         final_plan = planner.apply_risk_to_plan(draft_plan)
-        current_session.write_gtt_plan(final_plan) # Overwrite cache with final plan
+        current_session.write_gtt_plan(final_plan)  # Overwrite cache with final plan
 
         if final_plan:
             display_orders = []
             for order in final_plan:
                 order_amount = round(order["price"] * order["qty"], 2)
-                display_orders.append({
-                    "Symbol": order["symbol"],
-                    "Order Price": order["price"],
-                    "Qty": order["qty"],
-                    "Order Amount": order_amount,
-                    "Risk Adj.": order.get("risk_adj", "N/A"),
-                    "Reason": order.get("risk_reasons", "")
-                })
+                display_orders.append(
+                    {
+                        "Symbol": order["symbol"],
+                        "Order Price": order["price"],
+                        "Qty": order["qty"],
+                        "Order Amount": order_amount,
+                        "Risk Adj.": order.get("risk_adj", "N/A"),
+                        "Reason": order.get("risk_reasons", ""),
+                    }
+                )
             print_table(
-                sorted(display_orders, key=lambda item: item['Symbol']),
+                sorted(display_orders, key=lambda item: item["Symbol"]),
                 ["Symbol", "Order Price", "Qty", "Order Amount", "Risk Adj.", "Reason"],
                 title="📊 Finalized GTT Plan (After Risk Management)",
-                spacing=4
+                spacing=4,
             )
     except Exception as e:
         print(f"❌ An error occurred while applying risk management: {e}")
         traceback.print_exc()
+
 
 @app.command()
 def place_gtt_orders():
@@ -185,7 +225,9 @@ def place_gtt_orders():
         logging.debug("No GTT orders found in cache.")
         return
 
-    manager = GTTManager(current_session.broker, current_session.get_cmp_manager(), current_session)
+    manager = GTTManager(
+        current_session.broker, current_session.get_cmp_manager(), current_session
+    )
 
     print("\n📦 Placing GTT orders...")
 
@@ -195,7 +237,7 @@ def place_gtt_orders():
             placed_orders,
             ["symbol", "price", "trigger", "status"],
             title="✅ GTT Order Placement Summary",
-            spacing=6
+            spacing=6,
         )
     except Exception as e:
         print(f"❌ Failed to place GTT orders: {e}")
@@ -207,17 +249,22 @@ def place_gtt_orders():
     except Exception as e:
         print(f"⚠️ Failed to delete cache file: {e}")
 
+
 @app.command()
 def place_dynamic_averaging_orders():
     """Place GTT orders from cached dynamic averaging plan, deleting existing GTTs for symbols in the plan."""
     current_session.refresh_all_caches()
-    new_orders = current_session.read_gtt_plan()  # Assuming plan_dynamic_avg writes to the same cache as list_entry_levels
+    new_orders = (
+        current_session.read_gtt_plan()
+    )  # Assuming plan_dynamic_avg writes to the same cache as list_entry_levels
 
     if not new_orders:
         print("⚠️ No dynamic averaging GTT orders found in cache.")
         return
 
-    manager = GTTManager(current_session.broker, current_session.get_cmp_manager(), current_session)
+    manager = GTTManager(
+        current_session.broker, current_session.get_cmp_manager(), current_session
+    )
 
     # --- Deletion Logic ---
     new_plan_symbols = {order["symbol"] for order in new_orders}
@@ -225,22 +272,34 @@ def place_dynamic_averaging_orders():
         all_gtts = current_session.get_gtt_cache()
         symbols_to_delete = []
         for g in all_gtts:
-            if g.get("status", "").lower() == "active" and g.get("orders") and g["orders"][0].get("transaction_type") == "BUY":
+            if (
+                g.get("status", "").lower() == "active"
+                and g.get("orders")
+                and g["orders"][0].get("transaction_type") == "BUY"
+            ):
                 symbol = g.get("condition", {}).get("tradingsymbol")
                 if symbol and symbol in new_plan_symbols:
                     symbols_to_delete.append(symbol)
-        
+
         symbols_to_delete = list(set(symbols_to_delete))
 
         if symbols_to_delete:
-            logging.debug(f"Attempting to delete existing GTTs for symbols in dynamic averaging plan: {symbols_to_delete}")
+            logging.debug(
+                f"Attempting to delete existing GTTs for symbols in dynamic averaging plan: {symbols_to_delete}"
+            )
             deleted_gtt_symbols = manager.delete_gtts_for_symbols(symbols_to_delete)
             if deleted_gtt_symbols:
-                print(f"Successfully deleted existing GTTs for: {', '.join(deleted_gtt_symbols)}")
+                print(
+                    f"Successfully deleted existing GTTs for: {', '.join(deleted_gtt_symbols)}"
+                )
             else:
-                print("No existing GTTs found to delete for the dynamic averaging plan symbols.")
+                print(
+                    "No existing GTTs found to delete for the dynamic averaging plan symbols."
+                )
         else:
-            print("No active, non-triggered GTTs found for symbols in the new plan. Nothing to delete.")
+            print(
+                "No active, non-triggered GTTs found for symbols in the new plan. Nothing to delete."
+            )
     # --- End Deletion Logic ---
 
     print("\n📦 Placing dynamic averaging GTT orders...")
@@ -251,7 +310,7 @@ def place_dynamic_averaging_orders():
             placed_orders,
             ["symbol", "price", "trigger", "status"],
             title="✅ Dynamic Averaging GTT Order Placement Summary",
-            spacing=6
+            spacing=6,
         )
     except Exception as e:
         print(f"❌ Failed to place dynamic averaging GTT orders: {e}")
@@ -265,22 +324,36 @@ def place_dynamic_averaging_orders():
 
 
 @app.command()
-def adjust_gtt_orders(target_variance: float = typer.Option(..., help="Target variance to adjust GTTs")):
+def adjust_gtt_orders(
+    target_variance: float = typer.Option(..., help="Target variance to adjust GTTs")
+):
     """Adjust GTT orders to match target variance."""
     current_session.refresh_all_caches()
-    manager = GTTManager(current_session.broker, current_session.get_cmp_manager(), current_session)
+    manager = GTTManager(
+        current_session.broker, current_session.get_cmp_manager(), current_session
+    )
     orders = manager.analyze_gtt_buy_orders()
     to_adjust = [o for o in orders if o["Variance (%)"] < target_variance]
 
     from core.entry import BaseEntryStrategy
-    adjusted_symbols = manager.adjust_orders(to_adjust, target_variance, BaseEntryStrategy.adjust_trigger_and_order_price)
+
+    adjusted_symbols = manager.adjust_orders(
+        to_adjust, target_variance, BaseEntryStrategy.adjust_trigger_and_order_price
+    )
     print_table(adjusted_symbols, ["Symbol", "Trigger Price", "LTP", "Variance (%)"])
 
+
 @app.command()
-def delete_gtt_orders(threshold: float = typer.Option(..., help="Variance threshold above which GTTs will be deleted")):
+def delete_gtt_orders(
+    threshold: float = typer.Option(
+        ..., help="Variance threshold above which GTTs will be deleted"
+    )
+):
     """Delete GTT orders above variance threshold."""
     current_session.refresh_all_caches()
-    manager = GTTManager(current_session.broker, current_session.get_cmp_manager(), current_session)
+    manager = GTTManager(
+        current_session.broker, current_session.get_cmp_manager(), current_session
+    )
     orders = manager.analyze_gtt_buy_orders()
     to_delete = [o for o in orders if o["Variance (%)"] > threshold]
 
@@ -290,16 +363,21 @@ def delete_gtt_orders(threshold: float = typer.Option(..., help="Variance thresh
         print_table(
             [{"Symbol": s, "Status": "Deleted"} for s in deleted],
             ["Symbol", "Status"],
-            title="🗑️ Deleting GTTs"
+            title="🗑️ Deleting GTTs",
         )
     else:
         print("⚠️ No GTTs were deleted.")
 
+
 @app.command()
-def analyze_gtt_variance(threshold: float = typer.Option(100.0, help="Variance threshold to filter GTTs")):
+def analyze_gtt_variance(
+    threshold: float = typer.Option(100.0, help="Variance threshold to filter GTTs")
+):
     """Analyze buy GTT orders and display those below a variance threshold."""
     current_session.refresh_all_caches()
-    manager = GTTManager(current_session.broker, current_session.get_cmp_manager(), current_session)
+    manager = GTTManager(
+        current_session.broker, current_session.get_cmp_manager(), current_session
+    )
 
     orders = manager.analyze_gtt_buy_orders()
     filtered = [o for o in orders if o["Variance (%)"] <= threshold]
@@ -307,31 +385,40 @@ def analyze_gtt_variance(threshold: float = typer.Option(100.0, help="Variance t
     print_table(
         filtered,
         ["Symbol", "Trigger Price", "LTP", "Variance (%)", "Qty", "Buy Amount"],
-        title=f"📉 GTT Orders Below Threshold ({threshold}%)"
+        title=f"📉 GTT Orders Below Threshold ({threshold}%)",
     )
+
 
 @app.command()
 def list_duplicate_gtt_symbols():
     """List symbols with duplicate GTT orders."""
     current_session.refresh_all_caches()
-    manager = GTTManager(current_session.broker, current_session.get_cmp_manager(), current_session)
+    manager = GTTManager(
+        current_session.broker, current_session.get_cmp_manager(), current_session
+    )
 
     duplicates = manager.get_duplicate_gtt_symbols()
     return duplicates
+
 
 @app.command()
 def show_total_buy_gtt_amount(threshold: float = None) -> float:
     """Show total capital required for buy GTT orders."""
     current_session.refresh_all_caches()
-    manager = GTTManager(current_session.broker, current_session.get_cmp_manager(), current_session)
-    
+    manager = GTTManager(
+        current_session.broker, current_session.get_cmp_manager(), current_session
+    )
+
     total_amount = manager.get_total_buy_gtt_amount(threshold)
     return total_amount
+
 
 @app.command()
 def analyze_holdings(
     filters: str = typer.Option(None, help="JSON string of filters"),
-    sort_by: str = typer.Option("W ROI", help="Column to sort by (e.g., 'ROI/Day', 'P&L')")
+    sort_by: str = typer.Option(
+        "W ROI", help="Column to sort by (e.g., 'ROI/Day', 'P&L')"
+    ),
 ):
     """Analyze holdings and display ROI metrics including Weighted ROI."""
     logging.debug("Entering analyze_holdings command.")
@@ -343,7 +430,9 @@ def analyze_holdings(
             try:
                 parsed_filters = json.loads(filters)
                 if not isinstance(parsed_filters, dict):
-                    raise ValueError("Filter must be a valid JSON object (e.g., '{\"P&L%\": -5}').")
+                    raise ValueError(
+                        "Filter must be a valid JSON object (e.g., '{\"P&L%\": -5}')."
+                    )
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"❌ Invalid filter format: {e}")
                 return
@@ -355,7 +444,7 @@ def analyze_holdings(
                 current_session.broker,
                 current_session.get_cmp_manager(),
                 parsed_filters,
-                sort_by=sort_by
+                sort_by=sort_by,
             )
             logging.debug(f"Received {len(results)} results from analyze_holdings.")
 
@@ -367,15 +456,27 @@ def analyze_holdings(
 
             print_table(
                 results,
-                ["Symbol", "Invested", "P&L", "Yld/Day", "Age", "P&L%", "ROI/Day", "W ROI", "Trend", "Quality"],
+                [
+                    "Symbol",
+                    "Invested",
+                    "P&L",
+                    "Yld/Day",
+                    "Age",
+                    "P&L%",
+                    "ROI/Day",
+                    "W ROI",
+                    "Trend",
+                    "Quality",
+                ],
                 title="📊 Holdings ROI",
-                spacing=6
+                spacing=6,
             )
         else:
             logging.warning("Could not get holdings analyzer.")
     except Exception as e:
         logging.error(f"Error in analyze_holdings command: {e}")
         print(f"❌ Error analyzing holdings: {e}")
+
 
 @app.command()
 def update_tradebook():
@@ -388,6 +489,7 @@ def update_tradebook():
         for key, value in summary.items():
             print(f" - {key.replace('_', ' ').capitalize()}: {value}")
 
+
 @app.command()
 def get_total_invested_amount():
     current_session.refresh_all_caches()
@@ -397,11 +499,13 @@ def get_total_invested_amount():
         total = analyzer.get_total_invested(holdings)
         return {"total_invested": round(total, 2)}
 
+
 @app.command()
 def plan_dynamic_avg():
     """Plan GTT buy orders for dynamic averaging strategy."""
     current_session.refresh_all_caches()
     from core.dynamic_avg import DynamicAveragingPlanner
+
     planner = DynamicAveragingPlanner(
         broker=current_session.broker,
         cmp_manager=current_session.get_cmp_manager(),
@@ -414,26 +518,35 @@ def plan_dynamic_avg():
 
     display_plan = []
     for order in plan:
-        display_plan.append({
-            "Symbol": order["symbol"],
-            "Order Price": order["price"],
-            "Trigger Price": order["trigger"],
-            "LTP": order["ltp"],
-            "Order Amt": round(order["qty"] * order["price"], 2),
-            "DA Leg": order["leg"],
-            "Entry Level": order["entry"],
-        })
+        display_plan.append(
+            {
+                "Symbol": order["symbol"],
+                "Order Price": order["price"],
+                "Trigger Price": order["trigger"],
+                "LTP": order["ltp"],
+                "Order Amt": round(order["qty"] * order["price"], 2),
+                "DA Leg": order["leg"],
+                "Entry Level": order["entry"],
+            }
+        )
 
     if display_plan:
         print_table(
-            sorted(display_plan, key=lambda item: item['Symbol']),
-            ["Symbol", "Order Price", "Trigger Price", "LTP", "Order Amt",  "DA Leg", "Entry Level"],
+            sorted(display_plan, key=lambda item: item["Symbol"]),
+            [
+                "Symbol",
+                "Order Price",
+                "Trigger Price",
+                "LTP",
+                "Order Amt",
+                "DA Leg",
+                "Entry Level",
+            ],
             title="📉 Dynamic Averaging Buy Plan",
-            spacing=6
+            spacing=6,
         )
     else:
         print("\nℹ️ No Dynamic Averaging buy plan to display.")
-
 
     # if hasattr(planner, "skipped_symbols") and planner.skipped_symbols:
     #     print_table(
@@ -445,6 +558,7 @@ def plan_dynamic_avg():
 
     current_session.write_gtt_plan(plan)
 
+
 @app.command()
 def exit():
     """Exit the application."""
@@ -455,34 +569,48 @@ def exit():
 if __name__ == "__main__":
     app()
 
+
 @app.command()
-def download_historical_trades(start_date: str = typer.Option(..., help="Start date in YYYY-MM-DD format"), end_date: str = typer.Option(..., help="End date in YYYY-MM-DD format")):
+def download_historical_trades(
+    start_date: str = typer.Option(..., help="Start date in YYYY-MM-DD format"),
+    end_date: str = typer.Option(..., help="End date in YYYY-MM-DD format"),
+):
     """Download historical trades from the broker."""
     try:
         holdings_analyzer = get_holdings_analyzer()
         if holdings_analyzer:
-            summary = holdings_analyzer.download_historical_trades(current_session.broker, start_date, end_date)
+            summary = holdings_analyzer.download_historical_trades(
+                current_session.broker, start_date, end_date
+            )
             print(summary.get("message"))
         else:
             print("Could not get holdings analyzer.")
     except Exception as e:
         print(f"❌ Error downloading historical trades: {e}")
 
+
 from agent.manager import AgentManager
+
 
 @app.command()
 def ask_ai_analyst():
     """
     Handles the AI analyst interaction.
     """
-    if not current_session or not hasattr(current_session, 'broker') or not current_session.broker:
+    if (
+        not current_session
+        or not hasattr(current_session, "broker")
+        or not current_session.broker
+    ):
         print("❌ Broker session not initialized. Please login first.")
         return
 
     agent_manager = AgentManager(current_session.broker)
     while True:
         try:
-            user_query = input("Ask your AI analyst a question (or press Enter to exit): ").strip()
+            user_query = input(
+                "Ask your AI analyst a question (or press Enter to exit): "
+            ).strip()
             if not user_query:
                 break
 
@@ -492,15 +620,15 @@ def ask_ai_analyst():
         except Exception as e:
             print(f"❌ An unexpected error occurred: {e}")
 
+
 @app.command()
 def revise_entry_levels():
     """Revise entry levels for all symbols based on technical analysis."""
     try:
-        from datetime import datetime, timedelta
+        from datetime import datetime
+
         print("🔄 Refreshing caches and preparing for entry level revision...")
         current_session.refresh_all_caches()
-        broker = current_session.broker
-        cmp_manager = current_session.get_cmp_manager()
         all_entry_levels = current_session.get_entry_levels()
 
         if not all_entry_levels:
@@ -513,65 +641,98 @@ def revise_entry_levels():
         today = datetime.now().date()
         symbols_to_revise = []
         for scrip in all_entry_levels:
-            last_updated_str = scrip.get("Last Updated") # Match CSV header "Last Updated"
+            last_updated_str = scrip.get(
+                "Last Updated"
+            )  # Match CSV header "Last Updated"
             # If last_updated is missing, do not assume the symbol needs revision.
             # Also check if it's not a string (e.g., NaN which is a float)
             if not isinstance(last_updated_str, str) or not last_updated_str.strip():
-                logging.debug(f"Skipping revision for {scrip.get('symbol')} because 'Last Updated' is missing or not a string.")
+                logging.debug(
+                    f"Skipping revision for {scrip.get('symbol')} because 'Last Updated' is missing or not a string."
+                )
                 continue
             try:
-                last_updated_date = datetime.strptime(last_updated_str, '%d-%b-%y').date()
+                last_updated_date = datetime.strptime(
+                    last_updated_str, "%d-%b-%y"
+                ).date()
                 if (today - last_updated_date).days > 30:
                     symbols_to_revise.append(scrip)
             except ValueError:
-                logging.warning(f"Could not parse 'last_updated' date for {scrip.get('symbol')}: '{last_updated_str}'. Revising anyway.")
+                logging.warning(
+                    f"Could not parse 'last_updated' date for {scrip.get('symbol')}: '{last_updated_str}'. Revising anyway."
+                )
                 symbols_to_revise.append(scrip)
-        
+
         revision_results = []
         total_symbols = len(symbols_to_revise)
-        print(f"Found {total_symbols} symbols (out of {len(all_entry_levels)}) needing revision (last updated > 30 days ago). This may take a few minutes...")
+        print(
+            f"Found {total_symbols} symbols (out of {len(all_entry_levels)}) needing revision (last updated > 30 days ago). This may take a few minutes..."
+        )
 
         for i, scrip in enumerate(symbols_to_revise):
             symbol = scrip.get("symbol")
             # Skip if symbol is not a valid string (e.g., it's NaN, None, or a number)
-            if not isinstance(symbol, str) or not symbol.strip() or symbol.strip().isnumeric():
+            if (
+                not isinstance(symbol, str)
+                or not symbol.strip()
+                or symbol.strip().isnumeric()
+            ):
                 logging.debug(f"Skipping invalid symbol in entry levels: {symbol}")
                 continue
 
-            #print(f"  ({i+1}/{total_symbols}) Analyzing {symbol}...")
+            # print(f"  ({i+1}/{total_symbols}) Analyzing {symbol}...")
             try:
                 reviser = EntryLevelReviser(symbol, current_session, all_entry_levels)
                 result = reviser.revise_entry_levels()
 
-                old_l1 = result['original']['l1']
-                new_l1 = result['final']['l1']
+                old_l1 = result["original"]["l1"]
+                new_l1 = result["final"]["l1"]
                 change_pct_l1 = ((new_l1 - old_l1) / old_l1 * 100) if old_l1 else 0
-                
-                metrics = result['metrics']
+
+                metrics = result["metrics"]
                 from core.entry_level_reviser import DEFAULT_CONFIG as reviser_config
 
-                revision_results.append({
-                    "Symbol": symbol,
-                    "Old Levels": f"[{old_l1:.1f}, {result['original']['l2']:.1f}, {result['original']['l3']:.1f}]",
-                    "New Levels": f"[{new_l1:.1f}, {result['final']['l2']:.1f}, {result['final']['l3']:.1f}]",
-                    "L1 Δ%": f"{change_pct_l1:.2f}%",
-                    "LTP": f"{metrics['ltp']:.2f}",
-                    "Regime": metrics['regime'],
-                    "ATR": f"{metrics['atr']:.2f}",
-                    "RSI": f"{metrics[f'rsi_{reviser_config['INDICATOR_WINDOW']}']:.1f}",
-                    "ADX": f"{metrics[f'adx_{reviser_config['ADX_PERIOD']}']:.1f}",
-                    "Rationale": result['rationale']
-                })
+                revision_results.append(
+                    {
+                        "Symbol": symbol,
+                        "Old Levels": f"[{old_l1:.1f}, {result['original']['l2']:.1f}, {result['original']['l3']:.1f}]",
+                        "New Levels": f"[{new_l1:.1f}, {result['final']['l2']:.1f}, {result['final']['l3']:.1f}]",
+                        "L1 Δ%": f"{change_pct_l1:.2f}%",
+                        "LTP": f"{metrics['ltp']:.2f}",
+                        "Regime": metrics["regime"],
+                        "ATR": f"{metrics['atr']:.2f}",
+                        "RSI": str(metrics.get("rsi_" + str(reviser_config["INDICATOR_WINDOW"]), "N/A"))[:6],
+                        "ADX": str(metrics.get("adx_" + str(reviser_config["ADX_PERIOD"]), "N/A"))[:6],
+                        "Rationale": result["rationale"],
+                    }
+                )
             except Exception as e:
                 logging.error(f"Could not revise levels for {symbol}: {e}")
                 print(f"  ❌ Failed to revise levels for {symbol}: {e}")
 
         # Sort by the absolute value of the change percentage to see the biggest movers first
-        sorted_results = sorted(revision_results, key=lambda x: abs(float(x["L1 Δ%"].strip('%'))), reverse=True)
+        sorted_results = sorted(
+            revision_results,
+            key=lambda x: abs(float(x["L1 Δ%"].strip("%"))),
+            reverse=True,
+        )
 
-        print_table(sorted_results, 
-                    ["Symbol", "Old Levels", "New Levels", "L1 Δ%", "LTP", "Regime", "ATR", "RSI", "ADX", "Rationale"],
-                    title="📈 Entry Level Revision Analysis")
+        print_table(
+            sorted_results,
+            [
+                "Symbol",
+                "Old Levels",
+                "New Levels",
+                "L1 Δ%",
+                "LTP",
+                "Regime",
+                "ATR",
+                "RSI",
+                "ADX",
+                "Rationale",
+            ],
+            title="📈 Entry Level Revision Analysis",
+        )
 
     except Exception as e:
         print(f"❌ An error occurred during the revision process: {e}")

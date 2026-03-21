@@ -49,6 +49,7 @@ class EntryStrategyUploadResponse(BaseModel):
     symbols_processed: int
     created_count: int
     updated_count: int
+    deleted_count: int
     errors: list[dict[str, Any]]
     updated_at: datetime
 

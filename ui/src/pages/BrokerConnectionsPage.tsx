@@ -22,19 +22,20 @@ import {
   Add as AddIcon, 
   Check as CheckIcon, 
   Error as ErrorIcon, 
-  Warning as WarningIcon,
   CloudDone as UpstoxIcon,
   Cloud as ZerodhaIcon,
   Refresh as RefreshIcon,
+  Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { BrokerConnectionResponse, BrokerStatusResponse, ZerodhaStatusResponse } from '../types';
 
 const POLL_INTERVAL_MS = 2000;
-const MAX_POLL_ATTEMPTS = 45; // 90 seconds total
+const MAX_POLL_ATTEMPTS = 30; // 60 seconds total
 
 const STORAGE_KEY_UPSTOX = 'tradecraftx_upstox_connection_id';
 const STORAGE_KEY_ZERODHA = 'tradecraftx_zerodha_connection_id';
+const STORAGE_KEY_SESSION = 'tradecraftx_session_id';
 
 interface BrokerStatus {
   connected: boolean;
@@ -60,6 +61,8 @@ export default function BrokerConnectionsPage() {
   const [oauthConnectionId, setOauthConnectionId] = useState<number | null>(null);
   
   const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollAttemptsRef = useRef(0);
+  const pollingActiveRef = useRef(false);
 
   const fetchConnections = async () => {
     try {
@@ -69,20 +72,19 @@ export default function BrokerConnectionsPage() {
       // Fetch Upstox status
       try {
         const upstoxResp = await api.getUpstoxStatus();
-        if (upstoxResp.connections.length > 0) {
-          const conn = upstoxResp.connections[0];
+        const connectedUpstox = upstoxResp.connections.find(c => c.connected);
+        if (connectedUpstox) {
           const status: BrokerStatus = {
-            connected: conn.connected,
-            broker_user_id: conn.broker_user_id,
-            token_updated_at: conn.token_updated_at,
-            connection_id: conn.connection_id,
+            connected: connectedUpstox.connected,
+            broker_user_id: connectedUpstox.broker_user_id,
+            token_updated_at: connectedUpstox.token_updated_at,
+            connection_id: connectedUpstox.connection_id,
           };
           setUpstoxStatus(status);
-          if (status.connected) {
-            localStorage.setItem(STORAGE_KEY_UPSTOX, String(status.connection_id));
-          } else {
-            localStorage.removeItem(STORAGE_KEY_UPSTOX);
-          }
+          localStorage.setItem(STORAGE_KEY_UPSTOX, String(status.connection_id));
+        } else {
+          setUpstoxStatus(null);
+          localStorage.removeItem(STORAGE_KEY_UPSTOX);
         }
       } catch {
         setUpstoxStatus(null);
@@ -91,20 +93,19 @@ export default function BrokerConnectionsPage() {
       // Fetch Zerodha status
       try {
         const zerodhaResp = await api.getZerodhaStatus();
-        if (zerodhaResp.connections.length > 0) {
-          const conn = zerodhaResp.connections[0];
+        const connectedZerodha = zerodhaResp.connections.find(c => c.connected);
+        if (connectedZerodha) {
           const status: BrokerStatus = {
-            connected: conn.connected,
-            broker_user_id: conn.broker_user_id,
-            token_updated_at: conn.token_updated_at,
-            connection_id: conn.connection_id,
+            connected: connectedZerodha.connected,
+            broker_user_id: connectedZerodha.broker_user_id,
+            token_updated_at: connectedZerodha.token_updated_at,
+            connection_id: connectedZerodha.connection_id,
           };
           setZerodhaStatus(status);
-          if (status.connected) {
-            localStorage.setItem(STORAGE_KEY_ZERODHA, String(status.connection_id));
-          } else {
-            localStorage.removeItem(STORAGE_KEY_ZERODHA);
-          }
+          localStorage.setItem(STORAGE_KEY_ZERODHA, String(status.connection_id));
+        } else {
+          setZerodhaStatus(null);
+          localStorage.removeItem(STORAGE_KEY_ZERODHA);
         }
       } catch {
         setZerodhaStatus(null);
@@ -142,24 +143,27 @@ export default function BrokerConnectionsPage() {
   }, []);
 
   const clearPolling = useCallback(() => {
+    pollingActiveRef.current = false;
     if (pollingRef.current) {
       clearTimeout(pollingRef.current);
       pollingRef.current = null;
     }
     setPolling(false);
     setPollAttempts(0);
+    pollAttemptsRef.current = 0;
   }, []);
 
   const checkUpstoxStatus = useCallback(async (): Promise<BrokerStatus | null> => {
     try {
       const resp = await api.getUpstoxStatus();
-      if (resp.connections.length > 0 && resp.connections[0].connected) {
-        const conn = resp.connections[0];
+      // Check ALL connections, return first connected one
+      const connected = resp.connections.find(c => c.connected);
+      if (connected) {
         return {
-          connected: conn.connected,
-          broker_user_id: conn.broker_user_id,
-          token_updated_at: conn.token_updated_at,
-          connection_id: conn.connection_id,
+          connected: connected.connected,
+          broker_user_id: connected.broker_user_id,
+          token_updated_at: connected.token_updated_at,
+          connection_id: connected.connection_id,
         };
       }
     } catch {
@@ -171,13 +175,14 @@ export default function BrokerConnectionsPage() {
   const checkZerodhaStatus = useCallback(async (): Promise<BrokerStatus | null> => {
     try {
       const resp = await api.getZerodhaStatus();
-      if (resp.connections.length > 0 && resp.connections[0].connected) {
-        const conn = resp.connections[0];
+      // Check ALL connections, return first connected one
+      const connected = resp.connections.find(c => c.connected);
+      if (connected) {
         return {
-          connected: conn.connected,
-          broker_user_id: conn.broker_user_id,
-          token_updated_at: conn.token_updated_at,
-          connection_id: conn.connection_id,
+          connected: connected.connected,
+          broker_user_id: connected.broker_user_id,
+          token_updated_at: connected.token_updated_at,
+          connection_id: connected.connection_id,
         };
       }
     } catch {
@@ -187,11 +192,15 @@ export default function BrokerConnectionsPage() {
   }, []);
 
   const startPolling = useCallback(async (step: number) => {
+    pollingActiveRef.current = true;
+    pollAttemptsRef.current = 0;
     setPolling(true);
     setPollAttempts(0);
     setConnectionStatus(null);
     
     const poll = async () => {
+      if (!pollingActiveRef.current) return;
+      
       const status = step === 1 
         ? await checkUpstoxStatus() 
         : await checkZerodhaStatus();
@@ -199,8 +208,8 @@ export default function BrokerConnectionsPage() {
       setConnectionStatus(status);
       
       if (status?.connected) {
+        pollingActiveRef.current = false;
         clearPolling();
-        // Update local status
         if (step === 1) {
           setUpstoxStatus(status);
           localStorage.setItem(STORAGE_KEY_UPSTOX, String(status.connection_id));
@@ -212,18 +221,22 @@ export default function BrokerConnectionsPage() {
         return;
       }
       
-      if (pollAttempts >= MAX_POLL_ATTEMPTS) {
+      const currentAttempts = pollAttemptsRef.current + 1;
+      pollAttemptsRef.current = currentAttempts;
+      setPollAttempts(currentAttempts);
+      
+      if (currentAttempts >= MAX_POLL_ATTEMPTS) {
+        pollingActiveRef.current = false;
         clearPolling();
         setError('Connection timeout. Please try again.');
         return;
       }
       
-      setPollAttempts((prev) => prev + 1);
       pollingRef.current = setTimeout(poll, POLL_INTERVAL_MS);
     };
     
     poll();
-  }, [checkUpstoxStatus, checkZerodhaStatus, pollAttempts, clearPolling]);
+  }, [checkUpstoxStatus, checkZerodhaStatus, clearPolling]);
 
   const handleConnectUpstox = async () => {
     setConnecting(true);
@@ -252,19 +265,7 @@ export default function BrokerConnectionsPage() {
     setOauthStep(2);
     
     try {
-      // Step 1: Check if Upstox is already connected
-      const upstox = await checkUpstoxStatus();
-      
-      if (!upstox) {
-        // Need to connect Upstox first
-        setOauthDialogOpen(true);
-        // Start Upstox flow
-        await handleConnectUpstox();
-        // After upstox completes, continue to zerodha
-        return;
-      }
-      
-      // Upstox is connected, proceed with Zerodha
+      // Zerodha can be connected independently - no Upstox required
       const response = await api.connectZerodha();
       setOauthConnectionId(response.connection_id);
       
@@ -276,32 +277,9 @@ export default function BrokerConnectionsPage() {
       startPolling(2);
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      // Check if it's the upstox_required error (409)
-      if (errMsg.includes('upstox') || errMsg.toLowerCase().includes('upstox required')) {
-        // Fallback: need to connect Upstox first
-        setOauthDialogOpen(true);
-        setOauthStep(1);
-        await handleConnectUpstox();
-        // After upstox completes, continue to zerodha
-      } else {
-        setError(errMsg);
-      }
+      setError(errMsg);
     } finally {
       setConnecting(false);
-    }
-  };
-
-  const handleContinueAfterUpstox = async () => {
-    // After Upstox is connected, proceed to Zerodha
-    try {
-      const response = await api.connectZerodha();
-      setOauthConnectionId(response.connection_id);
-      setOauthStep(2);
-      
-      window.open(response.authorize_url, '_blank');
-      startPolling(2);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to initiate Zerodha connection');
     }
   };
 
@@ -326,6 +304,30 @@ export default function BrokerConnectionsPage() {
       startPolling(1);
     } else if (oauthStep === 2) {
       startPolling(2);
+    }
+  };
+
+  const handleDisconnectUpstox = async () => {
+    if (!confirm('Disconnect Upstox? You will need to reconnect to use Upstox. Any active sessions will be terminated.')) return;
+    try {
+      await api.disconnectUpstox();
+      setUpstoxStatus(null);
+      localStorage.removeItem(STORAGE_KEY_UPSTOX);
+      localStorage.removeItem(STORAGE_KEY_SESSION);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to disconnect Upstox');
+    }
+  };
+
+  const handleDisconnectZerodha = async () => {
+    if (!confirm('Disconnect Zerodha? You will need to reconnect to use Zerodha. Any active sessions will be terminated.')) return;
+    try {
+      await api.disconnectZerodha();
+      setZerodhaStatus(null);
+      localStorage.removeItem(STORAGE_KEY_ZERODHA);
+      localStorage.removeItem(STORAGE_KEY_SESSION);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to disconnect Zerodha');
     }
   };
 
@@ -400,16 +402,28 @@ export default function BrokerConnectionsPage() {
                 </Typography>
               </Box>
             )}
-            <Button
-              variant={upstoxStatus?.connected ? "outlined" : "contained"}
-              startIcon={<AddIcon />}
-              onClick={handleConnectUpstox}
-              disabled={connecting}
-              sx={{ mt: 2 }}
-              fullWidth
-            >
-              {upstoxStatus?.connected ? 'Reconnect Upstox' : 'Connect Upstox'}
-            </Button>
+            <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
+              <Button
+                variant={upstoxStatus?.connected ? "outlined" : "contained"}
+                startIcon={<AddIcon />}
+                onClick={handleConnectUpstox}
+                disabled={connecting}
+                fullWidth
+              >
+                {upstoxStatus?.connected ? 'Reconnect' : 'Connect'}
+              </Button>
+              {upstoxStatus?.connected && (
+                <Button
+                  variant="outlined"
+                  color="error"
+                  startIcon={<DeleteIcon />}
+                  onClick={handleDisconnectUpstox}
+                  disabled={connecting}
+                >
+                  Disconnect
+                </Button>
+              )}
+            </Box>
           </CardContent>
         </Card>
 
@@ -421,11 +435,6 @@ export default function BrokerConnectionsPage() {
               <Typography variant="h6">Zerodha</Typography>
               {getStatusChip(zerodhaStatus?.connected ?? false)}
             </Box>
-            {!upstoxStatus?.connected && (
-              <Alert severity="info" sx={{ mb: 1 }} icon={<WarningIcon />}>
-                Upstox required for market data
-              </Alert>
-            )}
             {zerodhaStatus?.connected && (
               <Box sx={{ mt: 1 }}>
                 <Typography variant="body2" color="text.secondary">
@@ -436,16 +445,28 @@ export default function BrokerConnectionsPage() {
                 </Typography>
               </Box>
             )}
-            <Button
-              variant={zerodhaStatus?.connected ? "outlined" : "contained"}
-              startIcon={<AddIcon />}
-              onClick={handleConnectZerodha}
-              disabled={connecting || !upstoxStatus?.connected}
-              sx={{ mt: 2 }}
-              fullWidth
-            >
-              {zerodhaStatus?.connected ? 'Reconnect Zerodha' : 'Connect Zerodha'}
-            </Button>
+            <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
+              <Button
+                variant={zerodhaStatus?.connected ? "outlined" : "contained"}
+                startIcon={<AddIcon />}
+                onClick={handleConnectZerodha}
+                disabled={connecting}
+                fullWidth
+              >
+                {zerodhaStatus?.connected ? 'Reconnect' : 'Connect'}
+              </Button>
+              {zerodhaStatus?.connected && (
+                <Button
+                  variant="outlined"
+                  color="error"
+                  startIcon={<DeleteIcon />}
+                  onClick={handleDisconnectZerodha}
+                  disabled={connecting}
+                >
+                  Disconnect
+                </Button>
+              )}
+            </Box>
           </CardContent>
         </Card>
       </Box>
@@ -454,20 +475,24 @@ export default function BrokerConnectionsPage() {
       <Dialog open={oauthDialogOpen} onClose={handleCloseDialog} maxWidth="sm" fullWidth>
         <DialogTitle>
           {oauthStep === 1 
-            ? 'Step 1/2: Connect Upstox' 
+            ? 'Connecting Upstox...' 
             : oauthStep === 2 
-              ? 'Step 2/2: Connect Zerodha'
+              ? 'Connecting Zerodha...'
               : 'Connecting...'}
         </DialogTitle>
         <DialogContent>
-          <Stepper activeStep={oauthStep - 1} sx={{ mb: 3 }}>
-            <Step>
-              <StepLabel>Upstox</StepLabel>
-            </Step>
-            <Step>
-              <StepLabel>Zerodha</StepLabel>
-            </Step>
-          </Stepper>
+          {oauthStep === 1 || oauthStep === 2 ? (
+            <Stepper activeStep={oauthStep - 1} sx={{ mb: 3 }}>
+              <Step>
+                <StepLabel>Upstox</StepLabel>
+              </Step>
+              <Step>
+                <StepLabel>Zerodha</StepLabel>
+              </Step>
+            </Stepper>
+          ) : (
+            <Box sx={{ mb: 3 }} />
+          )}
           
           {/* Success State */}
           {connectionStatus?.connected && (
@@ -487,7 +512,7 @@ export default function BrokerConnectionsPage() {
             <Box sx={{ textAlign: 'center', py: 2 }}>
               <CircularProgress sx={{ mb: 2 }} />
               <Typography>
-                Waiting for authentication... ({Math.floor(pollAttempts * POLL_INTERVAL_MS / 1000)}s / 90s)
+                Waiting for authentication... ({Math.floor(pollAttempts * POLL_INTERVAL_MS / 1000)}s / 60s)
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                 Please complete the login in the opened tab, then close it.
@@ -518,19 +543,6 @@ export default function BrokerConnectionsPage() {
               <Typography>
                 Complete {oauthStep === 1 ? 'Upstox' : 'Zerodha'} login in the opened tab, then click below to verify.
               </Typography>
-            </Box>
-          )}
-          
-          {/* Continue to Zerodha after Upstox success */}
-          {oauthStep === 1 && connectionStatus?.connected && (
-            <Box sx={{ textAlign: 'center', py: 2 }}>
-              <Button 
-                variant="contained" 
-                onClick={handleContinueAfterUpstox}
-                fullWidth
-              >
-                Continue to Zerodha
-              </Button>
             </Box>
           )}
         </DialogContent>

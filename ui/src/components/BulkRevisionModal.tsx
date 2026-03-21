@@ -65,7 +65,7 @@ export function BulkRevisionModal({
     if (open && selectedSymbols.length > 0) {
       fetchSuggestions();
     }
-  }, [open, selectedSymbols]);
+  }, [open, selectedSymbols, method, pctAdjustment]);
 
   const fetchSuggestions = async () => {
     setLoading(true);

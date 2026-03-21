@@ -17,6 +17,7 @@ import StrategyDetailPage from './pages/StrategyDetailPage';
 import PlanPage from './pages/PlanPage';
 import GTTPage from './pages/GTTPage';
 import JobsPage from './pages/JobsPage';
+import AdminPage from './pages/AdminPage';
 
 const theme = createTheme({
   palette: {
@@ -165,6 +166,16 @@ export default function App() {
                     <PrivateRoute>
                       <Layout>
                         <JobsPage />
+                      </Layout>
+                    </PrivateRoute>
+                  }
+                />
+                <Route
+                  path="/admin"
+                  element={
+                    <PrivateRoute>
+                      <Layout>
+                        <AdminPage />
                       </Layout>
                     </PrivateRoute>
                   }

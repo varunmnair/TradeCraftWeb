@@ -1,6 +1,7 @@
 import logging
-from typing import List, Dict, Callable
 from collections import Counter
+from typing import Callable, Dict, List, Optional, Tuple
+
 
 class GTTManager:
     def __init__(self, broker, cmp_manager, session):
@@ -17,15 +18,21 @@ class GTTManager:
             "transaction_type": order_data.get("transaction_type"),
             "qty": order_data.get("quantity"),
             "price": order_data.get("price"),
-            "symbol": order_data.get("tradingsymbol") or g.get("condition", {}).get("tradingsymbol"),
-            "exchange": order_data.get("exchange") or g.get("condition", {}).get("exchange"),
+            "symbol": order_data.get("tradingsymbol")
+            or g.get("condition", {}).get("tradingsymbol"),
+            "exchange": order_data.get("exchange")
+            or g.get("condition", {}).get("exchange"),
             "id": g.get("id"),
             "status": g.get("status"),
         }
 
-        trigger_values = g.get("trigger_values") or g.get("condition", {}).get("trigger_values")
-        details["trigger"] = trigger_values[0] if trigger_values else order_data.get("price")
-        
+        trigger_values = g.get("trigger_values") or g.get("condition", {}).get(
+            "trigger_values"
+        )
+        details["trigger"] = (
+            trigger_values[0] if trigger_values else order_data.get("price")
+        )
+
         return details
 
     def place_orders(self, gtt_plan: List[Dict], dry_run: bool = False) -> List[Dict]:
@@ -35,7 +42,9 @@ class GTTManager:
         results = []
         for order in gtt_plan:
             if order.get("skip_reason"):
-                results.append({**order, "status": "Skipped", "remarks": order["skip_reason"]})
+                results.append(
+                    {**order, "status": "Skipped", "remarks": order["skip_reason"]}
+                )
                 continue
 
             symbol = order["symbol"]
@@ -44,7 +53,7 @@ class GTTManager:
                 "price": order["price"],
                 "trigger": order["trigger"],
                 "status": "Success",
-                "remarks": ""
+                "remarks": "",
             }
 
             if not dry_run:
@@ -61,9 +70,9 @@ class GTTManager:
                                 "quantity": order["qty"],
                                 "order_type": self.broker.ORDER_TYPE_LIMIT,
                                 "product": self.broker.PRODUCT_CNC,
-                                "price": order["price"]
+                                "price": order["price"],
                             }
-                        ]
+                        ],
                     )
                 except Exception as e:
                     result["status"] = "Fail"
@@ -80,19 +89,23 @@ class GTTManager:
         try:
             gtts = self.session.get_gtt_cache()
             logging.debug(f"=== GTT Cache: {len(gtts)} GTTs total ===")
-            
+
             orders = []
 
             for i, g in enumerate(gtts):
                 details = self._parse_gtt(g)
-                logging.debug(f"GTT[{i}] parsed: status={details.get('status')}, type={details.get('transaction_type')}, symbol={details.get('symbol')}, exchange={details.get('exchange')}, trigger={details.get('trigger')}")
-                
+                logging.debug(
+                    f"GTT[{i}] parsed: status={details.get('status')}, type={details.get('transaction_type')}, symbol={details.get('symbol')}, exchange={details.get('exchange')}, trigger={details.get('trigger')}"
+                )
+
                 if details.get("status") != "active":
                     logging.debug(f"  -> Skipped: status is {details.get('status')}")
                     continue
-                
+
                 if details.get("transaction_type") != self.broker.TRANSACTION_TYPE_BUY:
-                    logging.debug(f"  -> Skipped: transaction_type={details.get('transaction_type')} (not BUY)")
+                    logging.debug(
+                        f"  -> Skipped: transaction_type={details.get('transaction_type')} (not BUY)"
+                    )
                     continue
 
                 symbol = details.get("symbol")
@@ -100,19 +113,30 @@ class GTTManager:
                 trigger = details.get("trigger")
 
                 if not symbol or not exchange or trigger is None:
-                    logging.debug(f"  -> Skipped: missing data - symbol={symbol}, exchange={exchange}, trigger={trigger}")
+                    logging.debug(
+                        f"  -> Skipped: missing data - symbol={symbol}, exchange={exchange}, trigger={trigger}"
+                    )
                     continue
 
-                ltp = self.cmp_manager.get_cmp(exchange, symbol)
+                ltp = None
+                cmp_available = True
+                try:
+                    ltp = self.cmp_manager.get_cmp(exchange, symbol)
+                except RuntimeError as e:
+                    logging.warning(f"  -> CMP not available for {symbol}: {e}")
+                    cmp_available = False
+                except Exception as e:
+                    logging.warning(f"  -> Error fetching CMP for {symbol}: {e}")
+                    cmp_available = False
+
                 logging.debug(f"  -> CMP for {symbol}: {ltp}")
-                if ltp is None:
-                    logging.warning(f"  -> Skipping {symbol} due to missing LTP.")
-                    continue
 
-                variance = round(((ltp - trigger) / trigger) * 100, 2)
-                
-                qty = details.get("qty")
-                buy_amount = int(qty * ltp) if qty and ltp else 0
+                variance = None
+                buy_amount = None
+                if ltp is not None and trigger is not None and trigger > 0:
+                    variance = round(((ltp - trigger) / trigger) * 100, 2)
+                    qty = details.get("qty")
+                    buy_amount = int(qty * ltp) if qty else None
 
                 orders.append(
                     {
@@ -122,30 +146,34 @@ class GTTManager:
                         "Trigger Price": trigger,
                         "LTP": ltp,
                         "Variance (%)": variance,
-                        "Qty": qty,
+                        "Qty": details.get("qty"),
                         "Buy Amount": buy_amount,
+                        "cmp_available": cmp_available,
                     }
                 )
 
             logging.debug(f"=== Returning {len(orders)} GTT orders after filtering ===")
-            return sorted(orders, key=lambda x: x["Variance (%)"])
+            return sorted(orders, key=lambda x: x["Variance (%)"] or 0)
 
         except Exception as e:
             logging.error(f"Error computing GTT buy order analysis: {e}")
             return []
-        
+
     def get_duplicate_gtt_symbols(self) -> List[str]:
         try:
             gtts = self.session.get_gtt_cache()
-            
+
             active_buy_symbols = []
             for g in gtts:
                 details = self._parse_gtt(g)
-                if (details.get("status") == "active" and 
-                    details.get("transaction_type") == self.broker.TRANSACTION_TYPE_BUY and 
-                    details.get("symbol")):
+                if (
+                    details.get("status") == "active"
+                    and details.get("transaction_type")
+                    == self.broker.TRANSACTION_TYPE_BUY
+                    and details.get("symbol")
+                ):
                     active_buy_symbols.append(details["symbol"])
-            
+
             symbol_counts = Counter(active_buy_symbols)
             return [symbol for symbol, count in symbol_counts.items() if count > 1]
 
@@ -153,7 +181,7 @@ class GTTManager:
             logging.error(f"Error computing duplicate GTT symbols: {e}")
             return []
 
-    def get_total_buy_gtt_amount(self, threshold: float = None) -> float:
+    def get_total_buy_gtt_amount(self, threshold: Optional[float] = None) -> float:
         try:
             gtts = self.session.get_gtt_cache()
             total_amount = 0.0
@@ -163,15 +191,19 @@ class GTTManager:
 
                 if details.get("status") != "active":
                     continue
-                
-                if details.get("transaction_type") != self.broker.TRANSACTION_TYPE_BUY or not details.get("price") or not details.get("qty"):
+
+                if (
+                    details.get("transaction_type") != self.broker.TRANSACTION_TYPE_BUY
+                    or not details.get("price")
+                    or not details.get("qty")
+                ):
                     continue
 
                 if threshold is not None:
                     trigger = details.get("trigger")
                     symbol = details.get("symbol")
                     exchange = details.get("exchange")
-                    
+
                     if trigger is None or exchange is None or symbol is None:
                         continue
 
@@ -193,14 +225,32 @@ class GTTManager:
             return 0.0
 
     # ──────────────── GTT Adjustment ──────────────── #
-    def adjust_orders(self, orders: List[Dict], target_variance: float,
-                      adjust_fn: Callable[[float, float], tuple[float, float]]) -> List[Dict]:
+    def adjust_orders(
+        self,
+        orders: List[Dict],
+        target_variance: float,
+        adjust_fn: Callable[[float, float], tuple[float, float]],
+    ) -> List[Dict]:
         modified = []
+        failed = []
         for order in orders:
-            if order["Variance (%)"] < target_variance:
+            variance = order.get("Variance (%)")
+            ltp = order.get("LTP")
+            
+            if not order.get("cmp_available", ltp is not None):
+                failed.append({
+                    "Symbol": order["Symbol"],
+                    "status": "failed",
+                    "reason": "CMP not available"
+                })
+                continue
+                
+            if variance is not None and variance < target_variance:
                 try:
-                    new_trigger = round(order["LTP"] / (1 + target_variance / 100), 2)
-                    new_price, new_trigger = adjust_fn(order_price=new_trigger, ltp=order["LTP"])
+                    new_trigger = round(ltp / (1 + target_variance / 100), 2)
+                    new_price, new_trigger = adjust_fn(
+                        order_price=new_trigger, ltp=ltp
+                    )
 
                     self.broker.cancel_gtt(order["GTT ID"])
                     self.broker.place_gtt(
@@ -208,47 +258,81 @@ class GTTManager:
                         tradingsymbol=order["Symbol"],
                         exchange=order["Exchange"],
                         trigger_values=[new_trigger],
-                        last_price=order["LTP"],
-                        orders=[{
-                            "transaction_type": self.broker.TRANSACTION_TYPE_BUY,
-                            "quantity": order["Qty"],
-                            "order_type": self.broker.ORDER_TYPE_LIMIT,
-                            "product": self.broker.PRODUCT_CNC,
-                            "price": new_price
-                        }]
+                        last_price=ltp,
+                        orders=[
+                            {
+                                "transaction_type": self.broker.TRANSACTION_TYPE_BUY,
+                                "quantity": order["Qty"],
+                                "order_type": self.broker.ORDER_TYPE_LIMIT,
+                                "product": self.broker.PRODUCT_CNC,
+                                "price": new_price,
+                            }
+                        ],
                     )
-                    modified.append({
-                        "Symbol": order["Symbol"],
-                        "Trigger Price": new_trigger,
-                        "LTP": order["LTP"],
-                        "Variance (%)": round(((order["LTP"] - new_trigger) / new_trigger) * 100, 2)
-                    })
+                    modified.append(
+                        {
+                            "Symbol": order["Symbol"],
+                            "Trigger Price": new_trigger,
+                            "LTP": ltp,
+                            "Variance (%)": round(
+                                ((ltp - new_trigger) / new_trigger) * 100, 2
+                            ),
+                        }
+                    )
 
                 except Exception as e:
                     logging.warning(f"Failed to modify GTT for {order['Symbol']}: {e}")
+                    failed.append({
+                        "Symbol": order["Symbol"],
+                        "status": "failed",
+                        "reason": str(e)
+                    })
         self.session.refresh_gtt_cache()  # ✅ Refresh GTT cache after adjustment
-        return modified
+        return modified + failed
 
     # ──────────────── GTT Deletion ──────────────── #
-    def delete_orders_above_variance(self, orders: List[Dict], threshold: float) -> List[str]:
+    def delete_orders_above_variance(
+        self, orders: List[Dict], threshold: float
+    ) -> List[Dict]:
         deleted = []
+        failed = []
         for order in orders:
-            if order["Variance (%)"] > threshold:
+            variance = order.get("Variance (%)")
+            if variance is None:
+                failed.append({
+                    "Symbol": order["Symbol"],
+                    "status": "skipped",
+                    "reason": "Variance not available (CMP missing)"
+                })
+                continue
+            if variance > threshold:
                 try:
                     self.broker.cancel_gtt(order["GTT ID"])
-                    deleted.append(order["Symbol"])
+                    deleted.append({
+                        "Symbol": order["Symbol"],
+                        "status": "deleted"
+                    })
                 except Exception as e:
                     logging.warning(f"Failed to delete GTT for {order['Symbol']}: {e}")
+                    failed.append({
+                        "Symbol": order["Symbol"],
+                        "status": "failed",
+                        "reason": str(e)
+                    })
         self.session.refresh_gtt_cache()  # ✅ Refresh GTT cache after deletion
-        return deleted
+        return deleted + failed
 
     def delete_gtts_for_symbols(self, symbols_to_delete: List[str]) -> List[str]:
         deleted_symbols = []
         try:
             gtts = self.session.get_gtt_cache()
             symbols_to_delete_set = set(symbols_to_delete)
-            
-            gtts_to_process = [g for g in gtts if self._parse_gtt(g).get("symbol") in symbols_to_delete_set]
+
+            gtts_to_process = [
+                g
+                for g in gtts
+                if self._parse_gtt(g).get("symbol") in symbols_to_delete_set
+            ]
 
             for g in gtts_to_process:
                 details = self._parse_gtt(g)
@@ -260,13 +344,17 @@ class GTTManager:
                     try:
                         self.broker.cancel_gtt(gtt_id)
                         deleted_symbols.append(symbol)
-                        logging.debug(f"✅ Deleted existing GTT for {symbol} (ID: {gtt_id})")
+                        logging.debug(
+                            f"✅ Deleted existing GTT for {symbol} (ID: {gtt_id})"
+                        )
                     except Exception as e:
-                        logging.warning(f"Failed to delete GTT for {symbol} (ID: {gtt_id}): {e}")
+                        logging.warning(
+                            f"Failed to delete GTT for {symbol} (ID: {gtt_id}): {e}"
+                        )
 
             if deleted_symbols:
                 self.session.refresh_gtt_cache()
-                
+
         except Exception as e:
             logging.error(f"Error deleting GTTs for symbols: {e}")
         return list(set(deleted_symbols))
@@ -275,9 +363,11 @@ class GTTManager:
         deleted_ids = []
         try:
             gtts = self.session.get_gtt_cache()
-            logging.debug(f"delete_gtts_by_ids: received ids={gtt_ids}, cache has {len(gtts)} GTTs")
+            logging.debug(
+                f"delete_gtts_by_ids: received ids={gtt_ids}, cache has {len(gtts)} GTTs"
+            )
             ids_to_delete_set = set(str(gid) for gid in gtt_ids if gid)
-            
+
             # Also build a symbol-to-GTT mapping for fallback
             symbol_to_gtt = {}
             for g in gtts:
@@ -291,7 +381,7 @@ class GTTManager:
                 except Exception as e:
                     logging.warning(f"Error parsing GTT: {e}, g={g}")
                     continue
-            
+
             # First try to match by ID
             gtts_to_process = []
             for g in gtts:
@@ -303,15 +393,19 @@ class GTTManager:
                 except Exception as e:
                     logging.warning(f"Error parsing GTT for ID match: {e}")
                     continue
-            
-            logging.debug(f"delete_gtts_by_ids: matched {len(gtts_to_process)} GTTs by ID")
-            
+
+            logging.debug(
+                f"delete_gtts_by_ids: matched {len(gtts_to_process)} GTTs by ID"
+            )
+
             # If no matches by ID, try matching by symbol
             if not gtts_to_process:
                 for gid in gtt_ids:
                     if gid in symbol_to_gtt:
                         gtts_to_process.extend(symbol_to_gtt[gid])
-                logging.debug(f"delete_gtts_by_ids: matched {len(gtts_to_process)} GTTs by symbol")
+                logging.debug(
+                    f"delete_gtts_by_ids: matched {len(gtts_to_process)} GTTs by symbol"
+                )
 
             for g in gtts_to_process:
                 details = self._parse_gtt(g)
@@ -328,7 +422,7 @@ class GTTManager:
 
             if deleted_ids:
                 self.session.refresh_gtt_cache()
-                
+
         except Exception as e:
             logging.error(f"Error deleting GTTs by IDs: {e}")
         return deleted_ids

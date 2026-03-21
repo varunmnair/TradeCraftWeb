@@ -23,19 +23,25 @@ class EntryStrategyService:
         return self._db
 
     def get_entry_levels_for_user(
-        self, tenant_id: int, user_id: int, broker: str = None, broker_user_id: str = None
+        self, user_id: int, broker: str = None, broker_user_id: str = None
     ) -> list[dict[str, Any]]:
         query = self.db.query(EntryStrategy).filter(
-            EntryStrategy.tenant_id == tenant_id,
             EntryStrategy.user_id == user_id,
         )
-        
+
         # Filter by broker scope if provided
         if broker:
             query = query.filter(EntryStrategy.broker == broker)
         if broker_user_id:
-            query = query.filter(EntryStrategy.broker_user_id == broker_user_id)
-        
+            from sqlalchemy import or_
+
+            query = query.filter(
+                or_(
+                    EntryStrategy.broker_user_id == broker_user_id,
+                    EntryStrategy.broker_user_id.is_(None),
+                )
+            )
+
         strategies = query.all()
 
         result = []
@@ -44,7 +50,7 @@ class EntryStrategyService:
                 self.db.query(EntryLevel)
                 .filter(
                     EntryLevel.strategy_id == strategy.id,
-                    EntryLevel.is_active == True,
+                    EntryLevel.is_active.is_(True),
                 )
                 .order_by(EntryLevel.level_no)
                 .all()
@@ -89,9 +95,7 @@ class EntryStrategyService:
 
         return result
 
-    def get_cmp_for_symbol(
-        self, symbol: str, tenant_id: int | None, user_id: int | None
-    ) -> dict[str, Any] | None:
+    def get_cmp_for_symbol(self, symbol: str, user_id: int) -> dict[str, Any] | None:
         return None
 
 

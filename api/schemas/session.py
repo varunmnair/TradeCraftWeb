@@ -6,8 +6,12 @@ from pydantic import BaseModel, Field
 
 
 class SessionStartRequest(BaseModel):
-    session_user_id: Optional[str] = Field(default=None, description="Broker login/user id")
-    broker_name: Optional[str] = Field(default=None, description="Broker label (zerodha or upstox)")
+    session_user_id: Optional[str] = Field(
+        default=None, description="Broker login/user id"
+    )
+    broker_name: Optional[str] = Field(
+        default=None, description="Broker label (zerodha or upstox)"
+    )
     broker_config: Dict[str, str] = Field(default_factory=dict)
     broker_connection_id: Optional[int] = Field(
         default=None,
@@ -22,7 +26,6 @@ class SessionStartRequest(BaseModel):
 
 class SessionResponse(BaseModel):
     session_id: str
-    user_id: str
+    broker_user_id: str
     broker: str
     expires_at: Optional[str] = None
-    tenant_id: Optional[int] = None

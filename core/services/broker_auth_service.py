@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
-
-from sqlalchemy.orm import Session
 
 from db import models
 from db.database import SessionLocal
@@ -17,12 +14,13 @@ class BrokerAuthStateService:
         self._session_factory = session_factory
         self._ttl = ttl_seconds
 
-    def create_state(self, *, tenant_id: int, user_id: int, connection_id: int, broker_name: str) -> str:
+    def create_state(
+        self, *, user_id: int, connection_id: int, broker_name: str
+    ) -> str:
         token = secrets.token_urlsafe(24)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._ttl)
         with self._session_factory() as session:
             state = models.BrokerAuthState(
-                tenant_id=tenant_id,
                 user_id=user_id,
                 connection_id=connection_id,
                 broker_name=broker_name,

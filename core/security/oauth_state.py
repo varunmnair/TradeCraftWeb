@@ -12,7 +12,6 @@ from typing import Dict
 @dataclass
 class OAuthState:
     token: str
-    tenant_id: int
     user_id: int
     connection_id: int
     expires_at: datetime
@@ -24,11 +23,10 @@ class OAuthStateStore:
         self._states: Dict[str, OAuthState] = {}
         self._lock = Lock()
 
-    def issue(self, *, tenant_id: int, user_id: int, connection_id: int) -> str:
+    def issue(self, *, user_id: int, connection_id: int) -> str:
         token = secrets.token_urlsafe(16)
         state = OAuthState(
             token=token,
-            tenant_id=tenant_id,
             user_id=user_id,
             connection_id=connection_id,
             expires_at=datetime.now(timezone.utc) + timedelta(seconds=self._ttl),

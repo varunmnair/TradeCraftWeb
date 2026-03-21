@@ -30,6 +30,9 @@ class DummySessionCache:
     def get_entry_levels(self):
         return self._entry_levels
 
+    def refresh_entry_levels(self):
+        pass
+
     def get_gtt_cache(self):
         return []
 

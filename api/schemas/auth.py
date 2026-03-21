@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+
 from pydantic import BaseModel, EmailStr
 
 
@@ -23,7 +24,6 @@ class RefreshRequest(BaseModel):
 
 class AuthUser(BaseModel):
     id: int
-    tenant_id: int
     email: EmailStr
     role: str
     trading_enabled: bool = False

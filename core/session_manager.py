@@ -5,7 +5,12 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from core.session_tokens import BaseTokenStore, DbTokenStore, FileTokenStore, TokenBundle
+from core.session_tokens import (
+    BaseTokenStore,
+    DbTokenStore,
+    FileTokenStore,
+    TokenBundle,
+)
 
 
 class SessionManager:
@@ -16,7 +21,9 @@ class SessionManager:
         dev_mode: bool = True,
     ) -> None:
         self.dev_mode = dev_mode
-        self.token_store = token_store or (FileTokenStore() if dev_mode else DbTokenStore())
+        self.token_store = token_store or (
+            FileTokenStore() if dev_mode else DbTokenStore()
+        )
 
         self.kite_api_key = os.getenv("KITE_API_KEY")
         self.kite_api_secret = os.getenv("KITE_API_SECRET")
@@ -44,7 +51,9 @@ class SessionManager:
         broker_user_id: Optional[str] = None,
         connection_id: Optional[int] = None,
     ) -> Optional[dict]:
-        bundle = self.get_token_bundle(broker_name, broker_user_id=broker_user_id, connection_id=connection_id)
+        bundle = self.get_token_bundle(
+            broker_name, broker_user_id=broker_user_id, connection_id=connection_id
+        )
         return bundle.to_config() if bundle else None
 
     def get_access_token(
@@ -54,7 +63,9 @@ class SessionManager:
         broker_user_id: Optional[str] = None,
         connection_id: Optional[int] = None,
     ) -> Optional[str]:
-        bundle = self.get_token_bundle(broker_name, broker_user_id=broker_user_id, connection_id=connection_id)
+        bundle = self.get_token_bundle(
+            broker_name, broker_user_id=broker_user_id, connection_id=connection_id
+        )
         return bundle.access_token if bundle else None
 
     def store_tokens(
@@ -63,7 +74,6 @@ class SessionManager:
         tokens,
         broker_user_id: str | None = None,
         connection_id: int | None = None,
-        tenant_id: int | None = None,
         user_id: int | None = None,
     ) -> None:
         self.token_store.store_tokens(
@@ -71,6 +81,18 @@ class SessionManager:
             tokens,
             broker_user_id=broker_user_id,
             connection_id=connection_id,
-            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+
+    def disconnect(
+        self,
+        broker_name: str,
+        *,
+        connection_id: int | None = None,
+        user_id: int | None = None,
+    ) -> bool:
+        return self.token_store.disconnect(
+            broker_name,
+            connection_id=connection_id,
             user_id=user_id,
         )

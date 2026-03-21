@@ -1,9 +1,8 @@
-import pandas as pd
 import logging
-from collections import Counter
-from typing import List, Dict
 from abc import ABC, abstractmethod
-from core.session_singleton import shared_session as session
+from collections import Counter
+from typing import Dict, List, Optional
+
 
 class BaseEntryStrategy(ABC):
     def __init__(self, broker, cmp_manager, holdings=None):
@@ -12,17 +11,16 @@ class BaseEntryStrategy(ABC):
         self.holdings = holdings if holdings is not None else self.broker.get_holdings()
 
     @abstractmethod
-    def generate_plan(self, scrip: Dict) -> List[Dict]:
+    def generate_plan(self, candidates: List[Dict], apply_risk_management: bool = False) -> Dict:
         """
-        Generates an entry plan for a given scrip.
-        This method must be implemented by all concrete strategy classes.
+        Generates an entry plan for given candidates.
+        Returns dict with 'plan', 'pending_cmp', and 'skipped' keys.
         """
-        pass
-
-    
 
     @staticmethod
-    def adjust_trigger_and_order_price(order_price: float, ltp: float) -> tuple[float, float]:
+    def adjust_trigger_and_order_price(
+        order_price: float, ltp: float
+    ) -> tuple[float, float]:
         LTP_TRIGGER_DIFF = 0.0026
         ORDER_TRIGGER_DIFF = 0.001
         MIN_REQUIRED_DIFF = 0.0025  # 0.25%
@@ -53,7 +51,9 @@ class BaseEntryStrategy(ABC):
 
         actual_diff = abs(trigger - ltp) / ltp
         if actual_diff < MIN_REQUIRED_DIFF:
-            logging.warning(f"⚠️ Adjusted trigger ({trigger}) too close to LTP ({ltp}). Enforcing minimum diff.")
+            logging.warning(
+                f"⚠️ Adjusted trigger ({trigger}) too close to LTP ({ltp}). Enforcing minimum diff."
+            )
             if trigger < ltp:
                 trigger = round(ltp - ltp * MIN_REQUIRED_DIFF, 2)
             else:
@@ -62,7 +62,49 @@ class BaseEntryStrategy(ABC):
 
         return order_price, trigger
 
-# Utility functions, can be kept separate from the class
+
+def create_skipped_item(
+    symbol: str,
+    reason: str,
+    exchange: Optional[str] = None,
+    ltp: Optional[float] = None,
+    entry: Optional[str] = None,
+    additional_fields: Optional[Dict] = None,
+) -> Dict:
+    """
+    Creates a standardized skipped item dictionary.
+    Used by both Multi-Level Entry and Dynamic Averaging strategies.
+    """
+    item: Dict = {
+        "symbol": symbol,
+        "exchange": exchange,
+        "ltp": ltp,
+        "entry": entry,
+        "skip_reason": reason,
+    }
+    if additional_fields:
+        item.update(additional_fields)
+    return item
+
+
+def create_pending_cmp_item(
+    symbol: str,
+    exchange: Optional[str] = None,
+    entry_levels: Optional[Dict] = None,
+) -> Dict:
+    """
+    Creates a standardized pending CMP item dictionary.
+    CMP not available items are treated as skipped items.
+    """
+    additional = {"entry_levels": entry_levels} if entry_levels else None
+    return create_skipped_item(
+        symbol=symbol,
+        reason="CMP not available",
+        exchange=exchange,
+        additional_fields=additional,
+    )
+
+
 def detect_duplicates(scrips: List[Dict]) -> List[str]:
     symbol_counts = Counter(
         s["symbol"].strip().upper()

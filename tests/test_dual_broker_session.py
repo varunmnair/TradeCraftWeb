@@ -15,14 +15,17 @@ from db.database import Base
 
 class DummyBroker:
     """Dummy broker for testing."""
-    def __init__(self, broker_name, user_id, config):
+    def __init__(self, broker_name, broker_user_id, config):
         self.broker_name = broker_name
-        self.user_id = user_id
+        self.broker_user_id = broker_user_id
         self.config = config
         self.connection_id = None
 
     def set_session_context(self, session_manager, connection_id):
         self.connection_id = connection_id
+
+    def login(self):
+        pass
 
 
 @pytest.fixture
@@ -34,14 +37,14 @@ def engine():
     engine.dispose()
 
 
-def test_zerodha_session_fails_without_upstox(engine, monkeypatch):
-    """Starting a Zerodha session should fail if no Upstox connection exists."""
+def test_zerodha_session_works_without_upstox(engine, monkeypatch):
+    """Starting a Zerodha session should work even without Upstox - market data is optional."""
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)
     session_manager = SessionManager(token_store=store, dev_mode=False)
 
-    def fake_get_broker(broker_name, user_id, config):
-        return DummyBroker(broker_name, user_id, config)
+    def fake_get_broker(broker_name, broker_user_id, config):
+        return DummyBroker(broker_name, broker_user_id, config)
 
     monkeypatch.setattr("core.runtime.session_registry.BrokerFactory.get_broker", fake_get_broker)
 
@@ -51,18 +54,15 @@ def test_zerodha_session_fails_without_upstox(engine, monkeypatch):
     )
 
     with SessionTesting() as session:
-        tenant = models.Tenant(name="TestTenant")
-        session.add(tenant)
-        session.flush()
-        user = models.User(tenant_id=tenant.id, email="test@example.com", hashed_password="hash", role="admin")
+        user = models.User(email="test@example.com", role="admin")
         session.add(user)
         session.flush()
         
         # Only create Zerodha connection, no Upstox
         connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="zerodha",
+            broker_user_id="ZERODHA_USER",
             metadata_json=json.dumps({"api_key": "KITE_KEY"}),
         )
         session.add(connection)
@@ -75,21 +75,22 @@ def test_zerodha_session_fails_without_upstox(engine, monkeypatch):
         connection_id=zerodha_connection_id,
     )
 
-    # Should fail because no Upstox connection exists
-    with pytest.raises(ValueError) as exc_info:
-        registry.create_session(broker_connection_id=zerodha_connection_id)
-    
-    assert "Upstox connection required" in str(exc_info.value)
+    # Should succeed - market data (Upstox) is optional
+    context = registry.create_session(broker_connection_id=zerodha_connection_id)
+    assert context is not None
+    assert context.trading_broker_connection_id == zerodha_connection_id
+    # Market data connection should be None since no Upstox
+    assert context.market_data_connection_id is None
 
 
 def test_zerodha_session_succeeds_with_upstox(engine, monkeypatch):
-    """Starting a Zerodha session should succeed when both connections exist."""
+    """Starting a Zerodha session should succeed when both connections exist - Upstox auto-selected for market data."""
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)
     session_manager = SessionManager(token_store=store, dev_mode=False)
 
-    def fake_get_broker(broker_name, user_id, config):
-        return DummyBroker(broker_name, user_id, config)
+    def fake_get_broker(broker_name, broker_user_id, config):
+        return DummyBroker(broker_name, broker_user_id, config)
 
     monkeypatch.setattr("core.runtime.session_registry.BrokerFactory.get_broker", fake_get_broker)
 
@@ -99,18 +100,15 @@ def test_zerodha_session_succeeds_with_upstox(engine, monkeypatch):
     )
 
     with SessionTesting() as session:
-        tenant = models.Tenant(name="TestTenant2")
-        session.add(tenant)
-        session.flush()
-        user = models.User(tenant_id=tenant.id, email="test2@example.com", hashed_password="hash", role="admin")
+        user = models.User(email="test2@example.com", role="admin")
         session.add(user)
         session.flush()
         
         # Create Upstox connection for market data
         upstox_connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="upstox",
+            broker_user_id="UPSTOX_USER",
             metadata_json=json.dumps({"api_key": "UPSTOX_KEY"}),
         )
         session.add(upstox_connection)
@@ -118,9 +116,9 @@ def test_zerodha_session_succeeds_with_upstox(engine, monkeypatch):
         
         # Create Zerodha connection for trading
         zerodha_connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="zerodha",
+            broker_user_id="ZERODHA_USER",
             metadata_json=json.dumps({"api_key": "KITE_KEY"}),
         )
         session.add(zerodha_connection)
@@ -155,8 +153,8 @@ def test_upstox_session_uses_same_connection(engine, monkeypatch):
     store = DbTokenStore(session_factory=SessionTesting)
     session_manager = SessionManager(token_store=store, dev_mode=False)
 
-    def fake_get_broker(broker_name, user_id, config):
-        return DummyBroker(broker_name, user_id, config)
+    def fake_get_broker(broker_name, broker_user_id, config):
+        return DummyBroker(broker_name, broker_user_id, config)
 
     monkeypatch.setattr("core.runtime.session_registry.BrokerFactory.get_broker", fake_get_broker)
 
@@ -166,18 +164,15 @@ def test_upstox_session_uses_same_connection(engine, monkeypatch):
     )
 
     with SessionTesting() as session:
-        tenant = models.Tenant(name="TestTenant3")
-        session.add(tenant)
-        session.flush()
-        user = models.User(tenant_id=tenant.id, email="test3@example.com", hashed_password="hash", role="admin")
+        user = models.User(email="test3@example.com", role="admin")
         session.add(user)
         session.flush()
         
         # Create Upstox connection
         connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="upstox",
+            broker_user_id="UPSTOX_USER",
             metadata_json=json.dumps({"api_key": "UPSTOX_KEY"}),
         )
         session.add(connection)
@@ -203,8 +198,8 @@ def test_zerodha_with_explicit_market_data_connection(engine, monkeypatch):
     store = DbTokenStore(session_factory=SessionTesting)
     session_manager = SessionManager(token_store=store, dev_mode=False)
 
-    def fake_get_broker(broker_name, user_id, config):
-        return DummyBroker(broker_name, user_id, config)
+    def fake_get_broker(broker_name, broker_user_id, config):
+        return DummyBroker(broker_name, broker_user_id, config)
 
     monkeypatch.setattr("core.runtime.session_registry.BrokerFactory.get_broker", fake_get_broker)
 
@@ -214,18 +209,15 @@ def test_zerodha_with_explicit_market_data_connection(engine, monkeypatch):
     )
 
     with SessionTesting() as session:
-        tenant = models.Tenant(name="TestTenant4")
-        session.add(tenant)
-        session.flush()
-        user = models.User(tenant_id=tenant.id, email="test4@example.com", hashed_password="hash", role="admin")
+        user = models.User(email="test4@example.com", role="admin")
         session.add(user)
         session.flush()
         
         # Create primary Upstox (won't be used)
         primary_upstox = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="upstox",
+            broker_user_id="PRIMARY_USER",
             metadata_json=json.dumps({"api_key": "PRIMARY_UPSTOX"}),
         )
         session.add(primary_upstox)
@@ -233,9 +225,9 @@ def test_zerodha_with_explicit_market_data_connection(engine, monkeypatch):
         
         # Create secondary Upstox (will be used as market data)
         secondary_upstox = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="upstox",
+            broker_user_id="SECONDARY_USER",
             metadata_json=json.dumps({"api_key": "SECONDARY_UPSTOX"}),
         )
         session.add(secondary_upstox)
@@ -243,9 +235,9 @@ def test_zerodha_with_explicit_market_data_connection(engine, monkeypatch):
         
         # Create Zerodha connection for trading
         zerodha_connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="zerodha",
+            broker_user_id="ZERODHA_USER",
             metadata_json=json.dumps({"api_key": "KITE_KEY"}),
         )
         session.add(zerodha_connection)

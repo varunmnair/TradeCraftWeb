@@ -10,7 +10,9 @@ from core.utils import sanitize_for_json
 
 
 class HoldingsService:
-    def __init__(self, registry: SessionRegistry, analyzer_cls=HoldingsAnalyzer) -> None:
+    def __init__(
+        self, registry: SessionRegistry, analyzer_cls=HoldingsAnalyzer
+    ) -> None:
         self._registry = registry
         self._analyzer_cls = analyzer_cls
 
@@ -29,7 +31,9 @@ class HoldingsService:
         context = self._get_context(session_id)
         cmp_manager = context.session_cache.get_cmp_manager()
         analyzer = self._analyzer_cls(context.broker.user_id, context.broker_name)
-        results = analyzer.analyze_holdings(context.broker, cmp_manager, filters=filters, sort_by=sort_by)
+        results = analyzer.analyze_holdings(
+            context.broker, cmp_manager, filters=filters, sort_by=sort_by
+        )
         return {"items": sanitize_for_json(results)}
 
     def _get_context(self, session_id: str):

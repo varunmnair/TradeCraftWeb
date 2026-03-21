@@ -14,14 +14,23 @@ from api.dependencies import (
 )
 from api.errors import ServiceError
 from api.schemas.common import JobQueuedResponse
-from api.schemas.gtt import GTTApplyRequest, GTTConfirmRequest, GTTConfirmResponse, GTTOrdersResponse, GTTPreviewRequest, GTTDeleteRequest, GTTDeleteResponse, GTTAdjustRequest, GTTAdjustResponse
+from api.schemas.gtt import (
+    GTTAdjustRequest,
+    GTTAdjustResponse,
+    GTTApplyRequest,
+    GTTConfirmRequest,
+    GTTConfirmResponse,
+    GTTDeleteRequest,
+    GTTDeleteResponse,
+    GTTOrdersResponse,
+    GTTPreviewRequest,
+)
+from core.audit import log_audit
 from core.auth.context import UserContext
 from core.runtime.job_runner import JobRunner
 from core.runtime.session_registry import SessionRegistry
 from core.security.confirm_token_store import ConfirmTokenStore
 from core.services.gtt_service import GTTService
-from core.audit import log_audit
-
 
 router = APIRouter(prefix="/gtt", tags=["gtt"])
 
@@ -37,7 +46,9 @@ def list_gtt_orders(
         registry.require_access(session_id, current_user)
         return service.analyze_orders(session_id)
     except ValueError as exc:
-        raise ServiceError(str(exc), error_code="session_not_found", http_status=404) from exc
+        raise ServiceError(
+            str(exc), error_code="session_not_found", http_status=404
+        ) from exc
 
 
 @router.post("/preview", response_model=JobQueuedResponse)
@@ -49,14 +60,14 @@ def preview_gtt(
 ):
     require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
-    
+
     log_audit(
         action="gtt_preview",
         user=current_user,
         resource_type="gtt",
         resource_id=payload.session_id,
     )
-    
+
     job_id = job_runner.start_job(
         session_id=payload.session_id,
         job_type=JOB_GTT_PREVIEW,
@@ -74,15 +85,19 @@ def confirm_gtt(
 ):
     require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
-    
+
     log_audit(
         action="gtt_confirm",
         user=current_user,
         resource_type="gtt",
         resource_id=payload.session_id,
     )
-    
-    issued = confirm_store.issue(session_id=payload.session_id, user_id=current_user.user_id, payload=payload.plan)
+
+    issued = confirm_store.issue(
+        session_id=payload.session_id,
+        user_id=current_user.user_id,
+        payload=payload.plan,
+    )
     return GTTConfirmResponse(**issued)
 
 
@@ -96,7 +111,7 @@ def apply_gtt(
 ):
     require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
-    
+
     try:
         confirm_store.verify(
             token=payload.confirmation_token,
@@ -105,16 +120,20 @@ def apply_gtt(
             payload=payload.plan,
         )
     except ValueError as exc:
-        raise ServiceError(str(exc), error_code="invalid_token", http_status=400) from exc
-    
+        raise ServiceError(
+            str(exc), error_code="invalid_token", http_status=400
+        ) from exc
+
     log_audit(
         action="gtt_apply",
         user=current_user,
         resource_type="gtt",
         resource_id=payload.session_id,
-        metadata={"symbols": [p.get("symbol") for p in payload.plan if p.get("symbol")]},
+        metadata={
+            "symbols": [p.get("symbol") for p in payload.plan if p.get("symbol")]
+        },
     )
-    
+
     job_id = job_runner.start_job(
         session_id=payload.session_id,
         job_type=JOB_GTT_APPLY,
@@ -132,7 +151,7 @@ def delete_gtt_orders(
 ):
     require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
-    
+
     log_audit(
         action="gtt_delete",
         user=current_user,
@@ -140,15 +159,16 @@ def delete_gtt_orders(
         resource_id=payload.session_id,
         metadata={"order_ids": payload.order_ids},
     )
-    
+
     try:
         result = service.delete_orders_by_ids(payload.session_id, payload.order_ids)
         return GTTDeleteResponse(
-            deleted=result.get("deleted", []),
-            count=len(result.get("deleted", []))
+            deleted=result.get("deleted", []), count=len(result.get("deleted", []))
         )
     except Exception as exc:
-        raise ServiceError(str(exc), error_code="delete_failed", http_status=500) from exc
+        raise ServiceError(
+            str(exc), error_code="delete_failed", http_status=500
+        ) from exc
 
 
 @router.post("/adjust", response_model=GTTAdjustResponse)
@@ -160,25 +180,28 @@ def adjust_gtt_orders(
 ):
     require_trading_enabled(current_user)
     registry.require_access(payload.session_id, current_user)
-    
+
     log_audit(
         action="gtt_adjust",
         user=current_user,
         resource_type="gtt",
         resource_id=payload.session_id,
-        metadata={"order_ids": payload.order_ids, "target_variance": payload.target_variance},
+        metadata={
+            "order_ids": payload.order_ids,
+            "target_variance": payload.target_variance,
+        },
     )
-    
+
     try:
         result = service.adjust_orders_by_ids(
-            payload.session_id, 
-            payload.order_ids, 
-            payload.target_variance
+            payload.session_id, payload.order_ids, payload.target_variance
         )
         return GTTAdjustResponse(
             adjusted=result.get("adjusted", []),
             failed=result.get("failed", []),
-            count=result.get("count", 0)
+            count=result.get("count", 0),
         )
     except Exception as exc:
-        raise ServiceError(str(exc), error_code="adjust_failed", http_status=500) from exc
+        raise ServiceError(
+            str(exc), error_code="adjust_failed", http_status=500
+        ) from exc

@@ -1,31 +1,20 @@
-"""SQLAlchemy models for multi-tenant runtime."""
+"""SQLAlchemy models for TradeCraftX."""
 
 from __future__ import annotations
 
 from datetime import datetime
 import json
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, func, UniqueConstraint
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, func, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from db.database import Base
-
-
-class Tenant(Base):
-    __tablename__ = "tenants"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(255), nullable=False, unique=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
 
 
 class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     email = Column(String(255), nullable=False, unique=True)
     first_name = Column(String(100), nullable=True)
     last_name = Column(String(100), nullable=True)
@@ -35,7 +24,6 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    tenant = relationship("Tenant", back_populates="users")
     broker_connections = relationship("BrokerConnection", back_populates="user", cascade="all, delete-orphan")
     identities = relationship("UserIdentity", back_populates="user", cascade="all, delete-orphan")
     refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
@@ -73,9 +61,8 @@ class BrokerConnection(Base):
     __tablename__ = "broker_connections"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    broker_name = Column(String(50), nullable=False)  # 'upstox' or 'zerodha'
+    broker_name = Column(String(50), nullable=False)
     broker_user_id = Column(String(255), nullable=True)
     encrypted_tokens = Column(LargeBinary, nullable=True)
     metadata_json = Column(Text, nullable=True)
@@ -100,7 +87,6 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     session_id = Column(String(255), nullable=False)
     job_type = Column(String(100), nullable=False)
@@ -118,7 +104,6 @@ class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     action = Column(String(255), nullable=False)
     resource_type = Column(String(100), nullable=False)
@@ -135,7 +120,6 @@ class BrokerAuthState(Base):
     __tablename__ = "broker_auth_states"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     connection_id = Column(Integer, ForeignKey("broker_connections.id"), nullable=False)
     broker_name = Column(String(50), nullable=False)
@@ -148,11 +132,10 @@ class EntryStrategy(Base):
     __tablename__ = "entry_strategies"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     symbol = Column(String(50), nullable=False, index=True)
-    broker = Column(String(20), nullable=True)  # 'upstox' or 'zerodha'
-    broker_user_id = Column(String(50), nullable=True)  # e.g., '32ADGT' or 'NM9165'
+    broker = Column(String(20), nullable=True)
+    broker_user_id = Column(String(50), nullable=True)
     allocated = Column(Float, nullable=True)
     quality = Column(String(50), nullable=True)
     exchange = Column(String(10), nullable=True)
@@ -190,7 +173,6 @@ class EntryStrategyUpload(Base):
     __tablename__ = "entry_strategy_uploads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     filename = Column(String(255), nullable=False)
     symbols_json = Column(Text, nullable=True)
@@ -201,7 +183,6 @@ class EntryStrategyVersion(Base):
     __tablename__ = "entry_strategy_versions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     strategy_id = Column(Integer, ForeignKey("entry_strategies.id"), nullable=False)
     version_no = Column(Integer, nullable=False)
@@ -212,4 +193,103 @@ class EntryStrategyVersion(Base):
 
     __table_args__ = (
         {"mysql_charset": "utf8mb4", "mysql_engine": "InnoDB"},
+    )
+
+
+class MarketUniverse(Base):
+    __tablename__ = "market_universe"
+
+    symbol = Column(String(50), primary_key=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    universe = Column(String(50), nullable=False, default="NIFTY500")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class MarketQuoteDaily(Base):
+    __tablename__ = "market_quotes_daily"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False)
+    trade_date = Column(String(10), nullable=False)
+    cmp = Column(Float, nullable=True)
+    as_of_ts = Column(DateTime(timezone=True), nullable=True)
+    source = Column(String(20), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uq_symbol_trade_date"),
+    )
+
+
+class MarketCandleDaily(Base):
+    __tablename__ = "market_candles_daily"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False)
+    trade_date = Column(String(10), nullable=False)
+    open = Column(Float, nullable=True)
+    high = Column(Float, nullable=True)
+    low = Column(Float, nullable=True)
+    close = Column(Float, nullable=True)
+    volume = Column(Integer, nullable=True)
+    source = Column(String(20), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uq_candle_symbol_trade_date"),
+    )
+
+
+class SymbolCatalog(Base):
+    __tablename__ = "symbol_catalog"
+
+    symbol = Column(String(50), primary_key=True)
+    company_name = Column(String(255), nullable=False)
+    series = Column(String(10), nullable=False)
+    isin = Column(String(20), nullable=False)
+    exchange = Column(String(10), nullable=False, default="NSE")
+    cmp = Column(Float, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class OhlcvDaily(Base):
+    __tablename__ = "ohlcv_daily"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False)
+    trade_date = Column(Date, nullable=False)
+    open = Column(Float, nullable=True)
+    high = Column(Float, nullable=True)
+    low = Column(Float, nullable=True)
+    close = Column(Float, nullable=True)
+    volume = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uq_ohlcv_symbol_trade_date"),
+        Index("ix_ohlcv_symbol_trade_date", "symbol", trade_date.desc()),
+    )
+
+
+class UserTrade(Base):
+    __tablename__ = "user_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False)
+    broker = Column(String(20), nullable=False)
+    symbol = Column(String(50), nullable=False)
+    isin = Column(String(50), nullable=True)
+    trade_date = Column(String(10), nullable=False)
+    exchange = Column(String(10), nullable=True)
+    segment = Column(String(10), nullable=True)
+    series = Column(String(10), nullable=True)
+    side = Column(String(10), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    price = Column(Float, nullable=False)
+    trade_id = Column(String(50), nullable=True)
+    order_id = Column(String(50), nullable=True)
+    order_execution_time = Column(String(50), nullable=True)
+    source = Column(String(20), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "broker", "trade_id", name="uq_user_broker_trade_id"),
     )

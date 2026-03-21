@@ -4,7 +4,6 @@ from dataclasses import dataclass
 @dataclass
 class UserContext:
     user_id: int | None
-    tenant_id: int | None
     email: str
     role: str
     is_dev: bool = False

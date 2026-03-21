@@ -17,7 +17,6 @@ class BrokerConnectionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    tenant_id: int
     user_id: int
     broker_name: str
     created_at: datetime

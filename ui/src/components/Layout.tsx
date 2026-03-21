@@ -29,6 +29,7 @@ import {
   Logout as LogoutIcon,
   Help as HelpIcon,
   PowerSettingsNew as PowerIcon,
+  AdminPanelSettings as AdminIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../context/AuthContext';
 import { useSession } from '../context/SessionContext';
@@ -51,6 +52,7 @@ const navItems = [
   { text: 'Entry Strategies', icon: <PlanIcon />, path: '/entry-strategies' },
   { text: 'Buy Orders', icon: <GttIcon />, path: '/gtt' },
   { text: 'Jobs', icon: <JobsIcon />, path: '/jobs' },
+  { text: 'Administration', icon: <AdminIcon />, path: '/admin', adminOnly: true },
 ];
 
 export default function Layout({ children }: LayoutProps) {
@@ -85,7 +87,9 @@ export default function Layout({ children }: LayoutProps) {
       </Toolbar>
       <Divider />
       <List>
-        {navItems.map((item) => (
+        {navItems
+          .filter((item) => !item.adminOnly || (user && user.role === 'admin'))
+          .map((item) => (
           <ListItem key={item.text} disablePadding>
             <ListItemButton
               selected={location.pathname === item.path}

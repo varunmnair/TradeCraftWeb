@@ -119,8 +119,9 @@ export interface HoldingsAnalyzeRequest {
 }
 
 export interface PlanLatestResponse {
+  strategy_type: 'multi_level' | 'dynamic_averaging';
   plan: Record<string, unknown>[];
-  skipped: string[];
+  skipped: { symbol?: string; Symbol?: string; skip_reason?: string; reason?: string; [key: string]: unknown }[];
 }
 
 export interface PlanGenerateRequest {

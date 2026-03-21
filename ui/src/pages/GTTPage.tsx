@@ -36,10 +36,11 @@ interface GTTOrder {
   Symbol: string;
   Exchange: string;
   'Trigger Price': number;
-  LTP: number;
-  'Variance (%)': number;
+  LTP: number | null;
+  'Variance (%)': number | null;
   Qty: number;
-  'Buy Amount': number;
+  'Buy Amount': number | null;
+  cmp_available?: boolean;
 }
 
 const WARNING_TEXT = 'DELETE';
@@ -165,6 +166,13 @@ export default function GTTPage() {
         headerName: 'CMP', 
         width: 100,
         type: 'number',
+        renderCell: (params) => {
+          const val = params.value as number | null;
+          if (val === null || val === undefined) {
+            return <Typography variant="body2" color="text.disabled">N/A</Typography>;
+          }
+          return val.toFixed(2);
+        },
       },
       { 
         field: 'Variance (%)', 
@@ -172,11 +180,14 @@ export default function GTTPage() {
         width: 100,
         type: 'number',
         renderCell: (params) => {
-          const val = params.value as number;
+          const val = params.value as number | null;
+          if (val === null || val === undefined) {
+            return <Typography variant="body2" color="text.disabled">N/A</Typography>;
+          }
           const color = val > 0 ? 'success.main' : val < 0 ? 'error.main' : 'text.secondary';
           return (
             <Box sx={{ color, fontWeight: 'bold' }}>
-              {val}%
+              {val.toFixed(2)}%
             </Box>
           );
         },
@@ -192,6 +203,13 @@ export default function GTTPage() {
         headerName: 'Amount', 
         width: 120,
         type: 'number',
+        renderCell: (params) => {
+          const val = params.value as number | null;
+          if (val === null || val === undefined) {
+            return <Typography variant="body2" color="text.disabled">N/A</Typography>;
+          }
+          return val.toLocaleString();
+        },
       },
     ];
     setColumns(cols);
@@ -213,11 +231,11 @@ export default function GTTPage() {
     if (varianceThreshold !== '') {
       if (varianceFilterType === 'gt') {
         result = result.filter(o => 
-          (o['Variance (%)'] || 0) > varianceThreshold
+          (o['Variance (%)'] ?? 0) > varianceThreshold
         );
       } else {
         result = result.filter(o => 
-          (o['Variance (%)'] || 0) < varianceThreshold
+          (o['Variance (%)'] ?? 0) < varianceThreshold
         );
       }
     }
@@ -230,7 +248,7 @@ export default function GTTPage() {
 
   // Total amount and duplicates
   const totalAmount = useMemo(() => {
-    return filteredOrders.reduce((sum, o) => sum + (o['Buy Amount'] || 0), 0);
+    return filteredOrders.reduce((sum, o) => sum + (o['Buy Amount'] ?? 0), 0);
   }, [filteredOrders]);
 
   const duplicateSymbols = useMemo(() => {
@@ -527,7 +545,7 @@ export default function GTTPage() {
                       <TableCell>{order['GTT ID'] || '-'}</TableCell>
                       <TableCell>{order.Symbol}</TableCell>
                       <TableCell>{order['Trigger Price']}</TableCell>
-                      <TableCell>{order.LTP}</TableCell>
+                      <TableCell>{order.LTP !== null && order.LTP !== undefined ? order.LTP.toFixed(2) : 'N/A'}</TableCell>
                     </TableRow>
                   );
                 })}
@@ -669,13 +687,16 @@ export default function GTTPage() {
                     {selectedRows.slice(0, 10).map((id) => {
                       const order = orders.find(o => o.id === id);
                       if (!order) return null;
+                      const hasCmp = order.LTP !== null && order.LTP !== undefined;
+                      const ltp = order.LTP;
+                      const variance = order['Variance (%)'];
                       return (
                         <TableRow key={order['GTT ID'] || order.Symbol || id}>
                           <TableCell>{order['GTT ID'] || '-'}</TableCell>
                           <TableCell>{order.Symbol}</TableCell>
                           <TableCell>{order['Trigger Price']}</TableCell>
-                          <TableCell>{order.LTP}</TableCell>
-                          <TableCell>{order['Variance (%)']}%</TableCell>
+                          <TableCell>{hasCmp && ltp !== null ? ltp.toFixed(2) : 'N/A'}</TableCell>
+                          <TableCell>{variance !== null && variance !== undefined ? `${variance.toFixed(2)}%` : 'N/A'}</TableCell>
                         </TableRow>
                       );
                     })}

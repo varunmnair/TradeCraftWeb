@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,20 +17,20 @@ from sqlalchemy import text
 
 from api import config
 from api.errors import ServiceError, generic_error_handler, service_error_handler
-from api.routes import auth as auth_routes
 from api.routes import admin as admin_routes
+from api.routes import ai as ai_routes
+from api.routes import auth as auth_routes
 from api.routes import broker_connections as broker_connection_routes
 from api.routes import brokers as brokers_routes
+from api.routes import entry_strategy as entry_strategy_routes
+from api.routes import gtt as gtt_routes
 from api.routes import holdings as holdings_routes
+from api.routes import jobs as jobs_routes
+from api.routes import market as market_routes
 from api.routes import plan as plan_routes
 from api.routes import risk as risk_routes
-from api.routes import gtt as gtt_routes
-from api.routes import jobs as jobs_routes
 from api.routes import session as session_routes
-from api.routes import ai as ai_routes
-from api.routes import entry_strategy as entry_strategy_routes
 from db.database import SessionLocal
-
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),
@@ -55,14 +55,27 @@ def create_app() -> FastAPI:
     async def log_requests(request: Request, call_next):  # type: ignore[override]
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
-        
+
         # Add request_id to log context
         extra = {"request_id": request_id}
-        
-        LOGGER.info("%s %s [request_id=%s]", request.method, request.url.path, request_id, extra=extra)
+
+        LOGGER.info(
+            "%s %s [request_id=%s]",
+            request.method,
+            request.url.path,
+            request_id,
+            extra=extra,
+        )
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
-        LOGGER.info("%s %s -> %s [request_id=%s]", request.method, request.url.path, response.status_code, request_id, extra=extra)
+        LOGGER.info(
+            "%s %s -> %s [request_id=%s]",
+            request.method,
+            request.url.path,
+            response.status_code,
+            request_id,
+            extra=extra,
+        )
         return response
 
     app.add_exception_handler(ServiceError, service_error_handler)  # type: ignore[arg-type]
@@ -70,6 +83,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_routes.router)
     app.include_router(admin_routes.router)
+    app.include_router(market_routes.router)
     app.include_router(broker_connection_routes.router)
     app.include_router(brokers_routes.router)
     app.include_router(brokers_routes.zerodha_router)
@@ -85,7 +99,13 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def startup_event():
+        import db.models  # noqa: F401 - Ensure all models are registered
+        from db.database import Base, engine
+
+        Base.metadata.create_all(bind=engine)
+
         from core.services.auth_service import AuthService
+
         auth_service = AuthService()
         if config.BOOTSTRAP_ADMIN_EMAIL:
             auth_service.bootstrap_admin(config.BOOTSTRAP_ADMIN_EMAIL)
@@ -106,7 +126,11 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=503, detail="database_unavailable") from exc
 
-        if config.IS_PROD and not config.TOKEN_ENCRYPTION_KEY and not config.ALLOW_INSECURE_TOKENS:
+        if (
+            config.IS_PROD
+            and not config.TOKEN_ENCRYPTION_KEY
+            and not config.ALLOW_INSECURE_TOKENS
+        ):
             raise HTTPException(status_code=503, detail="token_encryption_key_missing")
         return {"status": "ready"}
 
@@ -118,21 +142,21 @@ def create_app() -> FastAPI:
         static_path = UI_DIST_PATH / "static"
         if static_path.exists():
             app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
-        
+
         @app.get("/")
         async def serve_index():
             return FileResponse(str(UI_DIST_PATH / "index.html"))
-        
+
         @app.get("/{path:path}")
         async def serve_spa(path: str):
             # Check if file exists in dist folder
             file_path = UI_DIST_PATH / path
             if file_path.exists() and file_path.is_file():
                 return FileResponse(str(file_path))
-            
+
             # Fallback to index.html for SPA routes
             return FileResponse(str(UI_DIST_PATH / "index.html"))
-        
+
         LOGGER.info(f"Serving UI from {UI_DIST_PATH}")
     else:
         LOGGER.warning(f"UI build not found at {UI_DIST_PATH}. API-only mode.")

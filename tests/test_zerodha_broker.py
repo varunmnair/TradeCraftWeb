@@ -15,7 +15,7 @@ class TestZerodhaBrokerTokenHandling:
         mock_session_manager = MagicMock(spec=SessionManager)
         mock_session_manager.get_access_token.return_value = "db_access_token_123"
 
-        broker = ZerodhaBroker(user_id="test_user", api_key="test_api_key")
+        broker = ZerodhaBroker(broker_user_id="test_user", api_key="test_api_key")
         broker.set_session_context(session_manager=mock_session_manager, connection_id=42)
 
         token = broker._get_access_token()
@@ -25,7 +25,7 @@ class TestZerodhaBrokerTokenHandling:
 
     def test_zerodha_broker_fallback_to_constructor_token(self):
         """Test fallback to access_token passed in constructor when no session_manager."""
-        broker = ZerodhaBroker(user_id="test_user", api_key="test_api_key", access_token="constructor_token")
+        broker = ZerodhaBroker(broker_user_id="test_user", api_key="test_api_key", access_token="constructor_token")
 
         token = broker._get_access_token()
 
@@ -36,7 +36,7 @@ class TestZerodhaBrokerTokenHandling:
         mock_session_manager = MagicMock(spec=SessionManager)
         mock_session_manager.get_access_token.return_value = None
 
-        broker = ZerodhaBroker(user_id="test_user", api_key="test_api_key")
+        broker = ZerodhaBroker(broker_user_id="test_user", api_key="test_api_key")
         broker.set_session_context(session_manager=mock_session_manager, connection_id=42)
 
         with pytest.raises(RuntimeError) as exc_info:
@@ -54,7 +54,7 @@ class TestZerodhaBrokerTokenHandling:
         mock_session_manager = MagicMock(spec=SessionManager)
         mock_session_manager.get_access_token.return_value = "valid_token"
 
-        broker = ZerodhaBroker(user_id="test_user", api_key="test_api_key")
+        broker = ZerodhaBroker(broker_user_id="test_user", api_key="test_api_key")
         broker.set_session_context(session_manager=mock_session_manager, connection_id=42)
 
         broker.login()
@@ -72,7 +72,7 @@ class TestZerodhaBrokerTokenHandling:
         mock_session_manager = MagicMock(spec=SessionManager)
         mock_session_manager.get_access_token.return_value = "invalid_token"
 
-        broker = ZerodhaBroker(user_id="test_user", api_key="test_api_key")
+        broker = ZerodhaBroker(broker_user_id="test_user", api_key="test_api_key")
         broker.set_session_context(session_manager=mock_session_manager, connection_id=42)
 
         with pytest.raises(RuntimeError) as exc_info:
@@ -100,7 +100,7 @@ class TestZerodhaBrokerTokenHandling:
         mock_session_manager = MagicMock(spec=SessionManager)
         mock_session_manager.get_access_token.return_value = "valid_token"
 
-        broker = ZerodhaBroker(user_id="test_user", api_key="test_api_key")
+        broker = ZerodhaBroker(broker_user_id="test_user", api_key="test_api_key")
         broker.set_session_context(session_manager=mock_session_manager, connection_id=42)
         broker.kite = mock_kite
 
@@ -122,7 +122,7 @@ class TestZerodhaBrokerTokenHandling:
         mock_session_manager = MagicMock(spec=SessionManager)
         mock_session_manager.get_access_token.return_value = "expired_token"
 
-        broker = ZerodhaBroker(user_id="test_user", api_key="test_api_key")
+        broker = ZerodhaBroker(broker_user_id="test_user", api_key="test_api_key")
         broker.set_session_context(session_manager=mock_session_manager, connection_id=42)
         broker.kite = mock_kite
 
@@ -142,7 +142,7 @@ class TestZerodhaBrokerTokenHandling:
         mock_session_manager = MagicMock(spec=SessionManager)
         mock_session_manager.get_access_token.return_value = "valid_token"
 
-        broker = ZerodhaBroker(user_id="test_user", api_key="test_api_key")
+        broker = ZerodhaBroker(broker_user_id="test_user", api_key="test_api_key")
         broker.set_session_context(session_manager=mock_session_manager, connection_id=42)
         broker.kite = mock_kite
 

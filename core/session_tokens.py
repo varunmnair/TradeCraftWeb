@@ -32,7 +32,14 @@ class TokenBundle:
             return cls(access_token=data)
         if not isinstance(data, dict):
             raise ValueError("Token data must be dict or string")
-        known = {"access_token", "extended_token", "broker_user_id", "raw_profile", "obtained_at", "expires_at"}
+        known = {
+            "access_token",
+            "extended_token",
+            "broker_user_id",
+            "raw_profile",
+            "obtained_at",
+            "expires_at",
+        }
         extras = {k: v for k, v in data.items() if k not in known}
         access = data.get("access_token")
         if not access:
@@ -96,10 +103,18 @@ class BaseTokenStore:
         tokens: Any,
         *,
         connection_id: Optional[int] = None,
-        tenant_id: Optional[int] = None,
         user_id: Optional[int] = None,
         broker_user_id: Optional[str] = None,
     ) -> None:
+        raise NotImplementedError
+
+    def disconnect(
+        self,
+        broker_name: str,
+        *,
+        connection_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ) -> bool:
         raise NotImplementedError
 
 
@@ -131,7 +146,6 @@ class FileTokenStore(BaseTokenStore):
         tokens: Any,
         *,
         connection_id: Optional[int] = None,
-        tenant_id: Optional[int] = None,
         user_id: Optional[int] = None,
         broker_user_id: Optional[str] = None,
     ) -> None:
@@ -139,6 +153,19 @@ class FileTokenStore(BaseTokenStore):
         file_path = self._file_for(broker_name)
         with file_path.open("wb") as fh:
             pickle.dump(bundle.to_payload(), fh)
+
+    def disconnect(
+        self,
+        broker_name: str,
+        *,
+        connection_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ) -> bool:
+        file_path = self._file_for(broker_name)
+        if file_path.exists():
+            file_path.unlink()
+            return True
+        return False
 
 
 class DbTokenStore(BaseTokenStore):
@@ -159,7 +186,11 @@ class DbTokenStore(BaseTokenStore):
             connection = session.get(models.BrokerConnection, connection_id)
             if not connection or connection.broker_name != broker_name:
                 return None
-            return TokenBundle.from_obj(self._encryptor.decrypt_dict(connection.encrypted_tokens))
+            if not connection.encrypted_tokens:
+                return None
+            return TokenBundle.from_obj(
+                self._encryptor.decrypt_dict(connection.encrypted_tokens)
+            )
 
     def store_tokens(
         self,
@@ -167,7 +198,6 @@ class DbTokenStore(BaseTokenStore):
         tokens: Any,
         *,
         connection_id: Optional[int] = None,
-        tenant_id: Optional[int] = None,
         user_id: Optional[int] = None,
         broker_user_id: Optional[str] = None,
     ) -> None:
@@ -179,25 +209,86 @@ class DbTokenStore(BaseTokenStore):
 
         with self._session_factory() as session:
             if connection_id is None:
-                if tenant_id is None or user_id is None:
-                    raise ValueError("tenant_id and user_id required when creating new broker connection")
+                if user_id is None:
+                    raise ValueError(
+                        "user_id required when creating new broker connection"
+                    )
+
+                existing_connections = (
+                    session.query(models.BrokerConnection)
+                    .filter(
+                        models.BrokerConnection.user_id == user_id,
+                        models.BrokerConnection.broker_name == broker_name,
+                    )
+                    .all()
+                )
+                for old_conn in existing_connections:
+                    session.delete(old_conn)
+
+                new_broker_user_id = payload.get("broker_user_id")
                 connection = models.BrokerConnection(
-                    tenant_id=tenant_id,
                     user_id=user_id,
                     broker_name=broker_name,
                     encrypted_tokens=encrypted,
                     metadata_json=json.dumps({}),
-                    broker_user_id=payload.get("broker_user_id"),
+                    broker_user_id=new_broker_user_id,
                     token_updated_at=datetime.now(timezone.utc),
                 )
                 session.add(connection)
                 session.commit()
                 session.refresh(connection)
                 return
+
             connection = session.get(models.BrokerConnection, connection_id)
             if not connection:
                 raise ValueError("Broker connection not found")
+
+            new_broker_user_id = payload.get("broker_user_id")
+            if new_broker_user_id and new_broker_user_id != connection.broker_user_id:
+                existing = (
+                    session.query(models.BrokerConnection)
+                    .filter(
+                        models.BrokerConnection.user_id == connection.user_id,
+                        models.BrokerConnection.broker_name == connection.broker_name,
+                        models.BrokerConnection.broker_user_id == new_broker_user_id,
+                        models.BrokerConnection.id != connection_id,
+                    )
+                    .first()
+                )
+                if existing:
+                    session.delete(existing)
+
             connection.encrypted_tokens = encrypted
-            connection.broker_user_id = payload.get("broker_user_id") or connection.broker_user_id
+            connection.broker_user_id = new_broker_user_id or connection.broker_user_id
             connection.token_updated_at = datetime.now(timezone.utc)
             session.commit()
+
+    def disconnect(
+        self,
+        broker_name: str,
+        *,
+        connection_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ) -> bool:
+        with self._session_factory() as session:
+            if connection_id is not None:
+                connection = session.get(models.BrokerConnection, connection_id)
+                if connection and connection.broker_name == broker_name:
+                    session.delete(connection)
+                    session.commit()
+                    return True
+                return False
+
+            if user_id is not None:
+                deleted = (
+                    session.query(models.BrokerConnection)
+                    .filter(
+                        models.BrokerConnection.user_id == user_id,
+                        models.BrokerConnection.broker_name == broker_name,
+                    )
+                    .delete()
+                )
+                session.commit()
+                return deleted > 0
+
+            raise ValueError("Either connection_id or user_id required")

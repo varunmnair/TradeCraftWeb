@@ -4,10 +4,9 @@ from core.runtime.session_registry import SessionRegistry
 class DummyBroker:
     broker_name = "dummy"
 
-    def __init__(self, user_id: str):
-        self.user_id = user_id
+    def __init__(self, broker_user_id: str):
+        self.broker_user_id = broker_user_id
 
-    # SessionCache refresh paths expect these methods
     def get_holdings(self):
         return []
 
@@ -19,16 +18,16 @@ class DummyBroker:
 
 
 class DummyBrokerFactory:
-    def get_broker(self, broker_name, user_id, config):
+    def get_broker(self, broker_name, broker_user_id, config):
         assert broker_name == "dummy"
-        return DummyBroker(user_id)
+        return DummyBroker(broker_user_id)
 
 
 def test_create_session_records_context():
     registry = SessionRegistry(broker_factory=DummyBrokerFactory())
-    context = registry.create_session(user_id="alice", broker_name="dummy", broker_config={})
+    context = registry.create_session(broker_user_id="alice", broker_name="dummy", broker_config={})
 
     assert context.session_id
     restored = registry.get_session(context.session_id)
     assert restored is not None
-    assert restored.user_id == "alice"
+    assert restored.broker_user_id == "alice"

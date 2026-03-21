@@ -97,7 +97,7 @@ export default function PlanPage() {
     }
   };
 
-  const generateColumns = (plan: Record<string, unknown>[], skipped: string[]) => {
+  const generateColumns = (plan: Record<string, unknown>[], skipped: { symbol?: string; Symbol?: string; skip_reason?: string; reason?: string; [key: string]: unknown }[]) => {
     if (plan.length > 0) {
       const cols = generateGridColumns(plan[0], false);
       setColumns(cols);

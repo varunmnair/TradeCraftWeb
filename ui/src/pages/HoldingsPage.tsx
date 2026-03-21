@@ -9,18 +9,30 @@ import {
   TextField,
   Chip,
   InputAdornment,
+  LinearProgress,
 } from '@mui/material';
 import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import { 
   PlayArrow as AnalyzeIcon, 
   Search as SearchIcon,
+  CloudSync as SyncIcon,
+  Upload as UploadIcon,
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
 import { useJobRunner } from '../hooks/useJobRunner';
 
+interface ReadinessStatus {
+  broker: string;
+  market_data_ready: boolean;
+  trades_ready: boolean;
+  ready_to_analyze: boolean;
+  blocking_reason: string | null;
+  missing: { cmp: string[]; candles: string[]; trades: string[] };
+}
+
 export default function HoldingsPage() {
-  const { sessionId } = useSession();
+  const { sessionId, sessionInfo } = useSession();
   
   const [holdings, setHoldings] = useState<Record<string, unknown>[]>([]);
   const [columns, setColumns] = useState<GridColDef[]>([]);
@@ -28,6 +40,11 @@ export default function HoldingsPage() {
   const [error, setError] = useState('');
   const [searchText, setSearchText] = useState('');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [readiness, setReadiness] = useState<ReadinessStatus | null>(null);
+  const [readinessLoading, setReadinessLoading] = useState(false);
+  const [syncJobId, setSyncJobId] = useState<number | null>(null);
+  const [syncJobStatus, setSyncJobStatus] = useState<string | null>(null);
+  const [uploadMessage, setUploadMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const fetchHoldings = useCallback(async () => {
     if (!sessionId || loading) return;
@@ -49,6 +66,41 @@ export default function HoldingsPage() {
     }
   }, [sessionId]);
 
+  const fetchReadiness = useCallback(async () => {
+    if (!sessionId) return;
+    setReadinessLoading(true);
+    try {
+      const data = await api.getHoldingsAnalyzeStatus(sessionId);
+      setReadiness(data);
+    } catch (err) {
+      console.error('Failed to fetch readiness:', err);
+    } finally {
+      setReadinessLoading(false);
+    }
+  }, [sessionId]);
+
+  // Poll sync job status
+  useEffect(() => {
+    if (!syncJobId) return;
+
+    const pollJob = async () => {
+      try {
+        const data = await api.getJob(syncJobId);
+        setSyncJobStatus(data.job.status);
+        if (data.job.status === 'succeeded' || data.job.status === 'failed') {
+          setSyncJobId(null);
+          fetchReadiness();
+        }
+      } catch (err) {
+        console.error('Failed to poll sync job:', err);
+      }
+    };
+
+    pollJob();
+    const interval = setInterval(pollJob, 2000);
+    return () => clearInterval(interval);
+  }, [syncJobId, fetchReadiness]);
+
   const {
     isRunning: isAnalyzing,
     isSuccess: analyzeSuccess,
@@ -67,12 +119,51 @@ export default function HoldingsPage() {
     },
   });
 
-  // Fetch holdings when session changes
+  // Fetch holdings and readiness when session changes
   useEffect(() => {
     if (sessionId) {
       fetchHoldings();
+      fetchReadiness();
     }
-  }, [sessionId, fetchHoldings]);
+  }, [sessionId, fetchHoldings, fetchReadiness]);
+
+  const handleSyncTrades = async () => {
+    try {
+      const result = await api.syncUpstoxTrades(400);
+      setSyncJobId(result.job_id);
+      setSyncJobStatus('pending');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start sync');
+    }
+  };
+
+  const handleUploadTradebook = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setUploadMessage(null);
+    try {
+      const result = await api.uploadZerodhaTradebook(file);
+      if (result.errors && result.errors.length > 0) {
+        setUploadMessage({
+          type: 'error',
+          text: `Uploaded ${result.rows_ingested} rows with errors: ${result.errors.join(', ')}`,
+        });
+      } else {
+        setUploadMessage({
+          type: 'success',
+          text: `Uploaded ${result.rows_ingested} trades for ${result.symbols_covered} symbols`,
+        });
+      }
+      fetchReadiness();
+    } catch (err) {
+      setUploadMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to upload tradebook',
+      });
+    }
+    event.target.value = '';
+  };
 
   const generateColumns = (items: Record<string, unknown>[]) => {
     if (items.length === 0) {
@@ -116,6 +207,11 @@ export default function HoldingsPage() {
       setError('No active session. Please start a session first.');
       return;
     }
+
+    if (readiness && !readiness.ready_to_analyze) {
+      setError(`Cannot analyze: ${readiness.blocking_reason || 'Missing required data'}`);
+      return;
+    }
     
     resetAnalyze();
     setError('');
@@ -128,7 +224,13 @@ export default function HoldingsPage() {
       });
       await runAnalyze(() => Promise.resolve({ job_id: response.job_id }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start analysis');
+      const errorMsg = err instanceof Error ? err.message : 'Failed to start analysis';
+      if (errorMsg.includes('NOT_READY')) {
+        setError('Not ready to analyze. Please sync trades or upload tradebook first.');
+        fetchReadiness();
+      } else {
+        setError(errorMsg);
+      }
     }
   };
 
@@ -176,6 +278,91 @@ export default function HoldingsPage() {
         </Alert>
       )}
 
+      {/* Readiness Banner */}
+      {(readinessLoading || syncJobId) && (
+        <Paper sx={{ p: 2, mb: 2 }}>
+          {readinessLoading ? (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <CircularProgress size={20} />
+              <Typography variant="body2">Checking readiness...</Typography>
+            </Box>
+          ) : syncJobId ? (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <SyncIcon />
+              <Typography variant="body2">
+                Syncing trades... <Chip label={syncJobStatus || 'pending'} size="small" />
+              </Typography>
+              <LinearProgress sx={{ flexGrow: 1, ml: 2 }} />
+            </Box>
+          ) : null}
+        </Paper>
+      )}
+
+      {/* Trades Sync / Upload Section */}
+      {readiness && !readiness.trades_ready && (
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Typography variant="subtitle1" gutterBottom>
+            {readiness.broker === 'upstox' 
+              ? 'Fetch Order History from Upstox'
+              : 'Upload Tradebook'}
+          </Typography>
+          
+          {readiness && readiness.broker === 'upstox' && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <Typography variant="body2" color="text.secondary">
+                {readiness.blocking_reason === 'TRADES_SYNC_REQUIRED' 
+                  ? 'Order history needs to be synced before analysis.'
+                  : 'Click to sync 400 days of order history.'}
+              </Typography>
+              <Button
+                variant="contained"
+                color="primary"
+                startIcon={<SyncIcon />}
+                onClick={handleSyncTrades}
+                disabled={Boolean(syncJobId)}
+              >
+                {syncJobId ? 'Syncing...' : 'Sync Order History'}
+              </Button>
+            </Box>
+          )}
+
+          {readiness && readiness.broker === 'zerodha' && (
+            <Box>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Upload your Zerodha tradebook CSV to enable analysis.
+                Required columns: symbol,isin,trade_date,exchange,segment,series,trade_type,auction,quantity,price,trade_id,order_id,order_execution_time
+              </Typography>
+              <Button
+                variant="contained"
+                component="label"
+                startIcon={<UploadIcon />}
+              >
+                Upload Tradebook
+                <input
+                  type="file"
+                  accept=".csv"
+                  hidden
+                  onChange={handleUploadTradebook}
+                />
+              </Button>
+              {uploadMessage && (
+                <Alert severity={uploadMessage.type} sx={{ mt: 2 }} onClose={() => setUploadMessage(null)}>
+                  {uploadMessage.text}
+                </Alert>
+              )}
+            </Box>
+          )}
+        </Paper>
+      )}
+
+      {/* Market Data Missing Warning */}
+      {readiness && readiness.blocking_reason === 'MARKET_DATA_MISSING' && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Market data is not fully loaded. Missing: {readiness.missing.candles.length} symbols for candles, {readiness.missing.cmp.length} symbols for CMP. 
+          Please run "Refresh Market Data" from the Administration page.
+        </Alert>
+      )}
+
       {/* Controls */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -184,10 +371,13 @@ export default function HoldingsPage() {
             variant="contained"
             startIcon={isAnalyzing ? <CircularProgress size={20} color="inherit" /> : <AnalyzeIcon />}
             onClick={handleAnalyze}
-            disabled={isAnalyzing}
+            disabled={isAnalyzing || !readiness?.ready_to_analyze}
           >
             {isAnalyzing ? 'Analyzing...' : holdings.length > 0 ? 'Refresh' : 'Analyze'}
           </Button>
+          {!readiness?.ready_to_analyze && readiness && (
+            <Chip label="Not Ready" color="warning" size="small" />
+          )}
         </Box>
 
         {/* Job Status */}

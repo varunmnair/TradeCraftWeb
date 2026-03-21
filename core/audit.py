@@ -10,7 +10,6 @@ from core.auth.context import UserContext
 from db.database import SessionLocal
 from db.models import AuditEvent
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -18,13 +17,21 @@ def sanitize_for_audit(data: Dict[str, Any]) -> Dict[str, Any]:
     """Remove sensitive data from audit records."""
     if not data:
         return {}
-    
+
     sensitive_keys = {
-        "password", "token", "access_token", "refresh_token",
-        "api_secret", "secret", "authorization", "jwt",
-        "tokens", "encrypted_tokens", "broker_user_id",
+        "password",
+        "token",
+        "access_token",
+        "refresh_token",
+        "api_secret",
+        "secret",
+        "authorization",
+        "jwt",
+        "tokens",
+        "encrypted_tokens",
+        "broker_user_id",
     }
-    
+
     result = {}
     for key, value in data.items():
         if key.lower() in sensitive_keys:
@@ -38,7 +45,7 @@ def sanitize_for_audit(data: Dict[str, Any]) -> Dict[str, Any]:
             ]
         else:
             result[key] = value
-    
+
     return result
 
 
@@ -54,7 +61,7 @@ def log_audit(
     request_id: Optional[str] = None,
 ) -> None:
     """Log an audit event to the database.
-    
+
     Args:
         action: The action being performed (e.g., 'login', 'order_place', 'upload_csv')
         user: The user context
@@ -66,23 +73,24 @@ def log_audit(
         user_agent: Client user agent
         request_id: Request tracking ID
     """
-    if not user.tenant_id or not user.user_id:
+    if not user.user_id:
         logger.warning(f"Audit event skipped - no user context: {action}")
         return
-    
+
     sanitized_metadata = sanitize_for_audit(metadata or {})
-    
+
     try:
         db = SessionLocal()
         try:
             event = AuditEvent(
-                tenant_id=user.tenant_id,
                 user_id=user.user_id,
                 action=action,
                 resource_type=resource_type,
                 resource_id=resource_id,
                 broker_connection_id=broker_connection_id,
-                metadata_json=json.dumps(sanitized_metadata) if sanitized_metadata else None,
+                metadata_json=(
+                    json.dumps(sanitized_metadata) if sanitized_metadata else None
+                ),
                 ip_address=ip_address,
                 user_agent=user_agent[:500] if user_agent else None,
                 request_id=request_id,
@@ -97,11 +105,9 @@ def log_audit(
 
 def require_trading_enabled(user: UserContext) -> None:
     """Check if trading is enabled for the user.
-    
+
     Raises:
         PermissionError: If trading is not enabled
     """
     if not user.trading_enabled:
-        raise PermissionError(
-            "Trading is disabled. Contact admin to enable trading."
-        )
+        raise PermissionError("Trading is disabled. Contact admin to enable trading.")

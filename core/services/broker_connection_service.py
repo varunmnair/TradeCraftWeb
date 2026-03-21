@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from sqlalchemy.orm import Session
-
 from core.security.encryption import get_encryptor
 from db import models
 from db.database import SessionLocal
@@ -20,7 +18,6 @@ class BrokerConnectionService:
     def create_connection(
         self,
         *,
-        tenant_id: int,
         user_id: int,
         broker_name: str,
         tokens: Dict[str, Any] | None = None,
@@ -30,7 +27,6 @@ class BrokerConnectionService:
         encrypted = self._encryptor.encrypt_dict(tokens or {}) if tokens else None
         with self._session_factory() as session:
             connection = models.BrokerConnection(
-                tenant_id=tenant_id,
                 user_id=user_id,
                 broker_name=broker_name.lower(),
                 encrypted_tokens=encrypted,
@@ -44,7 +40,6 @@ class BrokerConnectionService:
     def ensure_connection(
         self,
         *,
-        tenant_id: int,
         user_id: int,
         broker_name: str,
         connection_id: int | None = None,
@@ -56,15 +51,19 @@ class BrokerConnectionService:
                 connection = session.get(models.BrokerConnection, connection_id)
                 if not connection:
                     raise ValueError("Broker connection not found")
-                if connection.tenant_id != tenant_id:
-                    raise ValueError("Connection belongs to another tenant")
                 if (not allow_admin) and connection.user_id != user_id:
                     raise ValueError("Connection belongs to another user")
                 if connection.broker_name != broker_name:
                     raise ValueError("Connection broker mismatch")
                 return connection
+
+            # Delete ALL existing connections for this user+broker to ensure single active connection
+            session.query(models.BrokerConnection).filter(
+                models.BrokerConnection.user_id == user_id,
+                models.BrokerConnection.broker_name == broker_name,
+            ).delete()
+
             connection = models.BrokerConnection(
-                tenant_id=tenant_id,
                 user_id=user_id,
                 broker_name=broker_name,
                 metadata_json=json.dumps({}),
@@ -74,9 +73,11 @@ class BrokerConnectionService:
             session.refresh(connection)
             return connection
 
-    def list_connections(self, tenant_id: int, user_id: int | None = None) -> List[models.BrokerConnection]:
+    def list_connections(
+        self, user_id: int | None = None
+    ) -> List[models.BrokerConnection]:
         with self._session_factory() as session:
-            query = session.query(models.BrokerConnection).filter(models.BrokerConnection.tenant_id == tenant_id)
+            query = session.query(models.BrokerConnection)
             if user_id is not None:
                 query = query.filter(models.BrokerConnection.user_id == user_id)
             return query.order_by(models.BrokerConnection.created_at.desc()).all()
@@ -88,7 +89,6 @@ class BrokerConnectionService:
     def get_active_connection(
         self,
         *,
-        tenant_id: int,
         user_id: int,
         broker_name: str,
         token_bundle,
@@ -98,7 +98,7 @@ class BrokerConnectionService:
         A connection is considered active if token_bundle returns non-None.
         """
         broker_name = broker_name.lower()
-        connections = self.list_connections(tenant_id=tenant_id, user_id=user_id)
+        connections = self.list_connections(user_id=user_id)
         for conn in connections:
             if conn.broker_name == broker_name:
                 if token_bundle(broker_name, connection_id=conn.id):

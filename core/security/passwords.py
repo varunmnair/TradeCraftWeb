@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from passlib.context import CryptContext
 
 MIN_PASSWORD_LENGTH = 10
@@ -14,6 +12,7 @@ _pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 class PasswordError(Exception):
     """Raised for password validation errors."""
+
     pass
 
 
@@ -22,9 +21,13 @@ def _validate_password(password: str) -> None:
     if not password:
         raise PasswordError("Password cannot be empty")
     if len(password) < MIN_PASSWORD_LENGTH:
-        raise PasswordError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters long")
+        raise PasswordError(
+            f"Password must be at least {MIN_PASSWORD_LENGTH} characters long"
+        )
     if len(password) > MAX_PASSWORD_LENGTH:
-        raise PasswordError(f"Password must not exceed {MAX_PASSWORD_LENGTH} characters")
+        raise PasswordError(
+            f"Password must not exceed {MAX_PASSWORD_LENGTH} characters"
+        )
 
 
 def hash_password(password: str) -> str:

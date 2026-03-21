@@ -3,14 +3,13 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
 
 from api.dependencies import get_ai_service, get_current_user, get_session_registry
 from api.errors import ServiceError
 from core.auth.context import UserContext
 from core.runtime.session_registry import SessionRegistry
 from core.services.ai_service import AIService
-from pydantic import BaseModel, Field
-
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -23,7 +22,9 @@ class AIChatRequest(BaseModel):
 
 class AIAction(BaseModel):
     type: str = Field(..., description="Action type: filter, sort, analyze")
-    params: Dict[str, Any] = Field(default_factory=dict, description="Action parameters")
+    params: Dict[str, Any] = Field(
+        default_factory=dict, description="Action parameters"
+    )
 
 
 class AIChatResponse(BaseModel):
@@ -48,14 +49,14 @@ def chat_with_ai(
             context_str = f"\n\nCurrent page: {page}"
             if selected:
                 context_str += f"\nSelected symbols: {', '.join(selected)}"
-        
+
         # Combine user message with context
         full_prompt = payload.message + context_str
-        
+
         result = ai_service.ask(payload.session_id, full_prompt)
         return AIChatResponse(
             response=result.get("response", ""),
-            actions=None  # TODO: Parse actionable suggestions from AI response
+            actions=None,  # TODO: Parse actionable suggestions from AI response
         )
     except Exception as exc:
         raise ServiceError(str(exc), error_code="ai_error", http_status=500) from exc

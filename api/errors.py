@@ -34,7 +34,13 @@ class ServiceError(Exception):
         }
 
 
-def format_error_response(message: str, *, error_code: str = "internal_error", context: Optional[Dict[str, Any]] = None, retryable: bool = False) -> Dict[str, Any]:
+def format_error_response(
+    message: str,
+    *,
+    error_code: str = "internal_error",
+    context: Optional[Dict[str, Any]] = None,
+    retryable: bool = False,
+) -> Dict[str, Any]:
     return {
         "error_code": error_code,
         "message": message,
@@ -49,4 +55,6 @@ async def service_error_handler(request: Request, exc: ServiceError):
 
 async def generic_error_handler(request: Request, exc: Exception):
     content = format_error_response(str(exc))
-    return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=content)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=content
+    )

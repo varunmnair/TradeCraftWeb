@@ -3,43 +3,45 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from api.dependencies import get_current_user, get_db_session, get_session_registry, require_trading_enabled
+from api.dependencies import get_current_user, get_db_session
 from api.errors import ServiceError
 from api.schemas.entry_strategy import (
+    ApplyRevisionRequest,
+    ApplyRevisionResponse,
+    BulkApplyRevisionRequest,
+    BulkApplyRevisionResponse,
+    BulkApplyRevisionResult,
+    BulkSuggestRevisionItem,
+    BulkSuggestRevisionRequest,
+    BulkSuggestRevisionResponse,
     EntryLevelSchema,
-    EntryStrategyCSVRow,
     EntryStrategyFullSchema,
     EntryStrategyListResponse,
     EntryStrategySummarySchema,
     EntryStrategyUploadResponse,
+    RestoreVersionResponse,
     SuggestedRevision,
     SuggestRevisionResponse,
-    ApplyRevisionRequest,
-    ApplyRevisionResponse,
-    UploadHistoryResponse,
     UploadHistoryItem,
-    VersionListResponse,
+    UploadHistoryResponse,
     VersionItem,
-    RestoreVersionRequest,
-    RestoreVersionResponse,
-    BulkSuggestRevisionRequest,
-    BulkSuggestRevisionResponse,
-    BulkSuggestRevisionItem,
-    BulkApplyRevisionRequest,
-    BulkApplyRevisionResponse,
-    BulkApplyRevisionResult,
+    VersionListResponse,
 )
 from core.auth.context import UserContext
 from core.runtime.session_registry import SessionRegistry
-from db.database import SessionLocal
-from db.models import EntryLevel, EntryStrategy, EntryStrategyUpload, EntryStrategyVersion
-
+from db.models import (
+    EntryLevel,
+    EntryStrategy,
+    EntryStrategyUpload,
+    EntryStrategyVersion,
+)
 
 router = APIRouter(prefix="/entry-strategies", tags=["entry-strategies"])
 
@@ -71,16 +73,18 @@ def _get_broker_scope_from_session(
     context = registry.get_session(session_id)
     if not context:
         raise HTTPException(status_code=404, detail="Session not found or expired")
-    
+
     # Verify session belongs to current user
-    if current_user.tenant_id and context.tenant_id and current_user.tenant_id != context.tenant_id:
-        raise HTTPException(status_code=403, detail="Session does not belong to this tenant")
-    if not current_user.is_dev and context.user_record_id and current_user.user_id != context.user_record_id:
+    if (
+        not current_user.is_dev
+        and context.user_record_id
+        and current_user.user_id != context.user_record_id
+    ):
         raise HTTPException(status_code=403, detail="Session owned by another user")
-    
+
     broker = context.broker_name
-    broker_user_id = context.user_id  # This is the broker_user_id (e.g., '32ADGT')
-    
+    broker_user_id = context.broker_user_id
+
     return broker, broker_user_id
 
 
@@ -89,45 +93,39 @@ def _require_active_connection_scope(
     db: Session,
 ) -> tuple[int, str, str]:
     """Get broker_connection_id, broker, and broker_user_id from active connection.
-    
+
     Returns tuple of (connection_id, broker, broker_user_id)
-    
+
     Raises ServiceError with 409 if no active connection is set.
     """
     from api.dependencies import get_broker_connection_service
-    from core.auth.active_connection_store import get_active_connection_store
-    
+
     if current_user.active_broker_connection_id is None:
         raise ServiceError(
             "No active broker connection. Connect/select a broker first.",
             error_code="no_active_connection",
             http_status=409,
         )
-    
+
     connection_service = get_broker_connection_service()
-    connection = connection_service.get_connection(current_user.active_broker_connection_id)
-    
+    connection = connection_service.get_connection(
+        current_user.active_broker_connection_id
+    )
+
     if not connection:
         raise ServiceError(
             "Active broker connection not found. Please select a valid connection.",
             error_code="connection_not_found",
             http_status=409,
         )
-    
-    if connection.tenant_id != current_user.tenant_id:
-        raise ServiceError(
-            "Active broker connection belongs to another tenant.",
-            error_code="forbidden",
-            http_status=403,
-        )
-    
+
     if connection.user_id != current_user.user_id:
         raise ServiceError(
             "Active broker connection belongs to another user.",
             error_code="forbidden",
             http_status=403,
         )
-    
+
     return connection.id, connection.broker_name, connection.broker_user_id
 
 
@@ -137,12 +135,13 @@ def list_entry_strategies(
     current_user: UserContext = Depends(get_current_user),
 ):
     """List entry strategies scoped to the active broker connection."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     strategies = (
         db.query(EntryStrategy)
         .filter(
-            EntryStrategy.tenant_id == current_user.tenant_id,
             EntryStrategy.user_id == current_user.user_id,
             EntryStrategy.broker == broker,
             EntryStrategy.broker_user_id == broker_user_id,
@@ -221,12 +220,13 @@ def delete_entry_strategy(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Delete a single entry strategy by symbol, scoped to the active broker connection."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     strategy = (
         db.query(EntryStrategy)
         .filter(
-            EntryStrategy.tenant_id == current_user.tenant_id,
             EntryStrategy.user_id == current_user.user_id,
             EntryStrategy.broker == broker,
             EntryStrategy.broker_user_id == broker_user_id,
@@ -251,16 +251,17 @@ def bulk_delete_entry_strategies(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Delete multiple entry strategies by symbols, scoped to the active broker connection."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     deleted_count = 0
     not_found = []
-    
+
     for symbol in symbols:
         strategy = (
             db.query(EntryStrategy)
             .filter(
-                EntryStrategy.tenant_id == current_user.tenant_id,
                 EntryStrategy.user_id == current_user.user_id,
                 EntryStrategy.broker == broker,
                 EntryStrategy.broker_user_id == broker_user_id,
@@ -268,15 +269,15 @@ def bulk_delete_entry_strategies(
             )
             .first()
         )
-        
+
         if strategy:
             db.delete(strategy)
             deleted_count += 1
         else:
             not_found.append(symbol)
-    
+
     db.commit()
-    
+
     return {
         "deleted_count": deleted_count,
         "not_found": not_found,
@@ -291,12 +292,13 @@ def get_entry_strategy(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Get a single entry strategy, scoped to the active broker connection."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     strategy = (
         db.query(EntryStrategy)
         .filter(
-            EntryStrategy.tenant_id == current_user.tenant_id,
             EntryStrategy.user_id == current_user.user_id,
             EntryStrategy.broker == broker,
             EntryStrategy.broker_user_id == broker_user_id,
@@ -323,15 +325,17 @@ def get_entry_strategy(
         exchange=strategy.exchange,
         dynamic_averaging_enabled=strategy.dynamic_averaging_enabled,
         averaging_rules_json=strategy.averaging_rules_json,
-        averaging_rules_summary=_compute_averaging_rules_summary(strategy.averaging_rules_json),
+        averaging_rules_summary=_compute_averaging_rules_summary(
+            strategy.averaging_rules_json
+        ),
         levels=[
             EntryLevelSchema(
-                id=l.id,
-                level_no=l.level_no,
-                price=l.price,
-                is_active=l.is_active,
+                id=level.id,
+                level_no=level.level_no,
+                price=level.price,
+                is_active=level.is_active,
             )
-            for l in levels
+            for level in levels
         ],
         created_at=strategy.created_at,
         updated_at=strategy.updated_at,
@@ -345,8 +349,10 @@ async def upload_csv(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Upload CSV to create/update entry strategies, scoped to the active broker connection."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a CSV")
 
@@ -414,7 +420,7 @@ async def upload_csv(
     for row_num, row in enumerate(reader, start=2):
         try:
             row = {k.strip(): (v.strip() if v else "") for k, v in row.items()}
-            
+
             # Get symbol - prefer "symbol" column, fall back to "Raw Symbol"
             symbol = get_col(row, "symbol", "raw symbol", "Raw Symbol") or ""
             if symbol.startswith("nse:") or symbol.startswith("bse:"):
@@ -437,16 +443,36 @@ async def upload_csv(
                 quality = get_col(row, "quality", "Quality") or None
                 exchange = get_col(row, "exchange", "Exchange") or "NSE"
 
-                da_enabled_str = get_col(row, "da_enabled", "DA Enabled", "da enabled").lower()
+                da_enabled_str = get_col(
+                    row, "da_enabled", "DA Enabled", "da enabled"
+                ).lower()
                 da_enabled = da_enabled_str in ("y", "yes", "true", "1")
-                
+
                 da_legs_str = get_col(row, "da_legs", "DA legs", "da legs")
-                da_legs = int(da_legs_str) if da_legs_str.isdigit() else (1 if da_enabled else 0)
-                
-                e1_buyback = get_col(row, "da_e1_buyback", "DA E1 Buyback", "da e1 buyback") or "0"
-                e2_buyback = get_col(row, "da_e2_buyback", "DA E2 Buyback", "da e2 buyback") or "0"
-                e3_buyback = get_col(row, "da_e3_buyback", "DA E3 Buyback", "da e3 buyback") or "0"
-                trigger_offset = get_col(row, "datrigger_offset", "DATriggerOffset", "datrigger offset") or "0"
+                da_legs = (
+                    int(da_legs_str)
+                    if da_legs_str.isdigit()
+                    else (1 if da_enabled else 0)
+                )
+
+                e1_buyback = (
+                    get_col(row, "da_e1_buyback", "DA E1 Buyback", "da e1 buyback")
+                    or "0"
+                )
+                e2_buyback = (
+                    get_col(row, "da_e2_buyback", "DA E2 Buyback", "da e2 buyback")
+                    or "0"
+                )
+                e3_buyback = (
+                    get_col(row, "da_e3_buyback", "DA E3 Buyback", "da e3 buyback")
+                    or "0"
+                )
+                trigger_offset = (
+                    get_col(
+                        row, "datrigger_offset", "DATriggerOffset", "datrigger offset"
+                    )
+                    or "0"
+                )
 
                 averaging_rules = None
                 if da_enabled:
@@ -456,11 +482,17 @@ async def upload_csv(
                             int(e2_buyback) if e2_buyback.isdigit() else 0,
                             int(e3_buyback) if e3_buyback.isdigit() else 0,
                         ]
-                        averaging_rules = json.dumps({
-                            "legs": da_legs,
-                            "buyback": buyback,
-                            "trigger_offset": int(trigger_offset) if trigger_offset.isdigit() else 0,
-                        })
+                        averaging_rules = json.dumps(
+                            {
+                                "legs": da_legs,
+                                "buyback": buyback,
+                                "trigger_offset": (
+                                    int(trigger_offset)
+                                    if trigger_offset.isdigit()
+                                    else 0
+                                ),
+                            }
+                        )
                     except (ValueError, TypeError):
                         pass
 
@@ -507,7 +539,25 @@ async def upload_csv(
     symbols_processed = set(parsed_strategies.keys())
     created_count = 0
     updated_count = 0
+    deleted_count = 0
     now = datetime.utcnow()
+
+    # Delete old strategies not in the uploaded CSV
+    old_strategies = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+        )
+        .all()
+    )
+    for old in old_strategies:
+        if old.symbol not in symbols_processed:
+            # Delete levels first
+            db.query(EntryLevel).filter(EntryLevel.strategy_id == old.id).delete()
+            db.delete(old)
+            deleted_count += 1
 
     for symbol, strategy_data in parsed_strategies.items():
         levels_dict = strategy_data["levels"]
@@ -515,7 +565,6 @@ async def upload_csv(
         existing = (
             db.query(EntryStrategy)
             .filter(
-                EntryStrategy.tenant_id == current_user.tenant_id,
                 EntryStrategy.user_id == current_user.user_id,
                 EntryStrategy.broker == broker,
                 EntryStrategy.broker_user_id == broker_user_id,
@@ -528,11 +577,15 @@ async def upload_csv(
             existing.allocated = strategy_data.get("allocated")
             existing.quality = strategy_data.get("quality")
             existing.exchange = strategy_data.get("exchange", "NSE")
-            existing.dynamic_averaging_enabled = strategy_data.get("dynamic_averaging_enabled", False)
+            existing.dynamic_averaging_enabled = strategy_data.get(
+                "dynamic_averaging_enabled", False
+            )
             existing.averaging_rules_json = strategy_data.get("averaging_rules_json")
             existing.updated_at = now
 
-            old_levels = db.query(EntryLevel).filter(EntryLevel.strategy_id == existing.id).all()
+            old_levels = (
+                db.query(EntryLevel).filter(EntryLevel.strategy_id == existing.id).all()
+            )
             if old_levels:
                 _create_version(
                     db=db,
@@ -545,16 +598,17 @@ async def upload_csv(
             db.query(EntryLevel).filter(EntryLevel.strategy_id == existing.id).delete()
 
             for level_no, price in levels_dict.items():
-                db.add(EntryLevel(
-                    strategy_id=existing.id,
-                    level_no=level_no,
-                    price=price,
-                    is_active=True,
-                ))
+                db.add(
+                    EntryLevel(
+                        strategy_id=existing.id,
+                        level_no=level_no,
+                        price=price,
+                        is_active=True,
+                    )
+                )
             updated_count += 1
         else:
             new_strategy = EntryStrategy(
-                tenant_id=current_user.tenant_id,
                 user_id=current_user.user_id,
                 symbol=symbol,
                 broker=broker,
@@ -562,7 +616,9 @@ async def upload_csv(
                 allocated=strategy_data.get("allocated"),
                 quality=strategy_data.get("quality"),
                 exchange=strategy_data.get("exchange", "NSE"),
-                dynamic_averaging_enabled=strategy_data.get("dynamic_averaging_enabled", False),
+                dynamic_averaging_enabled=strategy_data.get(
+                    "dynamic_averaging_enabled", False
+                ),
                 averaging_rules_json=strategy_data.get("averaging_rules_json"),
                 created_at=now,
                 updated_at=now,
@@ -571,17 +627,18 @@ async def upload_csv(
             db.flush()
 
             for level_no, price in levels_dict.items():
-                db.add(EntryLevel(
-                    strategy_id=new_strategy.id,
-                    level_no=level_no,
-                    price=price,
-                    is_active=True,
-                ))
+                db.add(
+                    EntryLevel(
+                        strategy_id=new_strategy.id,
+                        level_no=level_no,
+                        price=price,
+                        is_active=True,
+                    )
+                )
             created_count += 1
 
     db.add(
         EntryStrategyUpload(
-            tenant_id=current_user.tenant_id,
             user_id=current_user.user_id,
             filename=file.filename,
             symbols_json=json.dumps(list(parsed_strategies.keys())),
@@ -594,6 +651,7 @@ async def upload_csv(
         symbols_processed=len(parsed_strategies),
         created_count=created_count,
         updated_count=updated_count,
+        deleted_count=deleted_count,
         errors=row_errors,
         updated_at=now,
     )
@@ -618,14 +676,14 @@ def get_template():
     }
 
 
-def _get_cmp_for_symbol(symbol: str, db: Session, tenant_id: int | None, user_id: int | None) -> float | None:
+def _get_cmp_for_symbol(symbol: str, db: Session, user_id: int | None) -> float | None:
     """Get current market price for a symbol from DB if available."""
     try:
         from db.models import EntryStrategy
+
         strategy = (
             db.query(EntryStrategy)
             .filter(
-                EntryStrategy.tenant_id == tenant_id,
                 EntryStrategy.user_id == user_id,
                 EntryStrategy.symbol == symbol.upper(),
             )
@@ -644,7 +702,6 @@ def _create_version(
     action: str,
     levels: list[EntryLevel],
     changes_summary: str | None = None,
-    tenant_id: int | None = None,
     user_id: int | None = None,
 ) -> EntryStrategyVersion:
     """Create a version snapshot of entry levels."""
@@ -656,13 +713,14 @@ def _create_version(
     )
     version_no = (latest_version.version_no + 1) if latest_version else 1
 
-    snapshot = json.dumps([
-        {"level_no": l.level_no, "price": l.price, "is_active": l.is_active}
-        for l in levels
-    ])
+    snapshot = json.dumps(
+        [
+            {"level_no": level.level_no, "price": level.price, "is_active": level.is_active}
+            for level in levels
+        ]
+    )
 
     version = EntryStrategyVersion(
-        tenant_id=tenant_id or strategy.tenant_id,
         user_id=user_id or strategy.user_id,
         strategy_id=strategy.id,
         version_no=version_no,
@@ -684,7 +742,6 @@ def get_upload_history(
     uploads = (
         db.query(EntryStrategyUpload)
         .filter(
-            EntryStrategyUpload.tenant_id == current_user.tenant_id,
             EntryStrategyUpload.user_id == current_user.user_id,
         )
         .order_by(EntryStrategyUpload.created_at.desc())
@@ -713,12 +770,13 @@ def get_version_history(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Get version history for a specific strategy, scoped to the active broker connection."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     strategy = (
         db.query(EntryStrategy)
         .filter(
-            EntryStrategy.tenant_id == current_user.tenant_id,
             EntryStrategy.user_id == current_user.user_id,
             EntryStrategy.broker == broker,
             EntryStrategy.broker_user_id == broker_user_id,
@@ -746,11 +804,11 @@ def get_version_history(
                 action=v.action,
                 levels=[
                     EntryLevelSchema(
-                        level_no=l["level_no"],
-                        price=l["price"],
-                        is_active=l.get("is_active", True),
+                        level_no=level["level_no"],
+                        price=level["price"],
+                        is_active=level.get("is_active", True),
                     )
-                    for l in json.loads(v.levels_snapshot_json)
+                    for level in json.loads(v.levels_snapshot_json)
                 ],
                 changes_summary=v.changes_summary,
                 created_at=v.created_at,
@@ -768,12 +826,13 @@ def restore_version(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Restore a strategy to a previous version, scoped to the active broker connection."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     strategy = (
         db.query(EntryStrategy)
         .filter(
-            EntryStrategy.tenant_id == current_user.tenant_id,
             EntryStrategy.user_id == current_user.user_id,
             EntryStrategy.broker == broker,
             EntryStrategy.broker_user_id == broker_user_id,
@@ -802,12 +861,14 @@ def restore_version(
     db.query(EntryLevel).filter(EntryLevel.strategy_id == strategy.id).delete()
 
     for level_data in snapshot:
-        db.add(EntryLevel(
-            strategy_id=strategy.id,
-            level_no=level_data["level_no"],
-            price=level_data["price"],
-            is_active=level_data.get("is_active", True),
-        ))
+        db.add(
+            EntryLevel(
+                strategy_id=strategy.id,
+                level_no=level_data["level_no"],
+                price=level_data["price"],
+                is_active=level_data.get("is_active", True),
+            )
+        )
 
     now = datetime.utcnow()
     strategy.updated_at = now
@@ -838,12 +899,13 @@ def suggest_revision(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Suggest revised entry levels based on current market price or adjustment."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     strategy = (
         db.query(EntryStrategy)
         .filter(
-            EntryStrategy.tenant_id == current_user.tenant_id,
             EntryStrategy.user_id == current_user.user_id,
             EntryStrategy.broker == broker,
             EntryStrategy.broker_user_id == broker_user_id,
@@ -868,8 +930,9 @@ def suggest_revision(
     cmp_price: float | None = None
     try:
         from core.services.entry_strategy_service import get_entry_strategy_service
+
         service = get_entry_strategy_service()
-        cmp_data = service.get_cmp_for_symbol(strategy.symbol, current_user.tenant_id, current_user.user_id)
+        cmp_data = service.get_cmp_for_symbol(strategy.symbol, current_user.user_id)
         if cmp_data:
             cmp_price = cmp_data.get("last_price")
     except Exception:
@@ -950,12 +1013,13 @@ def apply_revision(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Apply selected level revisions to the database."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
-    
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
     strategy = (
         db.query(EntryStrategy)
         .filter(
-            EntryStrategy.tenant_id == current_user.tenant_id,
             EntryStrategy.user_id == current_user.user_id,
             EntryStrategy.broker == broker,
             EntryStrategy.broker_user_id == broker_user_id,
@@ -973,20 +1037,30 @@ def apply_revision(
     updated_level_nos: list[int] = []
     now = datetime.utcnow()
 
-    old_levels = db.query(EntryLevel).filter(EntryLevel.strategy_id == strategy.id).all()
+    old_levels = (
+        db.query(EntryLevel).filter(EntryLevel.strategy_id == strategy.id).all()
+    )
 
     for item in payload.levels:
         if item.new_price <= 0:
-            raise HTTPException(status_code=400, detail=f"Invalid price for level {item.level_no}: must be > 0")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid price for level {item.level_no}: must be > 0",
+            )
 
         level = (
             db.query(EntryLevel)
-            .filter(EntryLevel.strategy_id == strategy.id, EntryLevel.level_no == item.level_no)
+            .filter(
+                EntryLevel.strategy_id == strategy.id,
+                EntryLevel.level_no == item.level_no,
+            )
             .first()
         )
 
         if not level:
-            raise HTTPException(status_code=404, detail=f"Level {item.level_no} not found")
+            raise HTTPException(
+                status_code=404, detail=f"Level {item.level_no} not found"
+            )
 
         level.price = item.new_price
         level.updated_at = now
@@ -1019,22 +1093,58 @@ def suggest_revision_bulk(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Suggest revised entry levels for multiple symbols based on current market price or adjustment."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
+    logging.info(
+        f"suggest_revision_bulk: symbols={payload.symbols}, method={payload.method}, pct_adjustment={payload.pct_adjustment}"
+    )
 
     if not payload.symbols:
         raise HTTPException(status_code=400, detail="No symbols provided")
 
-    if len(payload.symbols) > 50:
-        raise HTTPException(status_code=400, detail="Maximum 50 symbols allowed per request")
+    if len(payload.symbols) > 100:
+        raise HTTPException(
+            status_code=400, detail="Maximum 100 symbols allowed per request"
+        )
 
     suggestions: list[BulkSuggestRevisionItem] = []
     symbols_upper = [s.upper() for s in payload.symbols]
+
+    cmp_prices: dict[str, float | None] = {}
+
+    try:
+        from api.dependencies import get_session_registry
+        registry = get_session_registry()
+        for session_id, context in registry._records.items():
+            if context.user_record_id == current_user.user_id:
+                cmp_manager = context.session_cache.get_cmp_manager()
+                if cmp_manager:
+                    for symbol in symbols_upper:
+                        if symbol not in cmp_prices:
+                            try:
+                                ltp = cmp_manager.get_cmp("NSE", symbol)
+                                cmp_prices[symbol] = ltp
+                                logging.debug(f"CMP fetched for {symbol}: {ltp}")
+                            except RuntimeError as e:
+                                cmp_prices[symbol] = None
+                                logging.debug(f"CMP not available for {symbol}: {e}")
+                            except Exception as e:
+                                cmp_prices[symbol] = None
+                                logging.debug(f"CMP error for {symbol}: {e}")
+                    break
+                else:
+                    logging.debug("No CMP manager in session cache")
+    except Exception as e:
+        logging.warning(f"Could not fetch CMP from session cache: {e}")
+
+    logging.info(f"suggest_revision_bulk: cmp_prices={cmp_prices}")
 
     for symbol in symbols_upper:
         strategy = (
             db.query(EntryStrategy)
             .filter(
-                EntryStrategy.tenant_id == current_user.tenant_id,
                 EntryStrategy.user_id == current_user.user_id,
                 EntryStrategy.broker == broker,
                 EntryStrategy.broker_user_id == broker_user_id,
@@ -1044,37 +1154,36 @@ def suggest_revision_bulk(
         )
 
         if not strategy:
-            suggestions.append(BulkSuggestRevisionItem(
-                symbol=symbol,
-                cmp_price=None,
-                revised_levels=[],
-            ))
+            suggestions.append(
+                BulkSuggestRevisionItem(
+                    symbol=symbol,
+                    cmp_price=cmp_prices.get(symbol),
+                    revised_levels=[],
+                )
+            )
             continue
 
         levels = (
             db.query(EntryLevel)
             .filter(EntryLevel.strategy_id == strategy.id)
+            .filter(EntryLevel.is_active.is_(True))
             .order_by(EntryLevel.level_no)
             .all()
         )
 
+        logging.debug(f"suggest_revision_bulk: symbol={symbol}, strategy_id={strategy.id}, levels_found={len(levels)}")
+
         if not levels:
-            suggestions.append(BulkSuggestRevisionItem(
-                symbol=symbol,
-                cmp_price=None,
-                revised_levels=[],
-            ))
+            suggestions.append(
+                BulkSuggestRevisionItem(
+                    symbol=symbol,
+                    cmp_price=cmp_prices.get(symbol),
+                    revised_levels=[],
+                )
+            )
             continue
 
-        cmp_price: float | None = None
-        try:
-            from core.services.entry_strategy_service import get_entry_strategy_service
-            service = get_entry_strategy_service()
-            cmp_data = service.get_cmp_for_symbol(strategy.symbol, current_user.tenant_id, current_user.user_id)
-            if cmp_data:
-                cmp_price = cmp_data.get("last_price")
-        except Exception:
-            pass
+        cmp_price = cmp_prices.get(symbol)
 
         revised_levels: list[SuggestedRevision] = []
         method = payload.method
@@ -1099,7 +1208,9 @@ def suggest_revision_bulk(
                 )
         elif method == "volatility_band":
             for level in levels:
-                suggested = level.price * (1 + (level.level_no - 1) * pct_adjustment / 100)
+                suggested = level.price * (
+                    1 + (level.level_no - 1) * pct_adjustment / 100
+                )
                 rationale = f"Volatility adjustment: {pct_adjustment}% per level"
                 revised_levels.append(
                     SuggestedRevision(
@@ -1138,11 +1249,13 @@ def suggest_revision_bulk(
                     )
                 )
 
-        suggestions.append(BulkSuggestRevisionItem(
-            symbol=strategy.symbol,
-            cmp_price=cmp_price,
-            revised_levels=revised_levels,
-        ))
+        suggestions.append(
+            BulkSuggestRevisionItem(
+                symbol=strategy.symbol,
+                cmp_price=cmp_price,
+                revised_levels=revised_levels,
+            )
+        )
 
     return BulkSuggestRevisionResponse(suggestions=suggestions)
 
@@ -1154,13 +1267,17 @@ def apply_revision_bulk(
     current_user: UserContext = Depends(get_current_user),
 ):
     """Apply selected level revisions to multiple symbols in the database."""
-    connection_id, broker, broker_user_id = _require_active_connection_scope(current_user, db)
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
 
     if not payload.updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
-    if len(payload.updates) > 50:
-        raise HTTPException(status_code=400, detail="Maximum 50 symbols allowed per request")
+    if len(payload.updates) > 100:
+        raise HTTPException(
+            status_code=400, detail="Maximum 100 symbols allowed per request"
+        )
 
     results: list[BulkApplyRevisionResult] = []
     total_updated = 0
@@ -1172,7 +1289,6 @@ def apply_revision_bulk(
         strategy = (
             db.query(EntryStrategy)
             .filter(
-                EntryStrategy.tenant_id == current_user.tenant_id,
                 EntryStrategy.user_id == current_user.user_id,
                 EntryStrategy.broker == broker,
                 EntryStrategy.broker_user_id == broker_user_id,
@@ -1182,20 +1298,24 @@ def apply_revision_bulk(
         )
 
         if not strategy:
-            results.append(BulkApplyRevisionResult(
-                symbol=symbol,
-                success=False,
-                error="Strategy not found",
-            ))
+            results.append(
+                BulkApplyRevisionResult(
+                    symbol=symbol,
+                    success=False,
+                    error="Strategy not found",
+                )
+            )
             total_failed += 1
             continue
 
         if not update.levels:
-            results.append(BulkApplyRevisionResult(
-                symbol=symbol,
-                success=False,
-                error="No levels provided",
-            ))
+            results.append(
+                BulkApplyRevisionResult(
+                    symbol=symbol,
+                    success=False,
+                    error="No levels provided",
+                )
+            )
             total_failed += 1
             continue
 
@@ -1203,20 +1323,30 @@ def apply_revision_bulk(
         now = datetime.utcnow()
 
         try:
-            old_levels = db.query(EntryLevel).filter(EntryLevel.strategy_id == strategy.id).all()
+            old_levels = (
+                db.query(EntryLevel).filter(EntryLevel.strategy_id == strategy.id).all()
+            )
 
             for item in update.levels:
                 if item.new_price <= 0:
-                    raise HTTPException(status_code=400, detail=f"Invalid price for level {item.level_no}: must be > 0")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid price for level {item.level_no}: must be > 0",
+                    )
 
                 level = (
                     db.query(EntryLevel)
-                    .filter(EntryLevel.strategy_id == strategy.id, EntryLevel.level_no == item.level_no)
+                    .filter(
+                        EntryLevel.strategy_id == strategy.id,
+                        EntryLevel.level_no == item.level_no,
+                    )
                     .first()
                 )
 
                 if not level:
-                    raise HTTPException(status_code=404, detail=f"Level {item.level_no} not found")
+                    raise HTTPException(
+                        status_code=404, detail=f"Level {item.level_no} not found"
+                    )
 
                 level.price = item.new_price
                 level.updated_at = now
@@ -1235,29 +1365,35 @@ def apply_revision_bulk(
 
             db.commit()
 
-            results.append(BulkApplyRevisionResult(
-                symbol=strategy.symbol,
-                success=True,
-                updated_levels=updated_level_nos,
-                updated_at=now,
-            ))
+            results.append(
+                BulkApplyRevisionResult(
+                    symbol=strategy.symbol,
+                    success=True,
+                    updated_levels=updated_level_nos,
+                    updated_at=now,
+                )
+            )
             total_updated += 1
 
         except HTTPException:
             db.rollback()
-            results.append(BulkApplyRevisionResult(
-                symbol=symbol,
-                success=False,
-                error="Validation failed",
-            ))
+            results.append(
+                BulkApplyRevisionResult(
+                    symbol=symbol,
+                    success=False,
+                    error="Validation failed",
+                )
+            )
             total_failed += 1
         except Exception as e:
             db.rollback()
-            results.append(BulkApplyRevisionResult(
-                symbol=symbol,
-                success=False,
-                error=str(e),
-            ))
+            results.append(
+                BulkApplyRevisionResult(
+                    symbol=symbol,
+                    success=False,
+                    error=str(e),
+                )
+            )
             total_failed += 1
 
     return BulkApplyRevisionResponse(

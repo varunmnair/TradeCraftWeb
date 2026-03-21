@@ -2,20 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
-from pydantic import BaseModel
-from datetime import datetime, timedelta, timezone
-
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 from api import config
 from api.dependencies import (
-    get_auth_service,
     get_broker_auth_state_service,
     get_broker_connection_service,
     get_current_user,
@@ -24,10 +21,13 @@ from api.dependencies import (
 from api.errors import ServiceError
 from api.schemas.common import ErrorResponse
 from core.auth.context import UserContext
-from core.session_manager import SessionManager
-from core.services.auth_service import AuthService
 from core.services.broker_auth_service import BrokerAuthStateService
 from core.services.broker_connection_service import BrokerConnectionService
+from core.session_manager import SessionManager
+
+LOGGER = logging.getLogger("tradecraftx.brokers")
+
+# --- Upstox Broker Connection ---
 
 router = APIRouter(prefix="/brokers/upstox", tags=["brokers"])
 
@@ -35,30 +35,25 @@ UPSTOX_AUTH_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 UPSTOX_TOKEN_URL = "https://api.upstox.com/v2/login/authorization/token"
 
 
-# --- API Models ---
+class ConnectionStatus(BaseModel):
+    connection_id: int
+    broker_name: str
+    connected: bool
+    broker_user_id: Optional[str]
+    token_updated_at: Optional[datetime] = None
+
+
 class BrokerConnectResponse(BaseModel):
     authorize_url: str
     state: str
     connection_id: int
 
 
-class ConnectionStatus(BaseModel):
-    connection_id: int
-    user_id: int
-    connected: bool
-    broker_user_id: Optional[str]
-    token_updated_at: Optional[datetime]
-
-
 class BrokerStatusResponse(BaseModel):
     connections: list[ConnectionStatus]
 
 
-# --- Upstox Broker Connection ---
-
-
 def _get_upstox_env() -> tuple[str, str, str]:
-    from api import config
     client_id = config.UPSTOX_API_KEY
     client_secret = config.UPSTOX_API_SECRET
     redirect_uri = config.UPSTOX_REDIRECT_URI
@@ -78,10 +73,11 @@ def connect_upstox(
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     state_service: BrokerAuthStateService = Depends(get_broker_auth_state_service),
 ):
-    if not current_user.user_id or not current_user.tenant_id:
-        raise ServiceError("User context missing", error_code="unauthorized", http_status=401)
+    if not current_user.user_id:
+        raise ServiceError(
+            "User context missing", error_code="unauthorized", http_status=401
+        )
     connection = broker_service.ensure_connection(
-        tenant_id=current_user.tenant_id,
         user_id=current_user.user_id,
         broker_name="upstox",
         connection_id=connection_id,
@@ -89,7 +85,6 @@ def connect_upstox(
     )
     client_id, _, redirect_uri = _get_upstox_env()
     state = state_service.create_state(
-        tenant_id=current_user.tenant_id,
         user_id=current_user.user_id,
         connection_id=connection.id,
         broker_name="upstox",
@@ -103,7 +98,11 @@ def connect_upstox(
         }
     )
     authorize_url = f"{UPSTOX_AUTH_URL}?{params}"
-    return {"authorize_url": authorize_url, "state": state, "connection_id": connection.id}
+    return {
+        "authorize_url": authorize_url,
+        "state": state,
+        "connection_id": connection.id,
+    }
 
 
 def _render_html(message: str, success: bool) -> HTMLResponse:
@@ -128,18 +127,34 @@ def upstox_callback(
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     session_manager: SessionManager = Depends(get_session_manager),
 ):
-    # State contains tenant_id, user_id, connection_id - no auth needed
+    # State contains user_id, connection_id - no auth needed
     try:
         state_info = state_service.consume_state(state)
     except ValueError as exc:
+        LOGGER.warning("Upstox callback: invalid state token: %s", exc)
         return _render_html(f"Authorization failed: {exc}", success=False)
+
     connection = broker_service.ensure_connection(
-        tenant_id=state_info.tenant_id,
         user_id=state_info.user_id,
         broker_name="upstox",
         connection_id=state_info.connection_id,
         allow_admin=True,
     )
+
+    # Idempotency check: if tokens already exist, return success
+    existing_bundle = session_manager.get_token_bundle(
+        "upstox", connection_id=connection.id
+    )
+    if existing_bundle and existing_bundle.access_token:
+        LOGGER.info(
+            "Upstox callback: tokens already exist for connection_id=%d, user_id=%d",
+            connection.id,
+            state_info.user_id,
+        )
+        return _render_html(
+            "Upstox already connected. You may close this tab.", success=True
+        )
+
     client_id, client_secret, redirect_uri = _get_upstox_env()
     token_payload = {
         "code": code,
@@ -148,19 +163,58 @@ def upstox_callback(
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
     }
+    LOGGER.info(
+        "Upstox callback: client_id=%s, redirect_uri=%s", client_id, redirect_uri
+    )
     try:
         response = requests.post(UPSTOX_TOKEN_URL, data=token_payload, timeout=30)
     except requests.RequestException as exc:
+        LOGGER.error("Upstox callback: token exchange request failed: %s", exc)
         return _render_html(f"Token exchange failed: {exc}", success=False)
+
+    response_text = response.text
+    print(
+        f"Upstox callback DEBUG: status={response.status_code}, body={response_text[:500]}"
+    )
+    LOGGER.info(
+        "Upstox callback: token_response status=%d, body=%s",
+        response.status_code,
+        response_text[:1500],
+    )
+
     if response.status_code >= 400:
-        return _render_html("Token exchange failed: upstream error", success=False)
+        # Try to parse the error response for better debugging
+        try:
+            error_json = response.json()
+            # Upstox error format: {"status":"error","errors":[{"errorCode":"...","message":"..."}]}
+            errors_list = error_json.get("errors", [])
+            if errors_list and len(errors_list) > 0:
+                error_code = errors_list[0].get("errorCode", "")
+                error_message = errors_list[0].get("message", "upstream error")
+            else:
+                error_code = error_json.get("code", "")
+                error_message = error_json.get("message", "upstream error")
+            print(
+                f"Upstox callback DEBUG: error_code={error_code}, error_message={error_message}"
+            )
+            LOGGER.error(
+                "Upstox token exchange failed: code=%s, message=%s",
+                error_code,
+                error_message,
+            )
+        except Exception:
+            error_message = f"upstream error (status {response.status_code})"
+            print("Upstox callback DEBUG: failed to parse error JSON")
+        return _render_html(f"Token exchange failed: {error_message}", success=False)
     token_data = response.json()
     expires_value = token_data.get("expires_in")
     expires_iso = None
     if expires_value is not None:
         try:
             expires_seconds = int(expires_value)
-            expires_iso = (datetime.now(timezone.utc) + timedelta(seconds=expires_seconds)).isoformat()
+            expires_iso = (
+                datetime.now(timezone.utc) + timedelta(seconds=expires_seconds)
+            ).isoformat()
         except (ValueError, TypeError):
             expires_iso = None
 
@@ -176,12 +230,28 @@ def upstox_callback(
         "raw_profile": token_data.get("profile"),
     }
     if not bundle_payload["access_token"]:
-        return _render_html("Token exchange failed: missing access token", success=False)
+        return _render_html(
+            "Token exchange failed: missing access token", success=False
+        )
     session_manager.store_tokens(
         "upstox",
         bundle_payload,
         connection_id=connection.id,
     )
+    
+    broker_user_id_from_oauth = token_data.get("user_id")
+    if broker_user_id_from_oauth:
+        from db.database import SessionLocal
+        from db import models
+        db = SessionLocal()
+        try:
+            conn_record = db.get(models.BrokerConnection, connection.id)
+            if conn_record:
+                conn_record.broker_user_id = broker_user_id_from_oauth
+                db.commit()
+        finally:
+            db.close()
+    
     return _render_html(
         "✅ Upstox connected successfully. You may close this tab.", success=True
     )
@@ -194,43 +264,50 @@ def upstox_status(
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     session_manager: SessionManager = Depends(get_session_manager),
 ):
-    if not current_user.user_id or not current_user.tenant_id:
-        raise ServiceError("User context missing", error_code="unauthorized", http_status=401)
+    if not current_user.user_id:
+        raise ServiceError(
+            "User context missing", error_code="unauthorized", http_status=401
+        )
+    # Always show only the current user's connections - never return other users' connections
+    LOGGER.info("upstox_status: current_user.user_id=%s", current_user.user_id)
     connections = broker_service.list_connections(
-        tenant_id=current_user.tenant_id,
-        user_id=None if current_user.is_admin() else current_user.user_id,
+        user_id=current_user.user_id,
     )
-    upstox_connections = [conn for conn in connections if conn.broker_name == "upstox" and (connection_id is None or conn.id == connection_id)]
+    upstox_connections = [
+        conn
+        for conn in connections
+        if conn.broker_name == "upstox"
+        and (connection_id is None or conn.id == connection_id)
+    ]
     if connection_id and not upstox_connections:
-        raise ServiceError("Connection not found", error_code="not_found", http_status=404)
+        raise ServiceError(
+            "Connection not found", error_code="not_found", http_status=404
+        )
+
+    # Return only the first connected (active) connection or empty list
     statuses = []
     for conn in upstox_connections:
         bundle = session_manager.get_token_bundle("upstox", connection_id=conn.id)
-        
-        # Validate token by attempting a simple API call
-        is_valid = False
-        if bundle and bundle.access_token:
-            try:
-                import requests
-                headers = {"Authorization": f"Bearer {bundle.access_token}"}
-                response = requests.get(
-                    "https://api.upstox.com/v2/user/profile",
-                    headers=headers,
-                    timeout=5
-                )
-                is_valid = response.status_code == 200
-            except Exception:
-                is_valid = False
-        
-        statuses.append(
-            {
-                "connection_id": conn.id,
-                "user_id": conn.user_id,
-                "connected": is_valid,
-                "broker_user_id": bundle.broker_user_id if bundle else None,
-                "token_updated_at": conn.token_updated_at.isoformat() if conn.token_updated_at else None,
-            }
-        )
+
+        # Check if we have valid tokens (connection is "connected" if tokens exist)
+        is_connected = bundle is not None and bundle.access_token is not None
+
+        if is_connected:
+            # Return only the first connected one
+            statuses.append(
+                {
+                    "connection_id": conn.id,
+                    "broker_name": "upstox",
+                    "connected": is_connected,
+                    "broker_user_id": bundle.broker_user_id if bundle else None,
+                    "token_updated_at": (
+                        conn.token_updated_at.isoformat()
+                        if conn.token_updated_at
+                        else None
+                    ),
+                }
+            )
+            break
     return {"connections": statuses}
 
 
@@ -262,7 +339,6 @@ KITE_TOKEN_URL = "https://api.kite.trade/session/token"
 
 
 def _get_kite_env() -> tuple[str, str, str]:
-    from api import config
     api_key = config.KITE_API_KEY
     api_secret = config.KITE_API_SECRET
     redirect_uri = config.KITE_REDIRECT_URI
@@ -279,7 +355,10 @@ def _get_kite_env() -> tuple[str, str, str]:
     "/connect",
     response_model=ZerodhaConnectResponse,
     responses={
-        409: {"model": ErrorResponse, "description": "Upstox connection required for market data"},
+        409: {
+            "model": ErrorResponse,
+            "description": "Upstox connection required for market data",
+        },
     },
 )
 def connect_zerodha(
@@ -289,27 +368,15 @@ def connect_zerodha(
     state_service: BrokerAuthStateService = Depends(get_broker_auth_state_service),
     session_manager: SessionManager = Depends(get_session_manager),
 ):
-    if not current_user.user_id or not current_user.tenant_id:
-        raise ServiceError("User context missing", error_code="unauthorized", http_status=401)
-
-    # Prerequisite: check for an active Upstox connection
-    upstox_connections = broker_service.list_connections(
-        tenant_id=current_user.tenant_id, user_id=current_user.user_id
-    )
-    upstox_connected = [conn for conn in upstox_connections if conn.broker_name == "upstox"]
-    upstox_is_connected = any(
-        session_manager.get_token_bundle("upstox", connection_id=conn.id) for conn in upstox_connected
-    )
-    if not upstox_is_connected:
+    if not current_user.user_id:
         raise ServiceError(
-            "Upstox connection required for instruments/market data. Connect Upstox first.",
-            error_code="upstox_required",
-            http_status=409,
-            context={"required_broker": "upstox"},
+            "User context missing", error_code="unauthorized", http_status=401
         )
 
+    # No Upstox prerequisite - Zerodha can be connected independently
+    # Market data (Upstox) is optional and separate from trading data (Zerodha)
+
     connection = broker_service.ensure_connection(
-        tenant_id=current_user.tenant_id,
         user_id=current_user.user_id,
         broker_name="zerodha",
         connection_id=connection_id,
@@ -317,19 +384,24 @@ def connect_zerodha(
     )
     api_key, _, redirect_uri = _get_kite_env()
     state = state_service.create_state(
-        tenant_id=current_user.tenant_id,
         user_id=current_user.user_id,
         connection_id=connection.id,
         broker_name="zerodha",
     )
     # Use redirect_params to include state in callback URL
-    params = urllib.parse.urlencode({
-        "v": 3,
-        "api_key": api_key,
-        "redirect_params": urllib.parse.urlencode({"state": state}),
-    })
+    params = urllib.parse.urlencode(
+        {
+            "v": 3,
+            "api_key": api_key,
+            "redirect_params": urllib.parse.urlencode({"state": state}),
+        }
+    )
     authorize_url = f"{KITE_AUTH_URL}?{params}"
-    return {"authorize_url": authorize_url, "state": state, "connection_id": connection.id}
+    return {
+        "authorize_url": authorize_url,
+        "state": state,
+        "connection_id": connection.id,
+    }
 
 
 @zerodha_router.get("/callback")
@@ -343,17 +415,34 @@ def zerodha_callback(
     try:
         state_info = state_service.consume_state(state)
     except ValueError as exc:
+        LOGGER.warning("Zerodha callback: invalid state token: %s", exc)
         return _render_html(f"Authorization failed: {exc}", success=False)
 
     connection = broker_service.ensure_connection(
-        tenant_id=state_info.tenant_id,
         user_id=state_info.user_id,
         broker_name="zerodha",
         connection_id=state_info.connection_id,
         allow_admin=True,
     )
+
+    # Idempotency check: if tokens already exist, return success
+    existing_bundle = session_manager.get_token_bundle(
+        "zerodha", connection_id=connection.id
+    )
+    if existing_bundle and existing_bundle.access_token:
+        LOGGER.info(
+            "Zerodha callback: tokens already exist for connection_id=%d, user_id=%d",
+            connection.id,
+            state_info.user_id,
+        )
+        return _render_html(
+            "Zerodha already connected. You may close this tab.", success=True
+        )
+
     api_key, api_secret, redirect_uri = _get_kite_env()
-    checksum = hashlib.sha256(f"{api_key}{request_token}{api_secret}".encode("utf-8")).hexdigest()
+    checksum = hashlib.sha256(
+        f"{api_key}{request_token}{api_secret}".encode("utf-8")
+    ).hexdigest()
     token_payload = {
         "api_key": api_key,
         "request_token": request_token,
@@ -370,12 +459,20 @@ def zerodha_callback(
 
     # Debug: log what we got
     import logging
+
     logging.debug(f"Kite token response: {token_data}")
 
     # Kite returns access_token inside "data" field
-    access_token = token_data.get("data", {}).get("access_token") if isinstance(token_data, dict) else None
+    access_token = (
+        token_data.get("data", {}).get("access_token")
+        if isinstance(token_data, dict)
+        else None
+    )
     if not access_token:
-        return _render_html(f"Token exchange failed: missing access token. Response: {token_data}", success=False)
+        return _render_html(
+            f"Token exchange failed: missing access token. Response: {token_data}",
+            success=False,
+        )
 
     bundle_payload = {
         "access_token": access_token,
@@ -388,12 +485,42 @@ def zerodha_callback(
         "raw_profile": token_data.get("data", {}),
     }
 
-    session_manager.store_tokens(
-        "zerodha",
-        bundle_payload,
-        connection_id=connection.id,
+    LOGGER.info(
+        "Zerodha token exchange successful, storing tokens for connection_id=%d",
+        connection.id,
     )
-    return _render_html("✅ Zerodha connected successfully. You may close this tab.", success=True)
+
+    try:
+        session_manager.store_tokens(
+            "zerodha",
+            bundle_payload,
+            connection_id=connection.id,
+        )
+        LOGGER.info(
+            "Zerodha tokens stored successfully for connection_id=%d", connection.id
+        )
+    except Exception as e:
+        LOGGER.error(
+            "Failed to store zerodha tokens for connection_id=%d: %s", connection.id, e
+        )
+        return _render_html(f"Failed to store tokens: {e}", success=False)
+
+    broker_user_id_from_oauth = token_data.get("data", {}).get("user_id")
+    if broker_user_id_from_oauth:
+        from db.database import SessionLocal
+        from db import models
+        db = SessionLocal()
+        try:
+            conn_record = db.get(models.BrokerConnection, connection.id)
+            if conn_record:
+                conn_record.broker_user_id = broker_user_id_from_oauth
+                db.commit()
+        finally:
+            db.close()
+
+    return _render_html(
+        "✅ Zerodha connected successfully. You may close this tab.", success=True
+    )
 
 
 @zerodha_router.get("/status", response_model=ZerodhaStatusResponse)
@@ -403,50 +530,200 @@ def zerodha_status(
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     session_manager: SessionManager = Depends(get_session_manager),
 ):
-    if not current_user.user_id or not current_user.tenant_id:
-        raise ServiceError("User context missing", error_code="unauthorized", http_status=401)
+    if not current_user.user_id:
+        raise ServiceError(
+            "User context missing", error_code="unauthorized", http_status=401
+        )
 
+    # Always show only the current user's connections - never return other users' connections
     connections = broker_service.list_connections(
-        tenant_id=current_user.tenant_id,
-        user_id=None if current_user.is_admin() else current_user.user_id,
+        user_id=current_user.user_id,
     )
     zerodha_connections = [
         conn
         for conn in connections
-        if conn.broker_name == "zerodha" and (connection_id is None or conn.id == connection_id)
+        if conn.broker_name == "zerodha"
+        and (connection_id is None or conn.id == connection_id)
     ]
     if connection_id and not zerodha_connections:
-        raise ServiceError("Connection not found", error_code="not_found", http_status=404)
+        raise ServiceError(
+            "Connection not found", error_code="not_found", http_status=404
+        )
 
+    # Return only the first connected (active) connection or empty list
     statuses = []
     for conn in zerodha_connections:
-        bundle = session_manager.get_token_bundle("zerodha", connection_id=conn.id)
-        
-        # Validate token by attempting to get profile
-        is_valid = False
-        if bundle and bundle.access_token:
-            try:
-                from brokers.zerodha_broker import ZerodhaBroker
-                from api import config
-                api_key = config.KITE_API_KEY or ""
-                broker = ZerodhaBroker(
-                    user_id=str(conn.user_id),
-                    api_key=api_key,
-                    access_token=bundle.access_token,
-                )
-                broker.login()  # This validates the token
-                is_valid = True
-            except Exception as e:
-                logging.debug(f"Zerodha token validation failed: {e}")
-                is_valid = False
-        
-        statuses.append(
-            {
-                "connection_id": conn.id,
-                "user_id": conn.user_id,
-                "connected": is_valid,
-                "broker_user_id": bundle.broker_user_id if bundle else None,
-                "token_updated_at": conn.token_updated_at.isoformat() if conn.token_updated_at else None,
-            }
-        )
+        try:
+            bundle = session_manager.get_token_bundle("zerodha", connection_id=conn.id)
+            is_connected = bundle is not None and bundle.access_token is not None
+            broker_user_id = bundle.broker_user_id if bundle else None
+        except Exception as e:
+            LOGGER.error(f"Error getting zerodha bundle for connection {conn.id}: {e}")
+            is_connected = False
+            broker_user_id = None
+
+        if is_connected:
+            statuses.append(
+                {
+                    "connection_id": conn.id,
+                    "user_id": conn.user_id,
+                    "connected": is_connected,
+                    "broker_user_id": broker_user_id,
+                    "token_updated_at": (
+                        conn.token_updated_at.isoformat()
+                        if conn.token_updated_at
+                        else None
+                    ),
+                }
+            )
+            break
     return {"connections": statuses}
+
+
+@zerodha_router.post("/disconnect")
+def zerodha_disconnect(
+    current_user: UserContext = Depends(get_current_user),
+    broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    if not current_user.user_id:
+        raise ServiceError(
+            "User context missing", error_code="unauthorized", http_status=401
+        )
+
+    # Get connection ID before disconnecting
+    connections = broker_service.list_connections(
+        user_id=current_user.user_id,
+    )
+    zerodha_conns = [c for c in connections if c.broker_name == "zerodha"]
+    connection_id = zerodha_conns[0].id if zerodha_conns else None
+
+    # Disconnect broker tokens
+    session_manager.disconnect(
+        "zerodha",
+        user_id=current_user.user_id,
+    )
+
+    # Evict any sessions using this connection
+    if connection_id:
+        from api.dependencies import get_session_registry
+
+        registry = get_session_registry()
+        evicted = registry.evict_by_connection(connection_id)
+        LOGGER.info(f"Evicted {evicted} sessions after Zerodha disconnect")
+
+    return {"disconnected": True, "broker": "zerodha"}
+
+
+class TradebookUploadResponse(BaseModel):
+    rows_ingested: int
+    symbols_covered: int
+    errors: list[str]
+
+
+@zerodha_router.post("/tradebook/upload", response_model=TradebookUploadResponse)
+async def zerodha_tradebook_upload(
+    file: UploadFile = File(...),
+    current_user: UserContext = Depends(get_current_user),
+):
+    """Upload Zerodha tradebook CSV."""
+    from api.dependencies import get_trades_service
+
+    if not current_user.user_id:
+        raise ServiceError(
+            "User context missing", error_code="unauthorized", http_status=401
+        )
+
+    content = await file.read()
+    text_content = content.decode("utf-8")
+
+    trades_service = get_trades_service()
+    result = trades_service.upload_zerodha_tradebook(current_user.user_id, text_content)
+
+    return TradebookUploadResponse(**result)
+
+
+@router.post("/disconnect")
+def upstox_disconnect(
+    current_user: UserContext = Depends(get_current_user),
+    broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    if not current_user.user_id:
+        raise ServiceError(
+            "User context missing", error_code="unauthorized", http_status=401
+        )
+
+    # Get connection ID before disconnecting
+    connections = broker_service.list_connections(
+        user_id=current_user.user_id,
+    )
+    upstox_conns = [c for c in connections if c.broker_name == "upstox"]
+    connection_id = upstox_conns[0].id if upstox_conns else None
+
+    # Disconnect broker tokens
+    session_manager.disconnect(
+        "upstox",
+        user_id=current_user.user_id,
+    )
+
+    # Evict any sessions using this connection
+    if connection_id:
+        from api.dependencies import get_session_registry
+
+        registry = get_session_registry()
+        evicted = registry.evict_by_connection(connection_id)
+        LOGGER.info(f"Evicted {evicted} sessions after Upstox disconnect")
+
+    return {"disconnected": True, "broker": "upstox"}
+
+
+@router.post("/trades/sync")
+def upstox_trades_sync(
+    days: int = Query(default=400, ge=1, le=400),
+    current_user: UserContext = Depends(get_current_user),
+    session_manager: SessionManager = Depends(get_session_manager),
+    broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
+):
+    """Sync Upstox orders/trades to user_trades table."""
+    if not current_user.user_id:
+        raise ServiceError(
+            "User context missing", error_code="unauthorized", http_status=401
+        )
+
+    from api.dependencies import JOB_TRADES_SYNC, get_job_runner
+
+    connections = broker_service.list_connections(
+        user_id=current_user.user_id,
+    )
+    upstox_conns = [
+        c
+        for c in connections
+        if c.broker_name == "upstox" and c.user_id == current_user.user_id
+    ]
+    if not upstox_conns:
+        raise ServiceError(
+            "No Upstox connection found", error_code="no_connection", http_status=404
+        )
+
+    connection = upstox_conns[0]
+    token_bundle = session_manager.get_token_bundle(
+        "upstox", connection_id=connection.id
+    )
+    if not token_bundle:
+        raise ServiceError(
+            "Upstox not connected", error_code="not_connected", http_status=409
+        )
+
+    job_runner = get_job_runner()
+    job_id = job_runner.start_job(
+        session_id=f"trades-sync-{current_user.user_id}",
+        job_type=JOB_TRADES_SYNC,
+        payload={
+            "user_id": current_user.user_id,
+            "connection_id": connection.id,
+            "days": days,
+        },
+    )
+
+    return {"job_id": job_id}

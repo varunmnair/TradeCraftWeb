@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel
 
@@ -12,13 +12,16 @@ class PlanGenerateRequest(BaseModel):
     apply_risk: bool = False
 
 
-class PlanLatestResponse(BaseModel):
+class DynamicAvgGenerateRequest(BaseModel):
+    session_id: str
+
+
+class EntriesLatestResponse(BaseModel):
+    strategy_type: Literal["multi_level", "dynamic_averaging"]
     plan: List[Dict[str, Any]]
     skipped: List[Dict[str, Any]]
 
 
-class DynamicAvgGenerateRequest(BaseModel):
-    session_id: str
-
+PlanLatestResponse = EntriesLatestResponse
 
 PlanGenerateResponse = JobQueuedResponse

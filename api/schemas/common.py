@@ -20,7 +20,6 @@ class JobStatus(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    tenant_id: Optional[int] = None
     user_id: Optional[int] = None
     session_id: str
     job_type: str

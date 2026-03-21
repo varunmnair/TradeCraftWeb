@@ -22,16 +22,13 @@ def sqlite_session():
 
 def test_upstox_broker_uses_session_token(sqlite_session, monkeypatch):
     session = sqlite_session()
-    tenant = models.Tenant(name="TenantUpstox")
-    session.add(tenant)
-    session.flush()
-    user = models.User(tenant_id=tenant.id, email="up@example.com", hashed_password="hash", role="admin")
+    user = models.User(email="up@example.com", role="admin")
     session.add(user)
     session.flush()
     connection = models.BrokerConnection(
-        tenant_id=tenant.id,
         user_id=user.id,
         broker_name="upstox",
+        broker_user_id="UPUSER",
         metadata_json="{}",
     )
     session.add(connection)
@@ -51,7 +48,7 @@ def test_upstox_broker_uses_session_token(sqlite_session, monkeypatch):
     )
 
     session_manager = SessionManager(token_store=store, dev_mode=False)
-    broker = UpstoxBroker(user_id="UPUSER", api_key="key", api_secret="secret", redirect_uri="uri")
+    broker = UpstoxBroker(broker_user_id="UPUSER", api_key="key", api_secret="secret", redirect_uri="uri")
     broker.set_session_context(session_manager=session_manager, connection_id=connection_id)
 
     captured = {}

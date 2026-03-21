@@ -10,6 +10,11 @@ class FakeResponse:
         self._payload = payload
         self.status_code = status_code
 
+    @property
+    def text(self):
+        import json
+        return json.dumps(self._payload)
+
     def json(self):
         return self._payload
 

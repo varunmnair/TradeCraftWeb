@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 from functools import lru_cache
 from typing import Any, Dict
 
@@ -20,9 +19,13 @@ class TokenEncryptor:
         if not env_key:
             if not config.ALLOW_INSECURE_TOKENS:
                 raise RuntimeError("TOKEN_ENCRYPTION_KEY not configured")
-            env_key = base64.urlsafe_b64encode(b"tradecraftx-dev-key".ljust(32, b"0")).decode()
+            env_key = base64.urlsafe_b64encode(
+                b"tradecraftx-dev-key".ljust(32, b"0")
+            ).decode()
         if len(env_key) != 44:
-            env_key = base64.urlsafe_b64encode(env_key.encode().ljust(32, b"0")).decode()
+            env_key = base64.urlsafe_b64encode(
+                env_key.encode().ljust(32, b"0")
+            ).decode()
         self._fernet = Fernet(env_key)
 
     def encrypt_dict(self, data: Dict[str, Any]) -> bytes:

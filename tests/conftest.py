@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from api.main import create_app
 from api.dependencies import (
+    get_auth_service,
     get_broker_connection_service,
     get_broker_auth_state_service,
     get_db_session,
@@ -18,6 +19,7 @@ from core.runtime.job_runner import JobRunner
 from core.runtime.session_registry import SessionRegistry
 from core.session_manager import SessionManager
 from core.session_tokens import DbTokenStore
+from core.services.auth_service import AuthService
 from core.services.broker_auth_service import BrokerAuthStateService
 from core.services.broker_connection_service import BrokerConnectionService
 from db.database import Base
@@ -60,6 +62,7 @@ def client(db_session):
     session_registry = SessionRegistry(session_factory=SessionTesting, session_manager=session_manager)
     broker_service = BrokerConnectionService(session_factory=SessionTesting)
     auth_state_service = BrokerAuthStateService(session_factory=SessionTesting)
+    auth_service = AuthService(session_factory=SessionTesting)
     job_runner = JobRunner(session_factory=SessionTesting, session_registry=session_registry)
 
     def _override_db():
@@ -73,6 +76,7 @@ def client(db_session):
     app.dependency_overrides[get_session_registry] = lambda: session_registry
     app.dependency_overrides[get_broker_connection_service] = lambda: broker_service
     app.dependency_overrides[get_broker_auth_state_service] = lambda: auth_state_service
+    app.dependency_overrides[get_auth_service] = lambda: auth_service
     app.dependency_overrides[get_job_runner] = lambda: job_runner
     app.state.test_auth_state_service = auth_state_service
     return TestClient(app)

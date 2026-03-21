@@ -10,10 +10,12 @@ class BaseBroker(ABC):
     Abstract base class for all broker implementations.
     """
 
-    def __init__(self, user_id):
-        self.user_id = user_id
+    def __init__(self, broker_user_id):
+        self.broker_user_id = broker_user_id
 
-    def set_session_context(self, *, session_manager: "SessionManager", connection_id: Optional[int]) -> None:
+    def set_session_context(
+        self, *, session_manager: "SessionManager", connection_id: Optional[int]
+    ) -> None:
         """
         Set the session context for the broker. Override in subclasses if needed.
         """
@@ -109,5 +111,3 @@ class BaseBroker(ABC):
         Fetch historical candle data for a given symbol.
         """
         pass
-
-

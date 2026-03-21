@@ -142,6 +142,9 @@ dmypy.json
 !config.json
 logs/
 storage/
+data/*.db
+data/*.db-shm
+data/*.db-wal
 
 # Allow required JSON files
 !ui/package.json

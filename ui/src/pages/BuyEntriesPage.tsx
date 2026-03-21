@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Box,
   Typography,
@@ -35,6 +35,7 @@ import {
   TrendingDown as PriceDownIcon,
   TrendingUp as PriceUpIcon,
   ArrowForward as ArrowForwardIcon,
+  Delete as PurgeIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
@@ -111,34 +112,64 @@ export default function BuyEntriesPage() {
   const { sessionId } = useSession();
   const { start: startJob, job, isDone, isError } = useStartJob();
   
-  // Job runners for each strategy
+  const [tabValue, setTabValue] = useState(0);
+  const [error, setError] = useState('');
+
+  // Multi-Level Tab State
+  const [mlPlan, setMlPlan] = useState<PlanRow[]>([]);
+  const [mlOriginalPlan, setMlOriginalPlan] = useState<PlanRow[]>([]);
+  const [mlSkipped, setMlSkipped] = useState<{symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}[]>([]);
+  const [mlColumns, setMlColumns] = useState<GridColDef[]>([]);
+  const [mlLoading, setMlLoading] = useState(false);
+  const [mlSearchText, setMlSearchText] = useState('');
+  const [mlSelectedRows, setMlSelectedRows] = useState<GridRowSelectionModel>([]);
+  const [mlSkippedModalOpen, setMlSkippedModalOpen] = useState(false);
+  const [mlRiskEnabled, setMlRiskEnabled] = useState(false);
+  const [mlRiskJobRunning, setMlRiskJobRunning] = useState(false);
+  const [mlOriginalPlanRows, setMlOriginalPlanRows] = useState<PlanRow[]>([]);
+  const [mlHasPlan, setMlHasPlan] = useState(false);
+
+  // Multi-Level Job Runner
   const {
-    isRunning: isGenerating,
-    isSuccess: generateSuccess,
-    isError: generateError,
-    errorMessage: generateErrorMsg,
-    jobStatus: generateJobStatus,
-    jobProgress: generateJobProgress,
-    run: runGenerate,
-    reset: resetGenerate,
+    isRunning: isMlGenerating,
+    isSuccess: mlGenerateSuccess,
+    isError: mlGenerateError,
+    errorMessage: mlGenerateErrorMsg,
+    jobStatus: mlJobStatus,
+    jobProgress: mlJobProgress,
+    run: runMlGenerate,
   } = useJobRunner({
     onSuccess: () => {
-      fetchPlan();
+      fetchMlPlan();
     },
     onError: (msg) => {
       setError(msg);
     },
   });
 
+  // Dynamic Averaging Tab State
+  const [daPlan, setDaPlan] = useState<PlanRow[]>([]);
+  const [daOriginalPlan, setDaOriginalPlan] = useState<PlanRow[]>([]);
+  const [daSkipped, setDaSkipped] = useState<{symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}[]>([]);
+  const [daColumns, setDaColumns] = useState<GridColDef[]>([]);
+  const [daLoading, setDaLoading] = useState(false);
+  const [daSearchText, setDaSearchText] = useState('');
+  const [daSelectedRows, setDaSelectedRows] = useState<GridRowSelectionModel>([]);
+  const [daSkippedModalOpen, setDaSkippedModalOpen] = useState(false);
+  const [daRiskEnabled, setDaRiskEnabled] = useState(false);
+  const [daRiskJobRunning, setDaRiskJobRunning] = useState(false);
+  const [daOriginalPlanRows, setDaOriginalPlanRows] = useState<PlanRow[]>([]);
+  const [daHasPlan, setDaHasPlan] = useState(false);
+
+  // Dynamic Averaging Job Runner
   const {
     isRunning: isDaGenerating,
     isSuccess: daGenerateSuccess,
     isError: daGenerateError,
     errorMessage: daGenerateErrorMsg,
-    jobStatus: daGenerateJobStatus,
-    jobProgress: daGenerateJobProgress,
+    jobStatus: daJobStatus,
+    jobProgress: daJobProgress,
     run: runDaGenerate,
-    reset: resetDaGenerate,
   } = useJobRunner({
     onSuccess: () => {
       fetchDaPlan();
@@ -147,37 +178,14 @@ export default function BuyEntriesPage() {
       setError(msg);
     },
   });
-  
-  const [tabValue, setTabValue] = useState(0);
-  const [plan, setPlan] = useState<PlanRow[]>([]);
-  const [originalPlan, setOriginalPlan] = useState<PlanRow[]>([]);
-  const [riskAdjustedPlan, setRiskAdjustedPlan] = useState<PlanRow[]>([]);
-  const [skipped, setSkipped] = useState<{symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}[]>([]);
-  const [columns, setColumns] = useState<GridColDef[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [searchText, setSearchText] = useState('');
-  const [selectedRows, setSelectedRows] = useState<GridRowSelectionModel>([]);
-  
-  // Skipped modal state
-  const [skippedModalOpen, setSkippedModalOpen] = useState(false);
-  
-  // Risk toggle state
-  const [riskEnabled, setRiskEnabled] = useState(false);
-  const [riskJobRunning, setRiskJobRunning] = useState(false);
-  const [originalPlanRows, setOriginalPlanRows] = useState<PlanRow[]>([]);
-  
-  // DA Tab state
-  const [daPlan, setDaPlan] = useState<PlanRow[]>([]);
-  const [daSkipped, setDaSkipped] = useState<{symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}[]>([]);
-  const [daColumns, setDaColumns] = useState<GridColDef[]>([]);
-  const [daLoading, setDaLoading] = useState(false);
-  const [daSearchText, setDaSearchText] = useState('');
-  const [daSelectedRows, setDaSelectedRows] = useState<GridRowSelectionModel>([]);
-  
-  // DA Skipped modal state
-  const [daSkippedModalOpen, setDaSkippedModalOpen] = useState(false);
-  
+
+  // Confirm dialogs
+  const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmToken, setConfirmToken] = useState<GTTConfirmResponse | null>(null);
+  const [placingOrders, setPlacingOrders] = useState(false);
+  const [orderSuccess, setOrderSuccess] = useState(false);
+
   // DA Confirm dialog
   const [daConfirmDialogOpen, setDaConfirmDialogOpen] = useState(false);
   const [daConfirming, setDaConfirming] = useState(false);
@@ -185,83 +193,136 @@ export default function BuyEntriesPage() {
   const [daPlacingOrders, setDaPlacingOrders] = useState(false);
   const [daOrderSuccess, setDaOrderSuccess] = useState(false);
 
+  // Purge dialog
+  const [purgeDialogOpen, setPurgeDialogOpen] = useState(false);
+  const [purging, setPurging] = useState(false);
+
   const navigate = useNavigate();
-  
-  // Confirm dialog
-  const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [confirmToken, setConfirmToken] = useState<GTTConfirmResponse | null>(null);
-  const [placingOrders, setPlacingOrders] = useState(false);
-  const [orderSuccess, setOrderSuccess] = useState(false);
 
-  // Get current plan (plan already contains the correct data - original or risk-adjusted)
-  const currentPlan = plan;
-
-  // Get original plan (for diff highlighting)
-  const originalPlanMap = useMemo(() => {
+  const currentMlPlan = mlPlan;
+  const mlOriginalPlanMap = useMemo(() => {
     const map = new Map<string, PlanRow>();
-    for (const row of originalPlan) {
+    for (const row of mlOriginalPlan) {
       map.set(getRowKey(row), row);
     }
     return map;
-  }, [originalPlan]);
+  }, [mlOriginalPlan]);
+
+  const currentDaPlan = daPlan;
 
   // Clear selection when plan becomes empty
   useEffect(() => {
-    if (currentPlan.length === 0) {
-      setSelectedRows([]);
+    if (currentMlPlan.length === 0) {
+      setMlSelectedRows([]);
     }
-  }, [currentPlan]);
+  }, [currentMlPlan]);
 
-  // Fetch plan when job is done OR when sessionId changes
   useEffect(() => {
-    if (sessionId) {
-      fetchPlan();
+    if (daPlan.length === 0) {
+      setDaSelectedRows([]);
     }
-  }, [sessionId]);
+  }, [daPlan]);
 
-  const fetchPlan = async () => {
-    if (!sessionId || loading) return;
-    setLoading(true);
+  // Auto-generate plans when visiting tab
+  useEffect(() => {
+    if (!sessionId) return;
+
+    if (tabValue === 0 && !mlHasPlan && !isMlGenerating) {
+      // Try to fetch existing plan first
+      fetchMlPlan(true);
+    } else if (tabValue === 1 && !daHasPlan && !isDaGenerating) {
+      fetchDaPlan(true);
+    }
+  }, [tabValue, sessionId]);
+
+  const fetchMlPlan = async (autoGenerate = false) => {
+    if (!sessionId || mlLoading) return;
+    setMlLoading(true);
     try {
-      const data = await api.getPlanLatest(sessionId);
+      const data = await api.getMultiLevelPlanLatest(sessionId);
       const planData = data.plan || [];
       
-      // Store as original plan
-      const planWithMeta: PlanRow[] = planData.map(row => ({
-        ...row,
-        _originalValues: { ...row },
-        _changes: [],
-      }));
-      
-      setPlan(planWithMeta);
-      setOriginalPlan(planWithMeta);
-      setOriginalPlanRows(planWithMeta);
-      
-      // If risk is currently enabled, don't reset - keep adjusted plan
-      // Otherwise set display to the fetched plan
-      
-      // Convert skipped items to objects
-      const skippedItems = (data.skipped || []).map((s) => 
-        typeof s === 'object' 
-          ? s as {symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}
-          : { symbol: String(s), skip_reason: '' }
-      );
-      setSkipped(skippedItems);
-      
-      if (planWithMeta.length > 0) {
-        generateColumns(planWithMeta);
+      if (planData.length > 0 || data.skipped?.length > 0) {
+        setMlHasPlan(true);
+        
+        const planWithMeta: PlanRow[] = planData.map(row => ({
+          ...row,
+          _originalValues: { ...row },
+          _changes: [],
+        }));
+        
+        setMlPlan(planWithMeta);
+        setMlOriginalPlan(planWithMeta);
+        setMlOriginalPlanRows(planWithMeta);
+        
+        const skippedItems = (data.skipped || []).map((s) => 
+          typeof s === 'object' 
+            ? s as {symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}
+            : { symbol: String(s), skip_reason: '' }
+        );
+        setMlSkipped(skippedItems);
+        
+        if (planWithMeta.length > 0) {
+          generateMlColumns(planWithMeta);
+        }
+      } else if (autoGenerate) {
+        // Auto-generate if no plan exists
+        handleMlGenerate();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch plan');
+      if (autoGenerate) {
+        handleMlGenerate();
+      }
     } finally {
-      setLoading(false);
+      setMlLoading(false);
     }
   };
 
-  const generateColumns = (items: PlanRow[]) => {
+  const fetchDaPlan = async (autoGenerate = false) => {
+    if (!sessionId || daLoading) return;
+    setDaLoading(true);
+    try {
+      const data = await api.getDynamicAveragingLatest(sessionId);
+      const planData = data.plan || [];
+      
+      if (planData.length > 0 || data.skipped?.length > 0) {
+        setDaHasPlan(true);
+        
+        const planWithMeta: PlanRow[] = planData.map(row => ({
+          ...row,
+          _originalValues: { ...row },
+          _changes: [],
+        }));
+        
+        setDaPlan(planWithMeta);
+        setDaOriginalPlan(planWithMeta);
+        setDaOriginalPlanRows(planWithMeta);
+        
+        const skippedItems = (data.skipped || []).map((s) => 
+          typeof s === 'object' 
+            ? s as {symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}
+            : { symbol: String(s), skip_reason: '' }
+        );
+        setDaSkipped(skippedItems);
+        
+        if (planWithMeta.length > 0) {
+          generateDaColumns(planWithMeta);
+        }
+      } else if (autoGenerate) {
+        handleDaGenerate();
+      }
+    } catch (err) {
+      if (autoGenerate) {
+        handleDaGenerate();
+      }
+    } finally {
+      setDaLoading(false);
+    }
+  };
+
+  const generateMlColumns = (items: PlanRow[]) => {
     if (items.length === 0) {
-      setColumns([]);
+      setMlColumns([]);
       return;
     }
     
@@ -269,7 +330,7 @@ export default function BuyEntriesPage() {
     const cols: GridColDef[] = [];
     
     Object.keys(firstRow).map((key) => {
-      if (key.startsWith('_')) return; // Skip internal fields
+      if (key.startsWith('_')) return;
       
       const value = firstRow[key];
       let type: 'string' | 'number' | 'boolean' | 'date' = 'string';
@@ -277,12 +338,11 @@ export default function BuyEntriesPage() {
       if (typeof value === 'number') type = 'number';
       else if (typeof value === 'boolean') type = 'boolean';
       
-      // Custom cell renderer for diff highlighting
       const renderCell = (params: GridRenderCellParams) => {
         const row = params.row as PlanRow;
-        const originalRow = originalPlanMap.get(getRowKey(row));
+        const originalRow = mlOriginalPlanMap.get(getRowKey(row));
         
-        if (originalRow && riskEnabled) {
+        if (originalRow && mlRiskEnabled) {
           const origVal = originalRow[key];
           const currVal = params.value;
           
@@ -321,8 +381,7 @@ export default function BuyEntriesPage() {
       });
     });
     
-    // Add Changes column when risk is enabled
-    if (riskEnabled) {
+    if (mlRiskEnabled) {
       cols.push({
         field: '_changes',
         headerName: 'Changes',
@@ -348,50 +407,157 @@ export default function BuyEntriesPage() {
       });
     }
     
-    setColumns(cols);
+    setMlColumns(cols);
   };
 
-  // Regenerate columns when risk toggle changes
-  useEffect(() => {
-    if (currentPlan.length > 0) {
-      generateColumns(currentPlan);
+  const generateDaColumns = (items: PlanRow[]) => {
+    if (items.length === 0) {
+      setDaColumns([]);
+      return;
     }
-  }, [riskEnabled]);
+    
+    const firstRow = items[0];
+    const cols: GridColDef[] = [];
+    
+    Object.keys(firstRow).map((key) => {
+      if (key.startsWith('_')) return;
+      
+      const value = firstRow[key];
+      let type: 'string' | 'number' | 'boolean' | 'date' = 'string';
+      
+      if (typeof value === 'number') type = 'number';
+      else if (typeof value === 'boolean') type = 'boolean';
+      
+      const renderCell = (params: GridRenderCellParams) => {
+        const row = params.row as PlanRow;
+        const originalRow = row._originalValues;
+        
+        if (originalRow && daRiskEnabled) {
+          const origVal = originalRow[key];
+          const currVal = params.value;
+          
+          const origNum = Number(origVal);
+          const currNum = Number(currVal);
+          const isNumericChange = !isNaN(origNum) && !isNaN(currNum) && origNum !== currNum;
+          
+          if (isNumericChange) {
+            const changed = currNum < origNum ? 'decreased' : 'increased';
+            return (
+              <Tooltip title={`Original: ${origVal} → Now: ${currVal}`}>
+                <Box sx={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  gap: 0.5,
+                  color: changed === 'decreased' ? 'error.main' : 'success.main',
+                  fontWeight: 'bold',
+                }}>
+                  {changed === 'decreased' ? <PriceDownIcon fontSize="small" /> : <PriceUpIcon fontSize="small" />}
+                  {String(currVal)}
+                </Box>
+              </Tooltip>
+            );
+          }
+        }
+        return String(params.value ?? '');
+      };
+      
+      cols.push({
+        field: key,
+        headerName: key,
+        type,
+        width: type === 'number' ? 120 : 180,
+        flex: type === 'string' ? 1 : 0,
+        renderCell,
+      });
+    });
+    
+    if (daRiskEnabled) {
+      cols.push({
+        field: '_changes',
+        headerName: 'Changes',
+        width: 150,
+        renderCell: (params: GridRenderCellParams) => {
+          const row = params.row as PlanRow;
+          const changes = row._changes || [];
+          if (changes.length === 0) return '-';
+          return (
+            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+              {changes.map(change => (
+                <Chip 
+                  key={change} 
+                  label={change} 
+                  size="small" 
+                  color={change === 'Price' ? 'warning' : change === 'Amount' ? 'info' : 'secondary'}
+                  variant="outlined"
+                />
+              ))}
+            </Box>
+          );
+        },
+      });
+    }
+    
+    setDaColumns(cols);
+  };
 
-  const handleGenerate = async () => {
+  useEffect(() => {
+    if (currentMlPlan.length > 0) {
+      generateMlColumns(currentMlPlan);
+    }
+  }, [mlRiskEnabled]);
+
+  useEffect(() => {
+    if (currentDaPlan.length > 0) {
+      generateDaColumns(currentDaPlan);
+    }
+  }, [daRiskEnabled]);
+
+  const handleMlGenerate = async () => {
     if (!sessionId) {
       setError('No active session. Please start a session first.');
       return;
     }
     
-    // Reset risk state
-    setRiskEnabled(false);
-    setRiskAdjustedPlan([]);
-    
+    setMlRiskEnabled(false);
     setError('');
     
     try {
-      const response = await api.generatePlan({ session_id: sessionId, apply_risk: false });
-      await runGenerate(() => Promise.resolve({ job_id: response.job_id }));
+      const response = await api.generateMultiLevelPlan({ session_id: sessionId, apply_risk: false });
+      await runMlGenerate(() => Promise.resolve({ job_id: response.job_id }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to generate plan');
     }
   };
 
-  const handleToggleRisk = async () => {
+  const handleDaGenerate = async () => {
+    if (!sessionId) {
+      setError('No active session. Please start a session first.');
+      return;
+    }
+    
+    setDaRiskEnabled(false);
+    setError('');
+    
+    try {
+      const response = await api.generateDynamicAveragingPlan({ session_id: sessionId, apply_risk: false });
+      await runDaGenerate(() => Promise.resolve({ job_id: response.job_id }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate DA plan');
+    }
+  };
+
+  const handleMlToggleRisk = async () => {
     if (!sessionId) return;
     
-    if (!riskEnabled) {
-      // Turning risk ON - apply risk
-      setRiskJobRunning(true);
+    if (!mlRiskEnabled) {
+      setMlRiskJobRunning(true);
       setError('');
       
       try {
-        const planToApply = plan.length > 0 ? plan : originalPlanRows;
+        const planToApply = mlPlan.length > 0 ? mlPlan : mlOriginalPlanRows;
         
         const response = await api.applyRisk(sessionId, planToApply);
         
-        // Poll for job completion
         const pollJob = async (): Promise<boolean> => {
           let attempts = 0;
           while (attempts < 30) {
@@ -414,13 +580,11 @@ export default function BuyEntriesPage() {
         const success = await pollJob();
         
         if (success) {
-          // Fetch the latest plan with risk adjustments
           try {
             const data = await api.getRiskPlanLatest(sessionId);
             if (data.plan && data.plan.length > 0) {
-              // Add metadata to plan rows - use originalPlanRows to preserve pre-risk values
               const planMap = new Map<string, PlanRow>();
-              originalPlanRows.forEach(p => planMap.set(getRowKey(p), p));
+              mlOriginalPlanRows.forEach(p => planMap.set(getRowKey(p), p));
               
               const adjustedWithMeta: PlanRow[] = data.plan.map(row => {
                 const orig = planMap.get(getRowKey(row));
@@ -431,17 +595,16 @@ export default function BuyEntriesPage() {
                 };
               });
               
-              setPlan(adjustedWithMeta);
-              setRiskEnabled(true);
+              setMlPlan(adjustedWithMeta);
+              setMlRiskEnabled(true);
               
-              // Update skipped if present
               if (data.skipped) {
                 const skippedItems = (data.skipped || []).map((s: unknown) => 
                   typeof s === 'object' 
                     ? s as {symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}
                     : { symbol: String(s), skip_reason: '' }
                 );
-                setSkipped(skippedItems);
+                setMlSkipped(skippedItems);
               }
             }
           } catch (err) {
@@ -451,14 +614,12 @@ export default function BuyEntriesPage() {
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to apply risk');
       } finally {
-        setRiskJobRunning(false);
+        setMlRiskJobRunning(false);
       }
     } else {
-      // Turning risk OFF - revert to original values
-      setRiskEnabled(false);
+      setMlRiskEnabled(false);
       
-      // Revert each row to its original values
-      const revertedPlan = plan.map(row => {
+      const revertedPlan = mlPlan.map(row => {
         const original = row._originalValues || row;
         return {
           ...original,
@@ -467,100 +628,126 @@ export default function BuyEntriesPage() {
           _changes: [],
         };
       });
-      setPlan(revertedPlan);
+      setMlPlan(revertedPlan);
     }
   };
 
-  // DA Functions
-  const fetchDaPlan = async () => {
-    if (!sessionId || daLoading) return;
-    setDaLoading(true);
-    try {
-      const data = await api.getDynamicAvgLatest(sessionId);
-      const planData = data.plan || [];
+  const handleDaToggleRisk = async () => {
+    if (!sessionId) return;
+    
+    if (!daRiskEnabled) {
+      setDaRiskJobRunning(true);
+      setError('');
       
-      const planWithMeta: PlanRow[] = planData.map(row => ({
-        ...row,
-        _originalValues: { ...row },
-        _changes: [],
-      }));
-      
-      setDaPlan(planWithMeta);
-      
-      // Convert skipped items to objects
-      const skippedItems = (data.skipped || []).map((s) => 
-        typeof s === 'object' 
-          ? s as {symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}
-          : { symbol: String(s), skip_reason: '' }
-      );
-      setDaSkipped(skippedItems);
-      
-      if (planWithMeta.length > 0) {
-        generateDaColumns(planWithMeta);
+      try {
+        const planToApply = daPlan.length > 0 ? daPlan : daOriginalPlanRows;
+        
+        const response = await api.applyRisk(sessionId, planToApply);
+        
+        const pollJob = async (): Promise<boolean> => {
+          let attempts = 0;
+          while (attempts < 30) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              const jobData = await api.getJob(response.job_id);
+              if (jobData.job.status === 'completed' || jobData.job.status === 'succeeded') {
+                return true;
+              } else if (jobData.job.status === 'failed') {
+                setError('Risk adjustment job failed');
+                return false;
+              }
+            } catch {}
+            attempts++;
+          }
+          setError('Timeout waiting for risk adjustment');
+          return false;
+        };
+        
+        const success = await pollJob();
+        
+        if (success) {
+          try {
+            const data = await api.getRiskPlanLatest(sessionId);
+            if (data.plan && data.plan.length > 0) {
+              const planMap = new Map<string, PlanRow>();
+              daOriginalPlanRows.forEach(p => planMap.set(getRowKey(p), p));
+              
+              const adjustedWithMeta: PlanRow[] = data.plan.map(row => {
+                const orig = planMap.get(getRowKey(row));
+                return {
+                  ...row,
+                  _originalValues: orig || row,
+                  _changes: [],
+                };
+              });
+              
+              setDaPlan(adjustedWithMeta);
+              setDaRiskEnabled(true);
+              
+              if (data.skipped) {
+                const skippedItems = (data.skipped || []).map((s: unknown) => 
+                  typeof s === 'object' 
+                    ? s as {symbol?: string; Symbol?: string; skip_reason?: string; reason?: string}
+                    : { symbol: String(s), skip_reason: '' }
+                );
+                setDaSkipped(skippedItems);
+              }
+            }
+          } catch (err) {
+            setError('Failed to fetch adjusted plan');
+          }
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to apply risk');
+      } finally {
+        setDaRiskJobRunning(false);
       }
-    } catch (err) {
-      console.log('Fetch DA plan error:', err);
-    } finally {
-      setDaLoading(false);
-    }
-  };
-
-  const generateDaColumns = (items: PlanRow[]) => {
-    if (items.length === 0) {
-      setDaColumns([]);
-      return;
-    }
-    
-    const firstRow = items[0];
-    const cols: GridColDef[] = [];
-    
-    Object.keys(firstRow).map((key) => {
-      if (key.startsWith('_')) return;
+    } else {
+      setDaRiskEnabled(false);
       
-      const value = firstRow[key];
-      let type: 'string' | 'number' | 'boolean' | 'date' = 'string';
-      
-      if (typeof value === 'number') type = 'number';
-      else if (typeof value === 'boolean') type = 'boolean';
-      
-      cols.push({
-        field: key,
-        headerName: key,
-        type,
-        width: type === 'number' ? 120 : 180,
-        flex: type === 'string' ? 1 : 0,
+      const revertedPlan = daPlan.map(row => {
+        const original = row._originalValues || row;
+        return {
+          ...original,
+          risk_adj: 'N/A',
+          risk_reasons: '',
+          _changes: [],
+        };
       });
-    });
-    
-    setDaColumns(cols);
+      setDaPlan(revertedPlan);
+    }
   };
 
-  // Clear DA selection when plan changes to avoid stale indices
-  useEffect(() => {
-    setDaSelectedRows([]);
-  }, [daPlan]);
-
-  // Fetch DA plan when tab changes to DA or when job completes
-  useEffect(() => {
-    if (tabValue === 1 && sessionId) {
-      fetchDaPlan();
-    }
-  }, [tabValue, sessionId]);
-
-  const handleDaGenerate = async () => {
-    if (!sessionId) {
-      setError('No active session. Please start a session first.');
-      return;
-    }
+  const handlePurge = async () => {
+    if (!sessionId) return;
     
-    setError('');
-    
+    setPurging(true);
     try {
-      const response = await api.generateDynamicAvgPlan(sessionId);
-      await runDaGenerate(() => Promise.resolve({ job_id: response.job_id }));
+      await api.purgeEntriesPlans(sessionId);
+      setMlHasPlan(false);
+      setMlPlan([]);
+      setMlOriginalPlan([]);
+      setMlSkipped([]);
+      setMlRiskEnabled(false);
+      setDaHasPlan(false);
+      setDaPlan([]);
+      setDaOriginalPlan([]);
+      setDaSkipped([]);
+      setDaRiskEnabled(false);
+      setPurgeDialogOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate DA plan');
+      setError(err instanceof Error ? err.message : 'Failed to purge plans');
+    } finally {
+      setPurging(false);
     }
+  };
+
+  const handleMlSelectAll = () => {
+    setMlSelectedRows(currentMlPlan.map((_, idx) => idx));
+  };
+
+  const handleMlClearSelection = () => {
+    setMlSelectedRows([]);
   };
 
   const handleDaSelectAll = () => {
@@ -570,6 +757,60 @@ export default function BuyEntriesPage() {
 
   const handleDaClearSelection = () => {
     setDaSelectedRows([]);
+  };
+
+  const handleConfirm = async () => {
+    if (!sessionId || mlSelectedRows.length === 0) return;
+    
+    setConfirming(true);
+    setError('');
+    
+    try {
+      const currentPlanMap = new Map(currentMlPlan.map((row) => [getRowKey(row), row]));
+      const selectedItems = mlSelectedRows.map(key => currentPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
+      const response = await api.confirmGTT({
+        session_id: sessionId,
+        plan: selectedItems as unknown as Record<string, unknown>[],
+      });
+      setConfirmToken(response);
+      setConfirmDialogOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to confirm');
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  const handlePlaceOrders = async () => {
+    if (!sessionId || !confirmToken) return;
+    
+    setPlacingOrders(true);
+    setError('');
+    
+    try {
+      const currentPlanMap = new Map(currentMlPlan.map((row) => [getRowKey(row), row]));
+      const selectedItems = mlSelectedRows.map(key => currentPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
+      const response = await api.applyGTT({
+        session_id: sessionId,
+        plan: selectedItems as unknown as Record<string, unknown>[],
+        confirmation_token: confirmToken.token,
+      });
+      startJob(response.job_id);
+      setOrderSuccess(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to place orders');
+    } finally {
+      setPlacingOrders(false);
+    }
+  };
+
+  const handleCloseConfirm = () => {
+    setConfirmDialogOpen(false);
+    setConfirmToken(null);
+    if (orderSuccess) {
+      setMlSelectedRows([]);
+      setOrderSuccess(false);
+    }
   };
 
   const handleDaConfirm = async () => {
@@ -588,7 +829,6 @@ export default function BuyEntriesPage() {
       setDaConfirmToken(response);
       setDaConfirmDialogOpen(true);
     } catch (err) {
-      console.error('DA confirm error:', err);
       setError(err instanceof Error ? err.message : 'Failed to confirm');
     } finally {
       setDaConfirming(false);
@@ -612,7 +852,6 @@ export default function BuyEntriesPage() {
       startJob(response.job_id);
       setDaOrderSuccess(true);
     } catch (err) {
-      console.error('DA apply error:', err);
       setError(err instanceof Error ? err.message : 'Failed to place orders');
     } finally {
       setDaPlacingOrders(false);
@@ -628,10 +867,18 @@ export default function BuyEntriesPage() {
     }
   };
 
-  // Client-side filtered DA plan
+  const filteredMlPlan = useMemo(() => {
+    if (!mlSearchText) return currentMlPlan;
+    const search = mlSearchText.toLowerCase();
+    return currentMlPlan.filter(row => 
+      Object.values(row).some(val => 
+        String(val).toLowerCase().includes(search)
+      )
+    );
+  }, [currentMlPlan, mlSearchText]);
+
   const filteredDaPlan = useMemo(() => {
-    if (!daSearchText) return daPlan;
-    
+    if (!daSearchText) return currentDaPlan;
     const search = daSearchText.toLowerCase();
     return daPlan.filter(row => 
       Object.values(row).some(val => 
@@ -639,83 +886,6 @@ export default function BuyEntriesPage() {
       )
     );
   }, [daPlan, daSearchText]);
-
-  const handleSelectAll = () => {
-    setSelectedRows(currentPlan.map((_, idx) => idx));
-  };
-
-  const handleClearSelection = () => {
-    setSelectedRows([]);
-  };
-
-  const handleConfirm = async () => {
-    if (!sessionId || selectedRows.length === 0) return;
-    
-    setConfirming(true);
-    setError('');
-    
-    try {
-      const currentPlanMap = new Map(currentPlan.map((row) => [getRowKey(row), row]));
-      const selectedItems = selectedRows.map(key => currentPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
-      console.log('Confirm - sample item fields:', selectedItems[0] ? Object.keys(selectedItems[0]) : 'none');
-      const response = await api.confirmGTT({
-        session_id: sessionId,
-        plan: selectedItems as unknown as Record<string, unknown>[],
-      });
-      setConfirmToken(response);
-      setConfirmDialogOpen(true);
-    } catch (err) {
-      console.error('Confirm error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to confirm');
-    } finally {
-      setConfirming(false);
-    }
-  };
-
-  const handlePlaceOrders = async () => {
-    if (!sessionId || !confirmToken) return;
-    
-    setPlacingOrders(true);
-    setError('');
-    
-    try {
-      const currentPlanMap = new Map(currentPlan.map((row) => [getRowKey(row), row]));
-      const selectedItems = selectedRows.map(key => currentPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
-      const response = await api.applyGTT({
-        session_id: sessionId,
-        plan: selectedItems as unknown as Record<string, unknown>[],
-        confirmation_token: confirmToken.token,
-      });
-      startJob(response.job_id);
-      setOrderSuccess(true);
-    } catch (err) {
-      console.error('PlaceOrders error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to place orders');
-    } finally {
-      setPlacingOrders(false);
-    }
-  };
-
-  const handleCloseConfirm = () => {
-    setConfirmDialogOpen(false);
-    setConfirmToken(null);
-    if (orderSuccess) {
-      setSelectedRows([]);
-      setOrderSuccess(false);
-    }
-  };
-
-  // Client-side filtered plan
-  const filteredPlan = useMemo(() => {
-    if (!searchText) return currentPlan;
-    
-    const search = searchText.toLowerCase();
-    return currentPlan.filter(row => 
-      Object.values(row).some(val => 
-        String(val).toLowerCase().includes(search)
-      )
-    );
-  }, [currentPlan, searchText]);
 
   if (!sessionId) {
     return (
@@ -743,8 +913,8 @@ export default function BuyEntriesPage() {
       )}
 
       <Tabs value={tabValue} onChange={(_, v) => setTabValue(v)} sx={{ mb: 2 }}>
-        <Tab label="Multi-Level Entry" />
-        <Tab label="Dynamic Averaging" />
+        <Tab label="Multi Level Plan" />
+        <Tab label="Dynamic Averaging Plan" />
       </Tabs>
 
       <TabPanel value={tabValue} index={0}>
@@ -752,18 +922,28 @@ export default function BuyEntriesPage() {
           <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
             <Button
               variant="contained"
-              startIcon={isGenerating || riskJobRunning ? <CircularProgress size={20} color="inherit" /> : <GenerateIcon />}
-              onClick={handleGenerate}
-              disabled={isGenerating || riskJobRunning}
+              startIcon={isMlGenerating || mlRiskJobRunning ? <CircularProgress size={20} color="inherit" /> : <GenerateIcon />}
+              onClick={handleMlGenerate}
+              disabled={isMlGenerating || mlRiskJobRunning}
             >
-              {isGenerating ? 'Generating...' : riskJobRunning ? 'Applying Risk...' : plan.length > 0 ? 'Refresh' : 'Generate Candidates'}
+              {isMlGenerating ? 'Generating...' : mlRiskJobRunning ? 'Applying Risk...' : mlHasPlan ? 'Refresh' : 'Generate Candidates'}
+            </Button>
+
+            <Button
+              variant="outlined"
+              color="error"
+              startIcon={<PurgeIcon />}
+              onClick={() => setPurgeDialogOpen(true)}
+              disabled={!mlHasPlan && !daHasPlan}
+            >
+              Clear Plans
             </Button>
 
             <TextField
               size="small"
               placeholder="Search symbol..."
-              value={searchText}
-              onChange={(e) => setSearchText(e.target.value)}
+              value={mlSearchText}
+              onChange={(e) => setMlSearchText(e.target.value)}
               InputProps={{
                 startAdornment: (
                   <InputAdornment position="start">
@@ -775,22 +955,21 @@ export default function BuyEntriesPage() {
             />
 
             <Chip 
-              label={`${selectedRows.length} selected`} 
-              color={selectedRows.length > 0 ? 'primary' : 'default'}
+              label={`${mlSelectedRows.length} selected`} 
+              color={mlSelectedRows.length > 0 ? 'primary' : 'default'}
             />
 
             <Box sx={{ flexGrow: 1 }} />
 
-            {/* Risk Toggle */}
             <FormControlLabel
               control={
                 <Switch
-                  checked={riskEnabled}
-                  onChange={handleToggleRisk}
-                  disabled={riskJobRunning || plan.length === 0}
+                  checked={mlRiskEnabled}
+                  onChange={handleMlToggleRisk}
+                  disabled={mlRiskJobRunning || mlPlan.length === 0}
                 />
               }
-              label={riskJobRunning ? 'Applying Risk...' : 'Apply Risk Adjustments'}
+              label={mlRiskJobRunning ? 'Applying Risk...' : 'Apply Risk Adjustments'}
             />
 
             <Button
@@ -798,69 +977,65 @@ export default function BuyEntriesPage() {
               color="success"
               startIcon={<BuyIcon />}
               onClick={handleConfirm}
-              disabled={selectedRows.length === 0 || confirming}
+              disabled={mlSelectedRows.length === 0 || confirming}
             >
-              {confirming ? 'Confirming...' : `Place ${selectedRows.length} Orders`}
+              {confirming ? 'Confirming...' : `Place ${mlSelectedRows.length} Orders`}
             </Button>
           </Box>
 
-          {/* Job Status */}
-          {isGenerating && (
+          {isMlGenerating && (
             <Box sx={{ mt: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
               <Chip 
-                label={generateJobStatus || 'processing'} 
-                color={generateJobStatus === 'completed' ? 'success' : generateJobStatus === 'failed' ? 'error' : 'info'}
+                label={mlJobStatus || 'processing'} 
+                color={mlJobStatus === 'completed' ? 'success' : mlJobStatus === 'failed' ? 'error' : 'info'}
                 size="small"
               />
               <Typography variant="body2" color="text.secondary">
-                Generating... {(generateJobProgress * 100).toFixed(0)}% complete
+                Generating... {(mlJobProgress * 100).toFixed(0)}% complete
               </Typography>
             </Box>
           )}
 
-          {/* Risk status */}
-          {riskEnabled && (
+          {mlRiskEnabled && (
             <Alert severity="info" sx={{ mt: 2 }}>
               Showing risk-adjusted values. Prices/amounts may be modified based on risk analysis.
             </Alert>
           )}
 
-          {/* Skipped items summary */}
-          {skipped.length > 0 && (
+          {mlSkipped.length > 0 && (
             <Alert severity="warning" sx={{ mt: 2 }} icon={<WarningIcon />}
               action={
-                <Button color="inherit" size="small" onClick={() => setSkippedModalOpen(true)}>
+                <Button color="inherit" size="small" onClick={() => setMlSkippedModalOpen(true)}>
                   View details
                 </Button>
               }
             >
-              {skipped.length} items skipped
+              {mlSkipped.length} items skipped
             </Alert>
           )}
         </Paper>
 
-        {/* Results */}
-        {loading ? (
+        {mlLoading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
             <CircularProgress />
           </Box>
-        ) : currentPlan.length === 0 ? (
+        ) : currentMlPlan.length === 0 ? (
           <Paper sx={{ p: 4, textAlign: 'center' }}>
             <Typography variant="body1" color="text.secondary">
-              No entry plan. Click "Generate Candidates" to create a multi-level entry plan.
+              {isMlGenerating ? 'Generating plan...' : 'No entry plan. Click "Generate Candidates" to create a multi-level entry plan.'}
             </Typography>
           </Paper>
         ) : (
           <Paper sx={{ height: 500, width: '100%' }}>
             <DataGrid
-              rows={filteredPlan}
-              columns={columns}
+              rows={filteredMlPlan}
+              columns={mlColumns}
               initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
               pageSizeOptions={[10, 25, 50]}
               checkboxSelection
               disableRowSelectionOnClick
-              rowSelectionModel={selectedRows}
-              onRowSelectionModelChange={setSelectedRows}
+              rowSelectionModel={mlSelectedRows}
+              onRowSelectionModelChange={setMlSelectedRows}
               getRowId={(row) => getRowKey(row)}
             />
           </Paper>
@@ -872,11 +1047,11 @@ export default function BuyEntriesPage() {
           <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
             <Button
               variant="contained"
-              startIcon={isDaGenerating ? <CircularProgress size={20} color="inherit" /> : <GenerateIcon />}
+              startIcon={isDaGenerating || daRiskJobRunning ? <CircularProgress size={20} color="inherit" /> : <GenerateIcon />}
               onClick={handleDaGenerate}
-              disabled={isDaGenerating}
+              disabled={isDaGenerating || daRiskJobRunning}
             >
-              {isDaGenerating ? 'Generating...' : daPlan.length > 0 ? 'Refresh' : 'Generate Averaging Candidates'}
+              {isDaGenerating ? 'Generating...' : daRiskJobRunning ? 'Applying Risk...' : daHasPlan ? 'Refresh' : 'Generate Candidates'}
             </Button>
 
             <TextField
@@ -901,6 +1076,17 @@ export default function BuyEntriesPage() {
 
             <Box sx={{ flexGrow: 1 }} />
 
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={daRiskEnabled}
+                  onChange={handleDaToggleRisk}
+                  disabled={daRiskJobRunning || daPlan.length === 0}
+                />
+              }
+              label={daRiskJobRunning ? 'Applying Risk...' : 'Apply Risk Adjustments'}
+            />
+
             <Button
               variant="contained"
               color="success"
@@ -912,21 +1098,25 @@ export default function BuyEntriesPage() {
             </Button>
           </Box>
 
-          {/* Job Status */}
-          {isDaGenerating && tabValue === 1 && (
+          {isDaGenerating && (
             <Box sx={{ mt: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
               <Chip 
-                label={daGenerateJobStatus || 'processing'} 
-                color={daGenerateJobStatus === 'completed' ? 'success' : daGenerateJobStatus === 'failed' ? 'error' : 'info'}
+                label={daJobStatus || 'processing'} 
+                color={daJobStatus === 'completed' ? 'success' : daJobStatus === 'failed' ? 'error' : 'info'}
                 size="small"
               />
               <Typography variant="body2" color="text.secondary">
-                Generating... {(daGenerateJobProgress * 100).toFixed(0)}% complete
+                Generating... {(daJobProgress * 100).toFixed(0)}% complete
               </Typography>
             </Box>
           )}
 
-          {/* Skipped items summary */}
+          {daRiskEnabled && (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              Showing risk-adjusted values. Prices/amounts may be modified based on risk analysis.
+            </Alert>
+          )}
+
           {daSkipped.length > 0 && (
             <Alert severity="warning" sx={{ mt: 2 }} icon={<WarningIcon />}
               action={
@@ -940,7 +1130,6 @@ export default function BuyEntriesPage() {
           )}
         </Paper>
 
-        {/* Results */}
         {daLoading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
             <CircularProgress />
@@ -948,7 +1137,7 @@ export default function BuyEntriesPage() {
         ) : filteredDaPlan.length === 0 ? (
           <Paper sx={{ p: 4, textAlign: 'center' }}>
             <Typography variant="body1" color="text.secondary">
-              No averaging plan. Click "Generate Averaging Candidates" to create a dynamic averaging plan.
+              {isDaGenerating ? 'Generating plan...' : 'No averaging plan. Click "Generate Candidates" to create a dynamic averaging plan.'}
             </Typography>
           </Paper>
         ) : (
@@ -968,17 +1157,13 @@ export default function BuyEntriesPage() {
         )}
       </TabPanel>
 
-      {/* Confirm Dialog */}
+      {/* Multi-Level Confirm Dialog */}
       <Dialog open={confirmDialogOpen} onClose={handleCloseConfirm} maxWidth="sm" fullWidth>
-        <DialogTitle>
-          Confirm Order Placement
-        </DialogTitle>
+        <DialogTitle>Confirm Order Placement</DialogTitle>
         <DialogContent>
           {orderSuccess ? (
             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, py: 2 }}>
-              <Alert severity="success">
-                Orders placed successfully!
-              </Alert>
+              <Alert severity="success">Orders placed successfully!</Alert>
               <Button
                 variant="contained"
                 endIcon={<ArrowForwardIcon />}
@@ -990,7 +1175,7 @@ export default function BuyEntriesPage() {
           ) : (
             <>
               <Typography variant="body1" sx={{ mb: 2 }}>
-                You are about to place <strong>{selectedRows.length}</strong> orders{riskEnabled ? ' (risk-adjusted)' : ''}:
+                You are about to place <strong>{mlSelectedRows.length}</strong> orders{mlRiskEnabled ? ' (risk-adjusted)' : ''}:
               </Typography>
               <TableContainer>
                 <Table size="small">
@@ -1002,8 +1187,8 @@ export default function BuyEntriesPage() {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {selectedRows.slice(0, 10).map((key) => {
-                      const currentPlanMap = new Map(currentPlan.map((row) => [getRowKey(row), row]));
+                    {mlSelectedRows.slice(0, 10).map((key) => {
+                      const currentPlanMap = new Map(currentMlPlan.map((row) => [getRowKey(row), row]));
                       const item = currentPlanMap.get(key as string);
                       if (!item) return null;
                       const price = Number(item.price) || 0;
@@ -1017,9 +1202,9 @@ export default function BuyEntriesPage() {
                         </TableRow>
                       );
                     })}
-                    {selectedRows.length > 10 && (
+                    {mlSelectedRows.length > 10 && (
                       <TableRow>
-                        <TableCell colSpan={3}>...and {selectedRows.length - 10} more</TableCell>
+                        <TableCell colSpan={3}>...and {mlSelectedRows.length - 10} more</TableCell>
                       </TableRow>
                     )}
                   </TableBody>
@@ -1035,14 +1220,10 @@ export default function BuyEntriesPage() {
         </DialogContent>
         <DialogActions>
           {orderSuccess ? (
-            <Button onClick={handleCloseConfirm} variant="contained" autoFocus>
-              Done
-            </Button>
+            <Button onClick={handleCloseConfirm} variant="contained" autoFocus>Done</Button>
           ) : (
             <>
-              <Button onClick={handleCloseConfirm} disabled={placingOrders}>
-                Cancel
-              </Button>
+              <Button onClick={handleCloseConfirm} disabled={placingOrders}>Cancel</Button>
               <Button 
                 onClick={handlePlaceOrders} 
                 variant="contained" 
@@ -1058,15 +1239,11 @@ export default function BuyEntriesPage() {
 
       {/* DA Confirm Dialog */}
       <Dialog open={daConfirmDialogOpen} onClose={handleDaCloseConfirm} maxWidth="sm" fullWidth>
-        <DialogTitle>
-          Confirm Dynamic Averaging Order Placement
-        </DialogTitle>
+        <DialogTitle>Confirm Dynamic Averaging Order Placement</DialogTitle>
         <DialogContent>
           {daOrderSuccess ? (
             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, py: 2 }}>
-              <Alert severity="success">
-                Orders placed successfully!
-              </Alert>
+              <Alert severity="success">Orders placed successfully!</Alert>
               <Button
                 variant="contained"
                 endIcon={<ArrowForwardIcon />}
@@ -1122,14 +1299,10 @@ export default function BuyEntriesPage() {
         </DialogContent>
         <DialogActions>
           {daOrderSuccess ? (
-            <Button onClick={handleDaCloseConfirm} variant="contained" autoFocus>
-              Done
-            </Button>
+            <Button onClick={handleDaCloseConfirm} variant="contained" autoFocus>Done</Button>
           ) : (
             <>
-              <Button onClick={handleDaCloseConfirm} disabled={daPlacingOrders}>
-                Cancel
-              </Button>
+              <Button onClick={handleDaCloseConfirm} disabled={daPlacingOrders}>Cancel</Button>
               <Button 
                 onClick={handleDaPlaceOrders} 
                 variant="contained" 
@@ -1143,19 +1316,35 @@ export default function BuyEntriesPage() {
         </DialogActions>
       </Dialog>
 
-      {/* Skipped Items Dialog for Multi-Level Entry */}
+      {/* Purge Dialog */}
+      <Dialog open={purgeDialogOpen} onClose={() => setPurgeDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Clear Plans</DialogTitle>
+        <DialogContent>
+          <Typography variant="body1">
+            Are you sure you want to clear all entry plans? This will remove both Multi-Level and Dynamic Averaging plans.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPurgeDialogOpen(false)} disabled={purging}>Cancel</Button>
+          <Button onClick={handlePurge} variant="contained" color="error" disabled={purging}>
+            {purging ? 'Clearing...' : 'Clear All Plans'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Skipped Items Dialog for Multi-Level */}
       <SkippedItemsDialog
-        open={skippedModalOpen}
-        onClose={() => setSkippedModalOpen(false)}
-        title="Skipped Items - Multi-Level Entry"
-        items={skipped}
+        open={mlSkippedModalOpen}
+        onClose={() => setMlSkippedModalOpen(false)}
+        title="Skipped Items - Multi Level Plan"
+        items={mlSkipped}
       />
 
       {/* Skipped Items Dialog for Dynamic Averaging */}
       <SkippedItemsDialog
         open={daSkippedModalOpen}
         onClose={() => setDaSkippedModalOpen(false)}
-        title="Skipped Items - Dynamic Averaging"
+        title="Skipped Items - Dynamic Averaging Plan"
         items={daSkipped}
       />
     </Box>

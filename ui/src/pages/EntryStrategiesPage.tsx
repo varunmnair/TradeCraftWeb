@@ -112,6 +112,7 @@ export default function EntryStrategiesPage() {
   };
 
   const handleRevisionApplied = () => {
+    setRevisionModalOpen(false);
     fetchStrategies();
   };
 

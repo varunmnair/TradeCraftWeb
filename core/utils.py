@@ -1,16 +1,18 @@
 import logging
 import math
-import json
+from typing import Any, Dict, List, Optional, cast
+
 import pandas as pd
-from typing import List, Dict, Any, Optional, cast
+
 
 # ──────────────── Logging Setup ──────────────── #
 def setup_logging(level=logging.INFO):
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
+
 
 # ──────────────── JSON Sanitization ──────────────── #
 def sanitize_for_json(data: Any) -> Any:
@@ -32,7 +34,9 @@ def sanitize_for_json(data: Any) -> Any:
     return data
 
 
-def dataframe_to_records(df: pd.DataFrame, normalize_columns: bool = True) -> List[Dict[str, Any]]:
+def dataframe_to_records(
+    df: pd.DataFrame, normalize_columns: bool = True
+) -> List[Dict[str, Any]]:
     if df is None or df.empty:
         return []
 
@@ -45,6 +49,7 @@ def dataframe_to_records(df: pd.DataFrame, normalize_columns: bool = True) -> Li
     if not isinstance(sanitized, list):
         raise TypeError("Expected list of records after sanitization")
     return cast(List[Dict[str, Any]], sanitized)
+
 
 # ──────────────── CLI Table Printer ──────────────── #
 def print_table(rows: List[Dict], columns: List[str], title=None, spacing=4):
@@ -67,13 +72,16 @@ def print_table(rows: List[Dict], columns: List[str], title=None, spacing=4):
     print("-" * total_width)
 
     for row in rows:
-        line = (" " * spacing).join(f"{str(row.get(col, '')):<{col_widths[col]}}" for col in columns)
+        line = (" " * spacing).join(
+            f"{str(row.get(col, '')):<{col_widths[col]}}" for col in columns
+        )
         print(line)
 
 
 # ──────────────── CSV Reader ──────────────── #
 
 import os
+
 
 def read_csv(file_path: str) -> List[Dict[str, Any]]:
     try:
@@ -85,6 +93,7 @@ def read_csv(file_path: str) -> List[Dict[str, Any]]:
         logging.error(f"Failed to read CSV: {e}")
         return []
 
+
 def write_csv(file_path: str, data: List[Dict]):
     try:
         df = pd.DataFrame.from_records(data)
@@ -92,7 +101,10 @@ def write_csv(file_path: str, data: List[Dict]):
     except Exception as e:
         logging.error(f"Failed to write to CSV: {e}")
 
-def get_trade_from_tradebook(trade_id: str, tradebook: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+
+def get_trade_from_tradebook(
+    trade_id: str, tradebook: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
     """
     Retrieves a trade from the tradebook by its ID.
 
@@ -108,6 +120,7 @@ def get_trade_from_tradebook(trade_id: str, tradebook: List[Dict[str, Any]]) -> 
             return trade
     return None
 
+
 def get_symbol_from_isin(isin: str) -> Optional[str]:
     """
     Retrieves the symbol for a given ISIN from the Name-symbol-mapping.csv file.
@@ -119,10 +132,12 @@ def get_symbol_from_isin(isin: str) -> Optional[str]:
         str: The symbol corresponding to the ISIN, or None if not found.
     """
     try:
-        mapping_file_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'Name-symbol-mapping.csv')
+        mapping_file_path = os.path.join(
+            os.path.dirname(__file__), "..", "data", "Name-symbol-mapping.csv"
+        )
         df = pd.read_csv(mapping_file_path)
         df.columns = [col.strip() for col in df.columns]
-        matches = df[df['ISIN NUMBER'] == isin]['SYMBOL'].astype(str).tolist()
+        matches = df[df["ISIN NUMBER"] == isin]["SYMBOL"].astype(str).tolist()
         if matches:
             return matches[0]
         return None

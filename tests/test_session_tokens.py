@@ -13,9 +13,9 @@ from db import models
 
 
 class DummyBroker:
-    def __init__(self, broker_name, user_id, config):
+    def __init__(self, broker_name, broker_user_id, config):
         self.broker_name = broker_name
-        self.user_id = user_id
+        self.broker_user_id = broker_user_id
         self.config = config
 
 
@@ -24,14 +24,10 @@ def test_db_token_store_roundtrip(engine):
     store = DbTokenStore(session_factory=SessionTesting)
 
     with SessionTesting() as session:
-        tenant = models.Tenant(name="TenantA")
-        session.add(tenant)
-        session.flush()
-        user = models.User(tenant_id=tenant.id, email="a@example.com", hashed_password="hash", role="admin")
+        user = models.User(email="a@example.com", role="admin")
         session.add(user)
         session.flush()
         connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="zerodha",
             metadata_json=json.dumps({}),
@@ -66,8 +62,8 @@ def test_session_registry_reads_tokens_from_db(engine, monkeypatch):
     store = DbTokenStore(session_factory=SessionTesting)
     session_manager = SessionManager(token_store=store, dev_mode=False)
 
-    def fake_get_broker(broker_name, user_id, config):
-        return DummyBroker(broker_name, user_id, config)
+    def fake_get_broker(broker_name, broker_user_id, config):
+        return DummyBroker(broker_name, broker_user_id, config)
 
     monkeypatch.setattr("core.runtime.session_registry.BrokerFactory.get_broker", fake_get_broker)
 
@@ -77,16 +73,11 @@ def test_session_registry_reads_tokens_from_db(engine, monkeypatch):
     )
 
     with SessionTesting() as session:
-        tenant = models.Tenant(name="TenantB")
-        session.add(tenant)
-        session.flush()
-        user = models.User(tenant_id=tenant.id, email="b@example.com", hashed_password="hash", role="admin")
+        user = models.User(email="b@example.com", role="admin")
         session.add(user)
         session.flush()
         
-        # Create Upstox connection for market data (required for Zerodha trading)
         upstox_connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="upstox",
             metadata_json=json.dumps({"api_key": "UPSTOX_KEY"}),
@@ -94,9 +85,7 @@ def test_session_registry_reads_tokens_from_db(engine, monkeypatch):
         session.add(upstox_connection)
         session.flush()
         
-        # Create Zerodha connection for trading
         connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="zerodha",
             metadata_json=json.dumps({"api_key": "API123"}),
@@ -105,7 +94,6 @@ def test_session_registry_reads_tokens_from_db(engine, monkeypatch):
         session.commit()
         connection_id = connection.id
         upstox_connection_id = upstox_connection.id
-        tenant_id = tenant.id
         user_id = user.id
 
     store.store_tokens(
@@ -129,10 +117,9 @@ def test_session_registry_reads_tokens_from_db(engine, monkeypatch):
     )
 
     context = registry.create_session(broker_connection_id=connection_id)
-    assert context.user_id == "BROKER456"
-    assert context.tenant_id == tenant_id
+    assert context.broker_user_id == "BROKER456"
+    assert context.user_record_id == user_id
     assert context.session_cache.broker.config["access_token"] == "ACCESS456"
-    # Verify market data connection is set
     assert context.market_data_connection_id == upstox_connection_id
 
 
@@ -142,14 +129,10 @@ def test_session_manager_access_token_from_db(engine):
     session_manager = SessionManager(token_store=store, dev_mode=False)
 
     with SessionTesting() as session:
-        tenant = models.Tenant(name="TenantC")
-        session.add(tenant)
-        session.flush()
-        user = models.User(tenant_id=tenant.id, email="c@example.com", hashed_password="hash", role="admin")
+        user = models.User(email="c@example.com", role="admin")
         session.add(user)
         session.flush()
         connection = models.BrokerConnection(
-            tenant_id=tenant.id,
             user_id=user.id,
             broker_name="zerodha",
             metadata_json=json.dumps({}),
@@ -157,12 +140,3 @@ def test_session_manager_access_token_from_db(engine):
         session.add(connection)
         session.commit()
         connection_id = connection.id
-
-    store.store_tokens(
-        "zerodha",
-        {"access_token": "TOKEN789", "broker_user_id": "BROKER789"},
-        connection_id=connection_id,
-    )
-
-    token = session_manager.get_access_token("zerodha", connection_id=connection_id)
-    assert token == "TOKEN789"

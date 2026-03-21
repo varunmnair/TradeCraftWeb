@@ -4,9 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from api.dependencies import get_db_session, get_session_service
-from api.schemas.session import SessionCreate, SessionResponse
+from api.schemas.session import SessionResponse
+from api.schemas.session import SessionStartRequest as SessionCreate
 from db import models
-
 
 router = APIRouter(prefix="/session", tags=["session"])
 
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/session", tags=["session"])
 def create_session(
     payload: SessionCreate,
     db: Session = Depends(get_db_session),
-    session_service = Depends(get_session_service),
+    session_service=Depends(get_session_service),
 ):
     connection = (
         db.query(models.BrokerConnection)

@@ -1,6 +1,6 @@
-
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
+
 
 @dataclass
 class Holding:
@@ -13,6 +13,7 @@ class Holding:
     pnl: float
     close_price: float
     product: str
+
 
 @dataclass
 class GTTOrder:
