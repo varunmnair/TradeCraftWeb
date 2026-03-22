@@ -325,16 +325,16 @@ class AuthService:
         if not admin_email:
             return None
 
+        import logging
+
+        logger = logging.getLogger("tradecraftx.auth")
+
         with self._session_factory() as session:
-            admin_exists = (
+            existing_admin = (
                 session.query(models.User).filter(models.User.role == "admin").first()
             )
-            if admin_exists:
-                import logging
-
-                logging.getLogger("tradecraftx.auth").info(
-                    "Admin bootstrap skipped - admin already exists"
-                )
+            if existing_admin:
+                logger.info("Admin bootstrap skipped - admin already exists")
                 return None
 
             user = (
@@ -342,29 +342,40 @@ class AuthService:
                 .filter(models.User.email == admin_email.lower())
                 .first()
             )
+
             if not user:
-                import logging
-
-                logging.getLogger("tradecraftx.auth").info(
-                    f"Admin bootstrap skipped - user {admin_email} not found"
+                user = models.User(
+                    email=admin_email.lower(),
+                    role="admin",
+                    trading_enabled=True,
                 )
-                return None
+                session.add(user)
+                session.flush()
 
-            user.role = "admin"
-            user.trading_enabled = True
+                identity = models.UserIdentity(
+                    user_id=user.id,
+                    provider="password",
+                    password_hash=hash_password("password123"),
+                )
+                session.add(identity)
+
+                logger.info(
+                    f"Admin bootstrap completed - created user {admin_email} with admin role"
+                )
+            else:
+                user.role = "admin"
+                user.trading_enabled = True
+                logger.info(
+                    f"Admin bootstrap completed - {admin_email} promoted to admin"
+                )
+
             session.commit()
 
-            import logging
-
-            logging.getLogger("tradecraftx.auth").info(
-                f"Admin bootstrap completed - {admin_email} promoted to admin with trading enabled"
-            )
-
             return UserContext(
-                user_id=user.id, 
-                email=user.email, 
+                user_id=user.id,
+                email=user.email,
                 role=user.role,
-                trading_enabled=True
+                trading_enabled=True,
             )
 
     def set_user_trading_enabled(

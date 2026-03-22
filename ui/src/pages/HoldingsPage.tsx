@@ -193,59 +193,30 @@ export default function HoldingsPage() {
         </Alert>
       )}
 
-      {/* Order History Section */}
-      <Paper sx={{ p: 2, mb: 2 }}>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
-          <Box>
-            <Typography variant="h6" gutterBottom>
-              Order History
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              {orderHistory?.available 
-                ? `${orderHistory.trade_count} trades for ${orderHistory.symbol_count} symbols`
-                : 'No order history loaded'}
-              {orderHistory?.fetched_at && (
-                <span> (fetched {new Date(orderHistory.fetched_at).toLocaleString()})</span>
-              )}
-              {orderHistory?.source && (
-                <Chip 
-                  label={orderHistory.source === 'upstox_api' ? 'Upstox API' : 'Zerodha CSV'} 
-                  size="small" 
-                  sx={{ ml: 1 }} 
-                />
-              )}
-            </Typography>
-          </Box>
-          
-          <Box sx={{ display: 'flex', gap: 1 }}>
-            {isUpstox ? (
-              <Button
-                variant="contained"
-                color="primary"
-                startIcon={fetchingOrderHistory ? <CircularProgress size={20} color="inherit" /> : <SyncIcon />}
-                onClick={handleFetchOrderHistory}
-                disabled={fetchingOrderHistory}
-              >
-                {fetchingOrderHistory ? 'Fetching...' : 'Fetch from Upstox'}
-              </Button>
-            ) : (
-              <Button
-                variant="contained"
-                component="label"
-                startIcon={uploadingOrderHistory ? <CircularProgress size={20} color="inherit" /> : <UploadIcon />}
-                disabled={uploadingOrderHistory}
-              >
-                {uploadingOrderHistory ? 'Uploading...' : 'Upload CSV'}
-                <input
-                  type="file"
-                  accept=".csv"
-                  hidden
-                  onChange={handleUploadOrderHistory}
-                />
-              </Button>
-            )}
+      {/* Order History Section - Only show when order history is available or being fetched */}
+      {orderHistory?.available && (
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
+            <Box>
+              <Typography variant="h6" gutterBottom>
+                Order History
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                {orderHistory.trade_count} trades for {orderHistory.symbol_count} symbols
+                {orderHistory.fetched_at && (
+                  <span> (fetched {new Date(orderHistory.fetched_at).toLocaleString()})</span>
+                )}
+                {orderHistory.source && (
+                  <Chip 
+                    label={orderHistory.source === 'upstox_api' ? 'Upstox API' : 'Zerodha CSV'} 
+                    size="small" 
+                    sx={{ ml: 1 }} 
+                  />
+                )}
+              </Typography>
+            </Box>
             
-            {orderHistory?.available && (
+            <Box sx={{ display: 'flex', gap: 1 }}>
               <Button
                 variant="outlined"
                 color="error"
@@ -254,14 +225,59 @@ export default function HoldingsPage() {
               >
                 Clear
               </Button>
-            )}
+            </Box>
           </Box>
-        </Box>
-        
-        {fetchingOrderHistory && (
-          <LinearProgress sx={{ mt: 2 }} />
-        )}
-      </Paper>
+        </Paper>
+      )}
+
+      {/* Fetch Order History - Show when order history is not available */}
+      {!orderHistory?.available && (
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
+            <Box>
+              <Typography variant="h6" gutterBottom>
+                Order History
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Load order history to see buy/sell details in holdings table.
+              </Typography>
+            </Box>
+            
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              {isUpstox ? (
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={fetchingOrderHistory ? <CircularProgress size={20} color="inherit" /> : <SyncIcon />}
+                  onClick={handleFetchOrderHistory}
+                  disabled={fetchingOrderHistory}
+                >
+                  {fetchingOrderHistory ? 'Fetching...' : 'Fetch Order History'}
+                </Button>
+              ) : (
+                <Button
+                  variant="contained"
+                  component="label"
+                  startIcon={uploadingOrderHistory ? <CircularProgress size={20} color="inherit" /> : <UploadIcon />}
+                  disabled={uploadingOrderHistory}
+                >
+                  {uploadingOrderHistory ? 'Uploading...' : 'Fetch Order History'}
+                  <input
+                    type="file"
+                    accept=".csv"
+                    hidden
+                    onChange={handleUploadOrderHistory}
+                  />
+                </Button>
+              )}
+            </Box>
+          </Box>
+          
+          {fetchingOrderHistory && (
+            <LinearProgress sx={{ mt: 2 }} />
+          )}
+        </Paper>
+      )}
 
       {/* Holdings Table */}
       {loading ? (
