@@ -1,0 +1,1 @@
+['id', 'user_id', 'session_id', 'broker', 'symbol', 'isin', 'trade_date', 'exchange', 'segment', 'series', 'side', 'quantity', 'price', 'trade_id', 'order_id', 'order_execution_time', 'source', 'created_at', 'captured_at']

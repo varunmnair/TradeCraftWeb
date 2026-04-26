@@ -15,7 +15,6 @@ from core.services.ai_service import AIService
 from core.services.auth_service import AuthService
 from core.services.broker_auth_service import BrokerAuthStateService
 from core.services.broker_connection_service import BrokerConnectionService
-from core.services.cmp_refresh_service import CMPRefreshService
 from core.services.entry_plan_service import EntryPlanService
 from core.services.gtt_service import GTTService
 from core.services.holdings_service import HoldingsService
@@ -24,6 +23,7 @@ from core.services.risk_service import RiskService
 from core.services.session_service import SessionService
 from core.services.symbol_catalog_service import SymbolCatalogService
 from core.services.trades_service import TradesService, get_trades_service
+from core.cmp import CMPManager
 from core.session_manager import SessionManager
 from db.database import SessionLocal, get_db
 
@@ -35,11 +35,11 @@ JOB_GTT_PREVIEW = "gtt_preview"
 JOB_GTT_APPLY = "gtt_apply"
 JOB_TRADES_SYNC = "trades_sync"
 JOB_SYMBOL_CATALOG_IMPORT = "symbol_catalog_import"
-JOB_CMP_REFRESH = "cmp_refresh"
 JOB_OHLCV_REFRESH = "ohlcv_refresh"
+JOB_OHLCV_REFRESH_SYMBOLS = "ohlcv_refresh_symbols"
 
 
-_session_manager = SessionManager(dev_mode=config.IS_DEV)
+_session_manager = SessionManager()
 _session_registry = SessionRegistry(session_manager=_session_manager)
 _session_service = SessionService(registry=_session_registry)
 _holdings_service = HoldingsService(_session_registry)
@@ -54,6 +54,13 @@ _confirm_store = get_confirm_store()
 _job_runner = JobRunner(SessionLocal, session_registry=_session_registry)
 _trades_service = get_trades_service()
 _symbol_catalog_service = SymbolCatalogService()
+_global_cmp_manager = CMPManager(
+    csv_path="data/Name-symbol-mapping.csv",
+    broker=None,
+    session_manager=None,
+    market_data_connection_id=None,
+    ttl=CMPManager.DEFAULT_TTL,
+)
 
 
 def _sync_upstox_trades_job(payload: dict) -> dict:
@@ -154,18 +161,19 @@ def _register_jobs() -> None:
         ),
     )
     _job_runner.register_handler(
-        JOB_CMP_REFRESH,
-        lambda payload: CMPRefreshService().refresh(
-            session_manager=_session_manager,
-            connection_id=payload["connection_id"],
+        JOB_OHLCV_REFRESH,
+        lambda payload: OhlcvRefreshService().refresh_for_symbols(
+            symbols=payload.get("symbols", []),
+            days=payload.get("days"),
+            force_refresh=payload.get("force_refresh", False),
         ),
     )
     _job_runner.register_handler(
-        JOB_OHLCV_REFRESH,
-        lambda payload: OhlcvRefreshService().refresh(
-            session_manager=_session_manager,
-            connection_id=payload["connection_id"],
-            days=payload.get("days", 200),
+        JOB_OHLCV_REFRESH_SYMBOLS,
+        lambda payload: OhlcvRefreshService().refresh_for_symbols(
+            symbols=payload.get("symbols", []),
+            days=payload.get("days"),
+            force_refresh=payload.get("force_refresh", False),
         ),
     )
 
@@ -231,6 +239,10 @@ def get_trades_service() -> TradesService:
 
 def get_symbol_catalog_service() -> SymbolCatalogService:
     return _symbol_catalog_service
+
+
+def get_global_cmp_manager() -> CMPManager:
+    return _global_cmp_manager
 
 
 def get_db_session():

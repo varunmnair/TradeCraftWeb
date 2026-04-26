@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
@@ -97,13 +98,11 @@ class MarketDataRefreshService:
         self._load_isin_cache()
         LOGGER.info(f"ISIN cache loaded: {len(self._isin_cache)} entries")
 
-        self._token = session_manager.get_access_token(
-            "upstox", connection_id=connection_id
-        )
+        self._token = os.environ.get("UPSTOX_ANALYTICS_TOKEN")
         if not self._token:
-            LOGGER.error("UPSTOX_NOT_CONNECTED: No access token found")
-            return {"error": "UPSTOX_NOT_CONNECTED"}
-        LOGGER.info(f"Got access token (length: {len(self._token)})")
+            LOGGER.error("UPSTOX_ANALYTICS_TOKEN not configured")
+            return {"error": "UPSTOX_ANALYTICS_TOKEN_NOT_CONFIGURED"}
+        LOGGER.info(f"Using analytics token (length: {len(self._token)})")
 
         symbols = self._symbol_catalog_service.get_all_symbols()
         if not symbols:
@@ -334,7 +333,7 @@ class MarketDataRefreshService:
         if not instrument_keys:
             return
 
-        url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={','.join(instrument_keys)}"
+        url = f"https://api.upstox.com/v3/market-quote/ltp?instrument_key={','.join(instrument_keys)}"
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self._token}",

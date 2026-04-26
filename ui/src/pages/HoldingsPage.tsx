@@ -8,71 +8,119 @@ import {
   Button,
   Chip,
   LinearProgress,
+  TextField,
+  IconButton,
+  Tooltip,
+  TooltipProps,
 } from '@mui/material';
-import { DataGrid, GridColDef, GridSortModel } from '@mui/x-data-grid';
+import { DataGrid, GridColDef, GridSortModel, GridRenderCellParams } from '@mui/x-data-grid';
 import { 
   Refresh as RefreshIcon,
   CloudSync as SyncIcon,
   Upload as UploadIcon,
-  Delete as DeleteIcon,
+  InfoOutlined,
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
-import type { HoldingsRow, OrderHistoryStatus } from '../types';
+import type { HoldingsRow, OrderHistoryStatus, AgeReason, Trade } from '../types';
 
-const HOLDINGS_COLUMNS: GridColDef[] = [
+const AGE_REASON_MESSAGES: Record<Exclude<AgeReason, null>, string> = {
+  order_history_not_fetched: "Order history not fetched. Click 'Get Order History' to calculate age.",
+  no_trades_for_symbol: "No trade history found for this symbol in the fetched period.",
+  no_buy_trades: "Only sell trades found. Cannot calculate holding age.",
+  buy_trades_beyond_400_days: "Oldest buy trade is beyond 400 days. Age capped at 400 days.",
+};
+
+const getHoldingsColumns = (): GridColDef[] => [
   { field: 'symbol', headerName: 'Symbol', width: 120, sortable: true },
   { field: 'exchange', headerName: 'Exchange', width: 80, sortable: true },
   { field: 'quantity', headerName: 'Qty', type: 'number', width: 80, sortable: true },
   { field: 'average_price', headerName: 'Avg Price', type: 'number', width: 100, sortable: true },
   { field: 'last_price', headerName: 'CMP', type: 'number', width: 100, sortable: true },
   { field: 'invested', headerName: 'Invested', type: 'number', width: 110, sortable: true },
-  { field: 'pnl', headerName: 'P&L', type: 'number', width: 100, sortable: true },
-  { field: 'pnl_pct', headerName: 'P&L %', type: 'number', width: 80, sortable: true },
-  { field: 'avg_buy_price', headerName: 'Avg Buy', type: 'number', width: 100, sortable: true },
-  { field: 'total_buy_qty', headerName: 'Buy Qty', type: 'number', width: 90, sortable: true },
-  { field: 'buy_value', headerName: 'Buy Value', type: 'number', width: 110, sortable: true },
-  { field: 'avg_sell_price', headerName: 'Avg Sell', type: 'number', width: 100, sortable: true },
-  { field: 'total_sell_qty', headerName: 'Sell Qty', type: 'number', width: 90, sortable: true },
-  { field: 'sell_value', headerName: 'Sell Value', type: 'number', width: 110, sortable: true },
-  { field: 'net_value', headerName: 'Net Value', type: 'number', width: 110, sortable: true },
-  { field: 'first_buy_date', headerName: 'First Buy', width: 110, sortable: true },
-  { field: 'last_buy_date', headerName: 'Last Buy', width: 110, sortable: true },
-  { field: 'trend', headerName: 'Trend', width: 80, sortable: true },
-  { field: 'trend_days', headerName: 'Trend Days', type: 'number', width: 100, sortable: true },
-  { field: 'trend_roi', headerName: 'Trend ROI', type: 'number', width: 100, sortable: true },
+  { field: 'profit', headerName: 'Profit', type: 'number', width: 100, sortable: true },
+  { field: 'profit_pct', headerName: 'Profit %', type: 'number', width: 90, sortable: true },
+  { field: 'quality', headerName: 'Quality', width: 100, sortable: true },
+  {
+    field: 'age',
+    headerName: 'Age',
+    type: 'number',
+    width: 100,
+    sortable: true,
+    renderCell: (params: GridRenderCellParams<HoldingsRow>) => {
+      const { row } = params;
+      if (row.age === null && row.age_reason) {
+        return (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, width: '100%' }}>
+            <span style={{ color: '#999' }}>-</span>
+            <Tooltip title={AGE_REASON_MESSAGES[row.age_reason]} arrow>
+              <InfoOutlined sx={{ fontSize: 16, color: '#999', cursor: 'help' }} />
+            </Tooltip>
+          </Box>
+        );
+      }
+      return params.value ?? '-';
+    },
+  },
+  { field: 'roi_per_day', headerName: 'ROI/Day', type: 'number', width: 100, sortable: true },
+  { field: 'profit_per_day', headerName: 'Profit/Day', type: 'number', width: 110, sortable: true },
+  { field: 'weighted_roi', headerName: 'W ROI', type: 'number', width: 100, sortable: true },
+  { field: 'trend', headerName: 'Trend', width: 100, sortable: true },
 ];
 
 export default function HoldingsPage() {
   const { sessionId, sessionInfo } = useSession();
   
   const [holdings, setHoldings] = useState<HoldingsRow[]>([]);
-  const [columns, setColumns] = useState<GridColDef[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [orderHistory, setOrderHistory] = useState<OrderHistoryStatus | null>(null);
   const [fetchingOrderHistory, setFetchingOrderHistory] = useState(false);
   const [uploadingOrderHistory, setUploadingOrderHistory] = useState(false);
+  const [orderHistoryDays, setOrderHistoryDays] = useState<number>(100);
   const [sortModel, setSortModel] = useState<GridSortModel>([
-    { field: 'symbol', sort: 'asc' },
+    { field: 'weighted_roi', sort: 'desc' },
   ]);
+  const [symbolSearch, setSymbolSearch] = useState('');
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [searchingTrades, setSearchingTrades] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  const handleSearchTrades = useCallback(async () => {
+    if (!sessionId || !symbolSearch.trim()) return;
+    setSearchingTrades(true);
+    setSearchError(null);
+    try {
+      const result = await api.getTrades(sessionId, symbolSearch.trim());
+      setTrades(result.trades || []);
+    } catch (err) {
+      setTrades([]);
+      setSearchError(err instanceof Error ? err.message : 'Failed to search trades');
+    } finally {
+      setSearchingTrades(false);
+    }
+  }, [sessionId, symbolSearch]);
 
   const fetchHoldings = useCallback(async () => {
     if (!sessionId || loading) return;
     setLoading(true);
     try {
-      const data = await api.getHoldings(sessionId);
-      const itemsWithId = data.holdings.map((item, index) => ({
+      const data = await api.getAnalyzedHoldings(sessionId);
+      const itemsWithId = data.results.map((item: any, index: number) => ({
         id: item.symbol || index,
         ...item,
       }));
       setHoldings(itemsWithId);
-      setOrderHistory(data.order_history);
       setLastUpdated(new Date());
       setError('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch holdings');
+      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch holdings';
+      if (errorMsg.includes('Session expired') || errorMsg.includes('Session not found')) {
+        setError('Session expired. Please restart your session from the Sessions page.');
+      } else {
+        setError(errorMsg);
+      }
     } finally {
       setLoading(false);
     }
@@ -81,6 +129,8 @@ export default function HoldingsPage() {
   useEffect(() => {
     if (sessionId) {
       fetchHoldings();
+      // Also fetch order history status
+      api.getOrderHistoryStatus(sessionId).then(setOrderHistory).catch(() => setOrderHistory(null));
     }
   }, [sessionId, fetchHoldings]);
 
@@ -93,7 +143,7 @@ export default function HoldingsPage() {
     setFetchingOrderHistory(true);
     setError('');
     try {
-      const result = await api.fetchOrderHistory(sessionId, 400);
+      const result = await api.fetchOrderHistory(sessionId, orderHistoryDays);
       setOrderHistory(result);
       fetchHoldings();
     } catch (err) {
@@ -121,23 +171,6 @@ export default function HoldingsPage() {
     event.target.value = '';
   };
 
-  const handleClearOrderHistory = async () => {
-    if (!sessionId) return;
-    try {
-      await api.clearOrderHistory(sessionId);
-      setOrderHistory({
-        available: false,
-        trade_count: 0,
-        symbol_count: 0,
-        fetched_at: null,
-        source: null,
-      });
-      fetchHoldings();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to clear order history');
-    }
-  };
-
   const formatNumber = (value: number | null, decimals: number = 2) => {
     if (value === null || value === undefined) return '-';
     return value.toFixed(decimals);
@@ -146,6 +179,13 @@ export default function HoldingsPage() {
   const formatCurrency = (value: number | null) => {
     if (value === null || value === undefined) return '-';
     return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  const formatDateRange = (from: string, to: string) => {
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    const format = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    return `${format(fromDate)} - ${format(toDate)}`;
   };
 
   const broker = sessionInfo?.broker || 'upstox';
@@ -167,23 +207,27 @@ export default function HoldingsPage() {
   return (
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-        <Typography variant="h4">
-          Holdings
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Typography variant="h4">
+            Holdings
+          </Typography>
+          <Tooltip title="Refresh holdings">
+            <IconButton 
+              onClick={handleRefresh} 
+              disabled={loading}
+              size="small"
+              sx={{ ml: 1 }}
+            >
+              {loading ? <CircularProgress size={20} /> : <RefreshIcon />}
+            </IconButton>
+          </Tooltip>
+        </Box>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
           {lastUpdated && (
             <Typography variant="body2" color="text.secondary">
               Last updated: {lastUpdated.toLocaleTimeString()}
             </Typography>
           )}
-          <Button
-            variant="outlined"
-            startIcon={loading ? <CircularProgress size={20} /> : <RefreshIcon />}
-            onClick={handleRefresh}
-            disabled={loading}
-          >
-            Refresh
-          </Button>
         </Box>
       </Box>
 
@@ -193,91 +237,162 @@ export default function HoldingsPage() {
         </Alert>
       )}
 
-      {/* Order History Section - Only show when order history is available or being fetched */}
-      {orderHistory?.available && (
-        <Paper sx={{ p: 2, mb: 2 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
-            <Box>
-              <Typography variant="h6" gutterBottom>
-                Order History
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                {orderHistory.trade_count} trades for {orderHistory.symbol_count} symbols
-                {orderHistory.fetched_at && (
-                  <span> (fetched {new Date(orderHistory.fetched_at).toLocaleString()})</span>
+      {/* Consolidated Order History Section */}
+      <Paper sx={{ p: 1.5, mb: 2 }}>
+        {/* Header row with controls */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+          <Typography variant="body2" color="text.secondary">
+            Order History:
+            {orderHistory?.available ? (
+              <>
+                {orderHistory.trade_count} trades • {orderHistory.symbol_count} symbols
+                {orderHistory.date_from && orderHistory.date_to && (
+                  <> • {formatDateRange(orderHistory.date_from, orderHistory.date_to)}</>
                 )}
-                {orderHistory.source && (
-                  <Chip 
-                    label={orderHistory.source === 'upstox_api' ? 'Upstox API' : 'Zerodha CSV'} 
-                    size="small" 
-                    sx={{ ml: 1 }} 
-                  />
-                )}
+              </>
+            ) : (
+              <span>Not fetched</span>
+            )}
+          </Typography>
+
+          {orderHistory?.source && (
+            <Chip
+              label={orderHistory.source === 'upstox_api' ? 'Upstox' : 'Zerodha CSV'}
+              size="small"
+              sx={{ height: 20, fontSize: '0.7rem' }}
+            />
+          )}
+
+          {orderHistory?.fetched_at && (
+            <Typography variant="caption" color="text.secondary">
+              fetched {new Date(orderHistory.fetched_at).toLocaleDateString()}
+            </Typography>
+          )}
+
+          {/* Spacer */}
+          <Box sx={{ flex: 1 }} />
+
+          {/* Days input */}
+          <TextField
+            type="number"
+            size="small"
+            value={orderHistoryDays}
+            onChange={(e) => setOrderHistoryDays(Math.max(1, parseInt(e.target.value) || 100))}
+            sx={{ width: 70 }}
+            inputProps={{ min: 1, style: { padding: '4px 8px' } }}
+          />
+
+          {/* Fetch button */}
+          {isUpstox ? (
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={fetchingOrderHistory ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+              onClick={handleFetchOrderHistory}
+              disabled={fetchingOrderHistory}
+            >
+              {fetchingOrderHistory ? 'Fetching...' : 'Fetch'}
+            </Button>
+          ) : (
+            <Button
+              variant="contained"
+              component="label"
+              size="small"
+              startIcon={uploadingOrderHistory ? <CircularProgress size={16} color="inherit" /> : <UploadIcon />}
+              disabled={uploadingOrderHistory}
+            >
+              {uploadingOrderHistory ? 'Uploading...' : 'Upload'}
+              <input
+                type="file"
+                accept=".csv"
+                hidden
+                onChange={handleUploadOrderHistory}
+              />
+            </Button>
+          )}
+
+          {/* Search */}
+          <TextField
+            size="small"
+            placeholder="Symbol"
+            value={symbolSearch}
+            onChange={(e) => setSymbolSearch(e.target.value.toUpperCase())}
+            onKeyPress={(e) => e.key === 'Enter' && handleSearchTrades()}
+            sx={{ width: 120 }}
+            inputProps={{ style: { padding: '4px 8px' } }}
+          />
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleSearchTrades}
+            disabled={searchingTrades || !symbolSearch.trim()}
+          >
+            {searchingTrades ? '...' : 'Search'}
+          </Button>
+        </Box>
+
+        {/* Loading bar */}
+        {fetchingOrderHistory && <LinearProgress sx={{ mt: 1 }} />}
+
+        {/* Error message */}
+        {searchError && (
+          <Alert severity="error" sx={{ mt: 1 }} onClose={() => setSearchError(null)}>
+            {searchError}
+          </Alert>
+        )}
+
+        {/* Search results - expanded section */}
+        {(trades.length > 0 || (symbolSearch && trades.length === 0 && !searchingTrades)) && (
+          <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid #eee' }}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+              <Typography variant="body2" color="text.secondary">
+                {trades.length > 0
+                  ? `${trades.length} trade${trades.length !== 1 ? 's' : ''} for ${symbolSearch}`
+                  : `No trades for ${symbolSearch}${orderHistory?.available ? ' in fetched history' : ''}`
+                }
               </Typography>
-            </Box>
-            
-            <Box sx={{ display: 'flex', gap: 1 }}>
               <Button
-                variant="outlined"
-                color="error"
-                startIcon={<DeleteIcon />}
-                onClick={handleClearOrderHistory}
+                size="small"
+                onClick={() => {
+                  setSymbolSearch('');
+                  setTrades([]);
+                }}
+                sx={{ minWidth: 'auto', p: 0.5 }}
               >
-                Clear
+                ✕
               </Button>
             </Box>
+            {trades.length > 0 && (
+              <Box sx={{ maxHeight: 200, overflow: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f5f5f5' }}>
+                      <th style={{ padding: '6px', textAlign: 'left', borderBottom: '1px solid #ddd' }}>Date</th>
+                      <th style={{ padding: '6px', textAlign: 'left', borderBottom: '1px solid #ddd' }}>Side</th>
+                      <th style={{ padding: '6px', textAlign: 'right', borderBottom: '1px solid #ddd' }}>Qty</th>
+                      <th style={{ padding: '6px', textAlign: 'right', borderBottom: '1px solid #ddd' }}>Price</th>
+                      <th style={{ padding: '6px', textAlign: 'right', borderBottom: '1px solid #ddd' }}>Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trades.map((trade, index) => (
+                      <tr key={index} style={{ borderBottom: '1px solid #eee' }}>
+                        <td style={{ padding: '6px' }}>{trade.trade_date || '-'}</td>
+                        <td style={{ padding: '6px', color: trade.side === 'BUY' ? 'green' : 'red' }}>
+                          {trade.side}
+                        </td>
+                        <td style={{ padding: '6px', textAlign: 'right' }}>{trade.quantity}</td>
+                        <td style={{ padding: '6px', textAlign: 'right' }}>₹{trade.price.toFixed(2)}</td>
+                        <td style={{ padding: '6px', textAlign: 'right' }}>₹{(trade.quantity * trade.price).toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
+            )}
           </Box>
-        </Paper>
-      )}
-
-      {/* Fetch Order History - Show when order history is not available */}
-      {!orderHistory?.available && (
-        <Paper sx={{ p: 2, mb: 2 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
-            <Box>
-              <Typography variant="h6" gutterBottom>
-                Order History
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Load order history to see buy/sell details in holdings table.
-              </Typography>
-            </Box>
-            
-            <Box sx={{ display: 'flex', gap: 1 }}>
-              {isUpstox ? (
-                <Button
-                  variant="contained"
-                  color="primary"
-                  startIcon={fetchingOrderHistory ? <CircularProgress size={20} color="inherit" /> : <SyncIcon />}
-                  onClick={handleFetchOrderHistory}
-                  disabled={fetchingOrderHistory}
-                >
-                  {fetchingOrderHistory ? 'Fetching...' : 'Fetch Order History'}
-                </Button>
-              ) : (
-                <Button
-                  variant="contained"
-                  component="label"
-                  startIcon={uploadingOrderHistory ? <CircularProgress size={20} color="inherit" /> : <UploadIcon />}
-                  disabled={uploadingOrderHistory}
-                >
-                  {uploadingOrderHistory ? 'Uploading...' : 'Fetch Order History'}
-                  <input
-                    type="file"
-                    accept=".csv"
-                    hidden
-                    onChange={handleUploadOrderHistory}
-                  />
-                </Button>
-              )}
-            </Box>
-          </Box>
-          
-          {fetchingOrderHistory && (
-            <LinearProgress sx={{ mt: 2 }} />
-          )}
-        </Paper>
-      )}
+        )}
+      </Paper>
 
       {/* Holdings Table */}
       {loading ? (
@@ -294,7 +409,7 @@ export default function HoldingsPage() {
         <Paper sx={{ height: 600, width: '100%' }}>
           <DataGrid
             rows={holdings}
-            columns={columns.length > 0 ? columns : HOLDINGS_COLUMNS}
+            columns={getHoldingsColumns()}
             sortModel={sortModel}
             onSortModelChange={setSortModel}
             initialState={{

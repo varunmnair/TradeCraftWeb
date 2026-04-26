@@ -343,11 +343,6 @@ def analyze_holdings(
             session.broker, session.get_cmp_manager(), parsed_filters, sort_by=sort_by
         )
 
-        for row in results:
-            trend = row.get("Trend", "-")
-            trend_days = row.get("Trend Days", "")
-            row["Trend"] = f"{trend}({trend_days})" if trend_days != "" else trend
-
         return {"results": results}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})

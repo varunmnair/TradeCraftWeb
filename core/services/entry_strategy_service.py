@@ -96,7 +96,55 @@ class EntryStrategyService:
         return result
 
     def get_cmp_for_symbol(self, symbol: str, user_id: int) -> dict[str, Any] | None:
+        from api.dependencies import get_global_cmp_manager
+
+        symbol_clean = str(symbol).replace("-BE", "").strip().upper()
+        cmp_manager = get_global_cmp_manager()
+        price = cmp_manager.get_cmp("NSE", symbol_clean)
+        if price is not None:
+            return {"symbol": symbol_clean, "last_price": price}
         return None
+
+    def get_symbols_for_user(
+        self, user_id: int, broker: str = None, broker_user_id: str = None
+    ) -> list[str]:
+        query = self.db.query(EntryStrategy.symbol).filter(
+            EntryStrategy.user_id == user_id,
+        ).distinct()
+
+        if broker:
+            query = query.filter(EntryStrategy.broker == broker)
+        if broker_user_id:
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    EntryStrategy.broker_user_id == broker_user_id,
+                    EntryStrategy.broker_user_id.is_(None),
+                )
+            )
+
+        return [str(s[0]).upper() for s in query.all() if s[0]]
+
+    def trigger_ohlcv_refresh_for_user(
+        self, user_id: int, broker: str = None, broker_user_id: str = None
+    ) -> None:
+        symbols = self.get_symbols_for_user(user_id, broker, broker_user_id)
+        if not symbols:
+            return
+
+        from api.dependencies import get_job_runner, JOB_OHLCV_REFRESH_SYMBOLS
+
+        try:
+            job_runner = get_job_runner()
+            session_id = f"entry-strategy-{user_id}"
+            job_runner.start_job(
+                session_id=session_id,
+                job_type=JOB_OHLCV_REFRESH_SYMBOLS,
+                payload={"symbols": symbols},
+            )
+            logger.info(f"Triggered OHLCV refresh for {len(symbols)} entry strategy symbols")
+        except Exception as e:
+            logger.warning(f"Failed to trigger OHLCV refresh for entry strategies: {e}")
 
 
 _entry_strategy_service: EntryStrategyService | None = None

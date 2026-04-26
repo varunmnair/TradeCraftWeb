@@ -448,25 +448,18 @@ def analyze_holdings(
             )
             logging.debug(f"Received {len(results)} results from analyze_holdings.")
 
-            # 🔧 Format Trend field as 'UP(5)'
-            for row in results:
-                trend = row.get("Trend", "-")
-                trend_days = row.get("Trend Days", "")
-                row["Trend"] = f"{trend}({trend_days})" if trend_days != "" else trend
-
             print_table(
                 results,
                 [
-                    "Symbol",
-                    "Invested",
-                    "P&L",
-                    "Yld/Day",
-                    "Age",
-                    "P&L%",
-                    "ROI/Day",
-                    "W ROI",
-                    "Trend",
-                    "Quality",
+                    "symbol",
+                    "invested",
+                    "profit",
+                    "profit_pct",
+                    "age",
+                    "roi_per_day",
+                    "profit_per_day",
+                    "weighted_roi",
+                    "trend",
                 ],
                 title="📊 Holdings ROI",
                 spacing=6,
@@ -737,3 +730,71 @@ def revise_entry_levels():
     except Exception as e:
         print(f"❌ An error occurred during the revision process: {e}")
         traceback.print_exc()
+
+
+@app.command()
+def clear_order_history(
+    broker: str = typer.Option(..., help="Broker name (e.g., upstox, zerodha)"),
+    symbol: str = typer.Option(None, help="Filter by symbol"),
+):
+    """Clear order history from database."""
+    from db.database import SessionLocal
+    from db.models import UserTrade
+
+    db = SessionLocal()
+    try:
+        query = db.query(UserTrade).filter(UserTrade.broker == broker)
+        if symbol:
+            query = query.filter(UserTrade.symbol == symbol.upper())
+
+        count = query.delete()
+        db.commit()
+        print(f"✅ Cleared {count} trades from {broker}" + (f" for {symbol}" if symbol else ""))
+
+    finally:
+        db.close()
+
+
+@app.command()
+def show_order_history(
+    broker: str = typer.Option(..., help="Broker name (e.g., upstox, zerodha)"),
+    limit: int = typer.Option(50, help="Number of trades to show"),
+    symbol: str = typer.Option(None, help="Filter by symbol"),
+    export: bool = typer.Option(False, help="Export to CSV file"),
+):
+    """Query and display order history from database."""
+    import csv
+    from db.database import SessionLocal
+    from db.models import UserTrade
+
+    db = SessionLocal()
+    try:
+        query = db.query(UserTrade).filter(UserTrade.broker == broker)
+
+        if symbol:
+            query = query.filter(UserTrade.symbol == symbol.upper())
+
+        trades = query.order_by(UserTrade.trade_date.desc()).limit(limit).all()
+
+        if export:
+            filename = f"data/order_history_{broker}_{symbol or 'all'}.csv"
+            with open(filename, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "trade_date", "symbol", "side", "quantity", "price",
+                    "trade_id", "order_id", "exchange", "segment", "source", "captured_at"
+                ])
+                for t in trades:
+                    writer.writerow([
+                        t.trade_date, t.symbol, t.side, t.quantity, t.price,
+                        t.trade_id, t.order_id, t.exchange, t.segment, t.source, t.captured_at
+                    ])
+            print(f"✅ Exported {len(trades)} trades to {filename}")
+        else:
+            print(f"\n📊 Order History ({broker}) - {len(trades)} trades")
+            print("-" * 90)
+            for t in trades:
+                print(f"  {t.trade_date} | {t.symbol:10} | {t.side:4} | {t.quantity:4} @ {t.price:8} | ID:{t.trade_id}")
+
+    finally:
+        db.close()

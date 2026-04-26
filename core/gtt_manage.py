@@ -118,16 +118,8 @@ class GTTManager:
                     )
                     continue
 
-                ltp = None
-                cmp_available = True
-                try:
-                    ltp = self.cmp_manager.get_cmp(exchange, symbol)
-                except RuntimeError as e:
-                    logging.warning(f"  -> CMP not available for {symbol}: {e}")
-                    cmp_available = False
-                except Exception as e:
-                    logging.warning(f"  -> Error fetching CMP for {symbol}: {e}")
-                    cmp_available = False
+                ltp = self.cmp_manager.get_cmp(exchange, symbol)
+                cmp_available = ltp is not None
 
                 logging.debug(f"  -> CMP for {symbol}: {ltp}")
 

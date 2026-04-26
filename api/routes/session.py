@@ -55,6 +55,31 @@ def start_session(
                 http_status=403,
             )
 
+        # Validate token is valid (not expired or missing)
+        from datetime import datetime, timezone
+        sm = get_session_manager()
+        bundle = sm.get_token_bundle(connection.broker_name, connection_id=connection.id)
+        
+        if not bundle or not bundle.access_token:
+            raise ServiceError(
+                "No access token found. Please reconnect the broker.",
+                error_code="invalid_token",
+                http_status=401,
+            )
+        
+        if bundle.expires_at:
+            expires_dt = bundle.expires_at
+            if isinstance(expires_dt, str):
+                expires_dt = datetime.fromisoformat(expires_dt)
+            if expires_dt.tzinfo is None:
+                expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) >= expires_dt:
+                raise ServiceError(
+                    "Access token has expired. Please reconnect the broker.",
+                    error_code="invalid_token",
+                    http_status=401,
+                )
+
         # Market data is optional - try to auto-find Upstox if available
         market_data_connection_id = None
         if connection.broker_name == "zerodha":
@@ -66,10 +91,8 @@ def start_session(
                 )
                 for conn in connections:
                     if conn.broker_name == "upstox":
-                        from api.dependencies import get_session_manager
-
-                        sm = get_session_manager()
-                        if sm.get_token_bundle("upstox", connection_id=conn.id):
+                        bundle = sm.get_token_bundle("upstox", connection_id=conn.id)
+                        if bundle and bundle.access_token:
                             market_data_connection_id = conn.id
                             break
                 # Market data is optional - session can proceed without it
@@ -262,3 +285,24 @@ def refresh_session(
         raise ServiceError(
             str(exc), error_code="session_not_found", http_status=404
         ) from exc
+
+
+@router.delete("/{session_id}")
+def close_session(
+    session_id: str,
+    current_user: UserContext = Depends(get_current_user),
+    registry: SessionRegistry = Depends(get_session_registry),
+):
+    """
+    Close a session and purge all session-scoped data.
+    This triggers the eviction process which clears holdings, order history,
+    entry strategies, and entry plans from the database.
+    """
+    context = registry.require_access(session_id, current_user)
+    if not context:
+        raise ServiceError(
+            "Session not found", error_code="session_not_found", http_status=404
+        )
+    
+    registry.evict(session_id)
+    return {"session_id": session_id, "closed": True}

@@ -48,7 +48,6 @@ export default function SessionsPage() {
   // Form state
   const [selectedBrokerName, setSelectedBrokerName] = useState<string>('');
   const [selectedTradingConnectionId, setSelectedTradingConnectionId] = useState<number | ''>('');
-  const [selectedMarketDataConnectionId, setSelectedMarketDataConnectionId] = useState<number | ''>('');
   const [warmStart, setWarmStart] = useState(true);
   
   const { selectedConnectionId, setSelectedConnectionId, sessionId, setSessionId, setSessionInfo } = useSession();
@@ -137,53 +136,28 @@ export default function SessionsPage() {
     fetchData();
   }, []);
 
-  // Get available connections for each broker
+  // Get available connections for each broker (only valid/connected ones)
   const getAvailableConnections = useCallback((brokerName: string): BrokerConnectionResponse[] => {
     return connections.filter(conn => {
       if (conn.broker_name !== brokerName) return false;
       const statusMap = brokerName === 'upstox' ? connectionStatuses.upstox : connectionStatuses.zerodha;
       const status = statusMap.get(conn.id);
-      return status?.connected ?? false;
+      return status?.connected === true && status?.token_status === 'valid';
     });
   }, [connections, connectionStatuses]);
 
-  const getActiveUpstoxConnections = useCallback((): { id: number; userId: string }[] => {
-    return connections
-      .filter(conn => conn.broker_name === 'upstox')
-      .filter(conn => connectionStatuses.upstox.get(conn.id)?.connected)
-      .map(conn => ({
-        id: conn.id,
-        userId: connectionStatuses.upstox.get(conn.id)?.broker_user_id || `ID: ${conn.id}`
-      }));
-  }, [connections, connectionStatuses]);
-
-  // Auto-select market data when trading broker changes
-  useEffect(() => {
-    if (selectedBrokerName === 'zerodha') {
-      const upstoxConns = getActiveUpstoxConnections();
-      if (upstoxConns.length === 1) {
-        setSelectedMarketDataConnectionId(upstoxConns[0].id);
-      } else if (upstoxConns.length > 1 && selectedMarketDataConnectionId === '') {
-        // Multiple upstox - keep empty for user to select
-      }
-    } else if (selectedBrokerName === 'upstox') {
-      // For Upstox, market data = trading
-      const upstoxConns = getAvailableConnections('upstox');
-      if (upstoxConns.length === 1) {
-        setSelectedMarketDataConnectionId(upstoxConns[0].id);
-      }
+  const handleBrokerConnectionChange = (value: number) => {
+    setSelectedTradingConnectionId(value);
+    // Auto-set broker name based on selected connection
+    const conn = connections.find(c => c.id === value);
+    if (conn) {
+      setSelectedBrokerName(conn.broker_name);
     }
-  }, [selectedBrokerName]);
-
-  const handleBrokerNameChange = (value: string) => {
-    setSelectedBrokerName(value);
-    setSelectedTradingConnectionId('');
-    setSelectedMarketDataConnectionId('');
   };
 
   const handleStartSession = async () => {
-    if (!selectedTradingConnectionId || !selectedBrokerName) {
-      setError('Please select a broker and connection');
+    if (!selectedTradingConnectionId) {
+      setError('Please select a trading broker');
       return;
     }
     
@@ -192,19 +166,11 @@ export default function SessionsPage() {
     try {
       const sessionRequest: {
         broker_connection_id: number;
-        broker_name: string;
         warm_start: boolean;
-        market_data_connection_id?: number;
       } = {
         broker_connection_id: selectedTradingConnectionId as number,
-        broker_name: selectedBrokerName,
         warm_start: warmStart,
       };
-      
-      // For Zerodha, add market_data_connection_id (Upstox)
-      if (selectedBrokerName === 'zerodha' && selectedMarketDataConnectionId) {
-        sessionRequest.market_data_connection_id = selectedMarketDataConnectionId as number;
-      }
       
       const session = await api.startSession(sessionRequest);
       setCurrentSession(session);
@@ -246,7 +212,14 @@ export default function SessionsPage() {
     }
   };
 
-  const handleClearSession = () => {
+  const handleClearSession = async () => {
+    if (sessionId) {
+      try {
+        await api.closeSession(sessionId);
+      } catch (err) {
+        console.error('Failed to close session:', err);
+      }
+    }
     setCurrentSession(null);
     localStorage.removeItem(SESSION_STORAGE_KEY);
     setSessionId(null);
@@ -262,7 +235,6 @@ export default function SessionsPage() {
 
   const upstoxConnections = getAvailableConnections('upstox');
   const zerodhaConnections = getAvailableConnections('zerodha');
-  const activeUpstoxConnections = getActiveUpstoxConnections();
 
   return (
     <Box>
@@ -335,63 +307,38 @@ export default function SessionsPage() {
         </Typography>
         
         <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', mb: 2 }}>
-          {/* Broker Name Selector */}
-          <FormControl sx={{ minWidth: 180 }}>
+          {/* Trading Broker Selector - single dropdown for valid connections only */}
+          <FormControl sx={{ minWidth: 300 }}>
             <InputLabel>Trading Broker</InputLabel>
             <Select
-              value={selectedBrokerName}
+              value={selectedTradingConnectionId}
               label="Trading Broker"
-              onChange={(e) => handleBrokerNameChange(e.target.value)}
+              onChange={(e) => handleBrokerConnectionChange(e.target.value as number)}
               disabled={starting}
             >
-              <MenuItem value="">Select broker</MenuItem>
-              <MenuItem value="upstox">Upstox</MenuItem>
-              <MenuItem value="zerodha">Zerodha</MenuItem>
+              <MenuItem value="">Select a valid broker connection</MenuItem>
+              {upstoxConnections.length > 0 && (
+                upstoxConnections.map(conn => {
+                  const status = connectionStatuses.upstox.get(conn.id);
+                  return (
+                    <MenuItem key={conn.id} value={conn.id}>
+                      Upstox (ID: {conn.id}) - {status?.broker_user_id || 'Connected'}
+                    </MenuItem>
+                  );
+                })
+              )}
+              {zerodhaConnections.length > 0 && (
+                zerodhaConnections.map(conn => {
+                  const status = connectionStatuses.zerodha.get(conn.id);
+                  return (
+                    <MenuItem key={conn.id} value={conn.id}>
+                      Zerodha (ID: {conn.id}) - {status?.broker_user_id || 'Connected'}
+                    </MenuItem>
+                  );
+                })
+              )}
             </Select>
           </FormControl>
-
-          {/* Trading Connection Selector */}
-          <FormControl sx={{ minWidth: 250 }}>
-            <InputLabel>Trading Connection</InputLabel>
-            <Select
-              value={selectedTradingConnectionId}
-              label="Trading Connection"
-              onChange={(e) => setSelectedTradingConnectionId(e.target.value as number)}
-              disabled={starting || !selectedBrokerName}
-            >
-              <MenuItem value="">Select connection</MenuItem>
-              {selectedBrokerName === 'upstox' && upstoxConnections.map(conn => (
-                <MenuItem key={conn.id} value={conn.id}>
-                  Upstox (ID: {conn.id})
-                </MenuItem>
-              ))}
-              {selectedBrokerName === 'zerodha' && zerodhaConnections.map(conn => (
-                <MenuItem key={conn.id} value={conn.id}>
-                  Zerodha (ID: {conn.id})
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-
-          {/* Market Data Connection (only for Zerodha) */}
-          {selectedBrokerName === 'zerodha' && (
-            <FormControl sx={{ minWidth: 250 }}>
-              <InputLabel>Market Data (Upstox)</InputLabel>
-              <Select
-                value={selectedMarketDataConnectionId}
-                label="Market Data (Upstox)"
-                onChange={(e) => setSelectedMarketDataConnectionId(e.target.value as number)}
-                disabled={starting}
-              >
-                <MenuItem value="">Auto-select</MenuItem>
-                {activeUpstoxConnections.map(conn => (
-                  <MenuItem key={conn.id} value={conn.id}>
-                    Upstox - {conn.userId}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          )}
         </Box>
 
         <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
@@ -399,7 +346,7 @@ export default function SessionsPage() {
             variant="contained"
             startIcon={<StartIcon />}
             onClick={handleStartSession}
-            disabled={!selectedBrokerName || !selectedTradingConnectionId || starting}
+            disabled={!selectedTradingConnectionId || starting}
           >
             {starting ? 'Starting...' : 'Start Session'}
           </Button>
@@ -415,23 +362,9 @@ export default function SessionsPage() {
           />
         </Box>
         
-        {connections.length === 0 && (
+        {upstoxConnections.length === 0 && zerodhaConnections.length === 0 && (
           <Alert severity="warning" sx={{ mt: 2 }} icon={<WarningIcon />}>
-            No broker connections found. Please connect a broker first.
-          </Alert>
-        )}
-        
-        {/* Info for Zerodha sessions */}
-        {selectedBrokerName === 'zerodha' && (
-          <Alert severity="info" sx={{ mt: 2 }}>
-            <strong>Zerodha Trading:</strong> Market data (CMP quotes) will be fetched from Upstox. 
-            {activeUpstoxConnections.length === 0 && ' Please ensure Upstox is connected.'}
-          </Alert>
-        )}
-
-        {selectedBrokerName === 'upstox' && (
-          <Alert severity="info" sx={{ mt: 2 }}>
-            <strong>Upstox:</strong> Trading and market data both use Upstox connection.
+            No valid broker connections found. Please connect a broker with valid tokens first.
           </Alert>
         )}
       </Paper>

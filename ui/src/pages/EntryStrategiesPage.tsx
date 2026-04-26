@@ -15,6 +15,8 @@ import {
   Checkbox,
   Toolbar,
   Typography as MuiTypography,
+  IconButton,
+  Tooltip,
 } from '@mui/material';
 import {
   CloudUpload as UploadIcon,
@@ -162,6 +164,15 @@ export default function EntryStrategiesPage() {
     }
   };
 
+  const handleDownloadStrategies = async () => {
+    try {
+      await api.downloadStrategiesCSV();
+      setSuccess('Downloaded entry strategies as CSV');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to download strategies');
+    }
+  };
+
   return (
     <Box>
       <Typography variant="h4" gutterBottom>
@@ -204,19 +215,24 @@ export default function EntryStrategiesPage() {
             startIcon={<DownloadIcon />}
             onClick={handleDownloadTemplate}
           >
-            Download Template
+            Template
+          </Button>
+
+          <Button
+            variant="outlined"
+            startIcon={<DownloadIcon />}
+            onClick={handleDownloadStrategies}
+          >
+            Download CSV
           </Button>
 
           <Box sx={{ flexGrow: 1 }} />
 
-          <Button
-            variant="outlined"
-            startIcon={<RefreshIcon />}
-            onClick={fetchStrategies}
-            disabled={loading}
-          >
-            Refresh
-          </Button>
+          <Tooltip title="Refresh strategies">
+            <IconButton onClick={fetchStrategies} disabled={loading}>
+              {loading ? <CircularProgress size={20} /> : <RefreshIcon />}
+            </IconButton>
+          </Tooltip>
         </Box>
       </Paper>
 

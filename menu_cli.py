@@ -12,6 +12,8 @@ from core.holdings import HoldingsAnalyzer
 from brokers.broker_factory import BrokerFactory
 from core.entry_level_reviser import EntryLevelReviser
 from core.cli import ask_ai_analyst, list_duplicate_gtt_symbols, show_total_buy_gtt_amount
+from db.database import SessionLocal
+from db import models
 
 
 parser = argparse.ArgumentParser(description='TradeCraftX CLI')
@@ -39,34 +41,83 @@ def menu_gtt_summary():
     total_amount = show_total_buy_gtt_amount(threshold)
     print(f"💰 Total Buy GTT Amount Required (variance ≤ {threshold}%): ₹{total_amount}")
 
+def _get_broker_connections(broker_name: str, user_id: int):
+    with SessionLocal() as session:
+        connections = session.query(models.BrokerConnection).filter(
+            models.BrokerConnection.user_id == user_id,
+            models.BrokerConnection.broker_name == broker_name,
+        ).all()
+        return connections
+
+
+def _select_connection(connections: list, broker_name: str):
+    if not connections:
+        return None
+    if len(connections) == 1:
+        return connections[0]
+    
+    print(f"\nFound {len(connections)} {broker_name} connection(s):")
+    for i, conn in enumerate(connections, 1):
+        print(f"  {i}. User ID: {conn.broker_user_id} (ID: {conn.id})")
+    
+    while True:
+        choice = input(f"Select connection (1-{len(connections)}) or 'n' for none: ").strip()
+        if choice.lower() == 'n':
+            return None
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(connections):
+                return connections[idx]
+        except ValueError:
+            pass
+        print(f"Invalid choice. Enter 1-{len(connections)} or 'n'.")
+
+
 def main_menu():
     print("Please select a broker:")
     print("1. Zerodha (default)")
     print("2. Upstox")
     broker_choice = input("Enter your choice (1 or 2): ").strip()
 
+    broker_name = 'upstox' if broker_choice == '2' else 'zerodha'
+    user_id_str = input(f"Enter your User ID for {broker_name}: ").strip()
+
     session_manager = SessionManager()
-    session = SessionCache(session_manager=session_manager) # Initialize SessionCache here
-    set_current_session(session) # Set the global session in core.cli
+    session = SessionCache(session_manager=session_manager)
+    set_current_session(session)
+
+    with SessionLocal() as db:
+        user = db.query(models.User).filter(models.User.id == int(user_id_str)).first()
+        if not user:
+            print(f"User with ID {user_id_str} not found. Please check and try again.")
+            return
+        db_user_id = user.id
+
+    connections = _get_broker_connections(broker_name, db_user_id)
+    connection = _select_connection(connections, broker_name)
+
     config = {}
 
-    if broker_choice == '2':
-        broker_name = 'upstox'
+    if connection:
+        token_bundle = session_manager.get_token_bundle(broker_name, connection_id=connection.id)
+        if token_bundle:
+            config['access_token'] = token_bundle.access_token
+        else:
+            print("Token not found for selected connection. Please reconnect.")
+            return
+    else:
+        print(f"No {broker_name} connection found. Please use the web UI to connect first.")
+        return
+
+    if broker_name == 'upstox':
         config['api_key'] = session_manager.upstox_api_key
         config['api_secret'] = session_manager.upstox_api_secret
         config['redirect_uri'] = session_manager.upstox_redirect_uri
-        config['access_token'] = session_manager.get_valid_upstox_access_token()
-        us = "32ADGT"
     else:
-        broker_name = 'zerodha'
         config['api_key'] = session_manager.kite_api_key
-        config['access_token'] = session_manager.get_valid_kite_access_token()
-        us = "NM9165"
-
-    user_id = input(f"Enter User ID for {broker_name} (default: {us}): ").strip() or us
 
     try:
-        session.broker = BrokerFactory.get_broker(broker_name, user_id, config)
+        session.broker = BrokerFactory.get_broker(broker_name, connection.broker_user_id, config)
         session.broker.login()
 
         if broker_name == 'upstox':
@@ -90,7 +141,7 @@ def main_menu():
     session.refresh_all_caches()
 
     print("🔄 Initializing application and uploading trades...")
-    summary = HoldingsAnalyzer(user_id, broker_name).update_tradebook(session.broker)
+    summary = HoldingsAnalyzer(connection.broker_user_id, broker_name, user_record_id=db_user_id).update_tradebook(session.broker)
     summary_str = " - ".join([f"{key.replace('_', ' ').capitalize()}: {value}" for key, value in summary.items()])
     print(f"\n📊 Tradebook Upload Summary: {summary_str}")
 

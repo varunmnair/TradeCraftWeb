@@ -11,6 +11,7 @@ import {
   Tabs,
   Tab,
   Modal,
+  Dialog,
   DialogTitle,
   DialogContent,
   DialogActions,
@@ -29,6 +30,7 @@ import {
   Refresh as RefreshIcon,
   Upload as UploadIcon,
   Close as CloseIcon,
+  Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
@@ -40,28 +42,43 @@ interface SymbolCatalogStatus {
 }
 
 interface CMPStatus {
+  cached_symbols: number;
+  last_updated: string | null;
+  ttl_seconds: number;
+  has_analytics_token: boolean;
+  note: string;
+}
+
+interface OhlcvStatus {
+  config_days: number;
   total_symbols: number;
-  cmp_present_count: number;
-  last_cmp_job: {
+  date_from: string | null;
+  date_to: string | null;
+  total_candles: number;
+  last_updated: string | null;
+  last_ohlcv_job: {
     job_id: number;
-    processed: number;
-    succeeded: number;
-    failed: number;
+    symbols_refreshed: number;
+    symbols_skipped: number;
+    symbols_failed: number;
+    days: number;
     updated_at: string | null;
   } | null;
 }
 
-interface OhlcvStatus {
-  total_candles: number;
-  symbols_with_candles: number;
-  last_ohlcv_job: {
-    job_id: number;
-    processed_symbols: number;
-    succeeded_symbols: number;
-    failed_symbols: number;
-    days: number;
-    updated_at: string | null;
-  } | null;
+interface OhlcvInspectData {
+  symbol: string;
+  date_from: string | null;
+  date_to: string | null;
+  candles: Array<{
+    date: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+  }>;
+  error?: string;
 }
 
 interface JobFailures {
@@ -79,7 +96,7 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<'market' | 'users'>('market');
   
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null);
+  const [message, setMessage] = useState<{ type: 'success' | 'error' | 'warning' | 'info'; text: string } | null>(null);
   const [catalogStatus, setCatalogStatus] = useState<SymbolCatalogStatus | null>(null);
   const [cmpStatus, setCmpStatus] = useState<CMPStatus | null>(null);
   const [ohlcvStatus, setOhlcvStatus] = useState<OhlcvStatus | null>(null);
@@ -90,8 +107,13 @@ export default function AdminPage() {
   const [failuresModalOpen, setFailuresModalOpen] = useState(false);
   const [jobFailures, setJobFailures] = useState<JobFailures | null>(null);
   const [loadingFailures, setLoadingFailures] = useState(false);
-  const [activeFailuresType, setActiveFailuresType] = useState<'cmp' | 'ohlcv'>('cmp');
+  const [activeFailuresType, setActiveFailuresType] = useState<'ohlcv'>('ohlcv');
   const [ohlcvDays, setOhlcvDays] = useState<number>(200);
+  const [ohlcvConfigLoading, setOhlcvConfigLoading] = useState(false);
+  const [inspectSymbol, setInspectSymbol] = useState('');
+  const [inspectData, setInspectData] = useState<OhlcvInspectData | null>(null);
+  const [inspectLoading, setInspectLoading] = useState(false);
+  const [purgeConfirmOpen, setPurgeConfirmOpen] = useState(false);
 
   const fetchCatalogStatus = useCallback(async () => {
     try {
@@ -115,10 +137,70 @@ export default function AdminPage() {
     try {
       const data = await api.getOHLCVStatus();
       setOhlcvStatus(data);
+      if (data.config_days) {
+        setOhlcvDays(data.config_days);
+      }
     } catch (err) {
       console.error('Failed to fetch OHLCV status:', err);
     }
   }, []);
+
+  const handleSaveOhlcvConfig = async () => {
+    setOhlcvConfigLoading(true);
+    setMessage(null);
+    try {
+      await api.updateOHLCVConfig(ohlcvDays);
+      setMessage({
+        type: 'success',
+        text: `OHLCV config saved: ${ohlcvDays} days`,
+      });
+    } catch (err) {
+      setMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to save OHLCV config',
+      });
+    } finally {
+      setOhlcvConfigLoading(false);
+    }
+  };
+
+  const handleInspectSymbol = async () => {
+    if (!inspectSymbol.trim()) return;
+    setInspectLoading(true);
+    setInspectData(null);
+    try {
+      const data = await api.inspectOHLCV(inspectSymbol.trim(), 100);
+      setInspectData(data);
+    } catch (err) {
+      setMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to inspect symbol',
+      });
+    } finally {
+      setInspectLoading(false);
+    }
+  };
+
+  const handlePurgeAll = async () => {
+    setLoading(true);
+    setMessage(null);
+    setPurgeConfirmOpen(false);
+    try {
+      const result = await api.purgeAllOHLCV();
+      setMessage({
+        type: 'success',
+        text: `Purged ${result.candles_deleted} candles and ${result.metadata_deleted} metadata entries`,
+      });
+      fetchOhlcvStatus();
+    } catch (err) {
+      setMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to purge OHLCV data',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleRefreshOhlcv = async () => {
     setLoading(true);
@@ -127,10 +209,17 @@ export default function AdminPage() {
     try {
       const result = await api.refreshOHLCV(ohlcvDays);
       setOhlcvJobId(result.job_id);
-      setMessage({
-        type: 'success',
-        text: `OHLCV refresh started for ${ohlcvDays} days...`,
-      });
+      if (result.symbols_count === 0) {
+        setMessage({
+          type: 'info',
+          text: 'No symbols with existing OHLCV data to refresh',
+        });
+      } else {
+        setMessage({
+          type: 'success',
+          text: `OHLCV refresh started for ${result.symbols_count} existing symbols...`,
+        });
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to start OHLCV refresh';
       if (errorMsg.includes('UPSTOX_NOT_CONNECTED')) {
@@ -157,62 +246,7 @@ export default function AdminPage() {
     }
   };
 
-  const handleLoadLastOhlcvJob = async () => {
-    try {
-      const lastJob = await api.getLastOHLCVJob();
-      if (lastJob.job_id) {
-        setOhlcvJobId(lastJob.job_id);
-        const job = await api.getJob(lastJob.job_id);
-        setOhlcvJobStatus(job);
-        setMessage({
-          type: 'success',
-          text: `Loaded job #${lastJob.job_id}`,
-        });
-      } else {
-        setMessage({
-          type: 'warning',
-          text: 'No OHLCV job found',
-        });
-      }
-    } catch (err) {
-      console.error('Failed to load last OHLCV job:', err);
-    }
-  };
 
-  const handleRefreshCMP = async () => {
-    setLoading(true);
-    setMessage(null);
-    try {
-      await api.refreshCMP();
-      setMessage({
-        type: 'success',
-        text: 'CMP refresh started...',
-      });
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to start CMP refresh';
-      if (errorMsg.includes('UPSTOX_NOT_CONNECTED')) {
-        setUpstoxError(true);
-        if (errorMsg.includes('expired')) {
-          setMessage({
-            type: 'warning',
-            text: 'Upstox session has expired. Please reconnect Upstox from the Brokers page.',
-          });
-        } else {
-          setMessage({
-            type: 'warning',
-            text: 'No active Upstox connection found. Please connect Upstox from the Brokers page.',
-          });
-        }
-      } else {
-        setMessage({
-          type: 'error',
-          text: errorMsg,
-        });
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
 
   useEffect(() => {
     fetchCatalogStatus();
@@ -403,7 +437,7 @@ export default function AdminPage() {
           <Paper sx={{ p: 3, mb: 3 }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
               <Typography variant="h6">
-                CMP (Current Market Price)
+                CMP Cache (Current Market Price)
               </Typography>
               <Button
                 size="small"
@@ -421,35 +455,23 @@ export default function AdminPage() {
               </Box>
             ) : (
               <>
-                <Typography variant="body1" sx={{ mb: 2 }}>
-                  {cmpStatus?.cmp_present_count || 0} / {cmpStatus?.total_symbols || 0} symbols have CMP
+                <Typography variant="body1" sx={{ mb: 1 }}>
+                  {cmpStatus?.cached_symbols || 0} symbols cached in memory
                 </Typography>
-
-                {cmpStatus?.last_cmp_job && (
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    Last job: {cmpStatus.last_cmp_job.succeeded} succeeded, {cmpStatus.last_cmp_job.failed} failed ({formatDate(cmpStatus.last_cmp_job.updated_at)})
-                    {cmpStatus.last_cmp_job.failed > 0 && (
-                      <Button
-                        size="small"
-                        onClick={() => fetchJobFailures(cmpStatus.last_cmp_job!.job_id)}
-                        disabled={loadingFailures}
-                        sx={{ ml: 1 }}
-                      >
-                        View Failures
-                      </Button>
-                    )}
-                  </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  TTL: {cmpStatus?.ttl_seconds || 300} seconds (5 minutes)
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Last updated: {formatDate(cmpStatus?.last_updated || null)}
+                </Typography>
+                <Alert severity="info" sx={{ mt: 1 }}>
+                  {cmpStatus?.note || 'CMP is fetched on-demand and cached in-memory'}
+                </Alert>
+                {!cmpStatus?.has_analytics_token && (
+                  <Alert severity="warning" sx={{ mt: 1 }}>
+                    UPSTOX_ANALYTICS_TOKEN not configured. CMP fetching may fail.
+                  </Alert>
                 )}
-
-                <Button
-                  variant="contained"
-                  color="primary"
-                  onClick={handleRefreshCMP}
-                  disabled={loading}
-                  startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <RefreshIcon />}
-                >
-                  {loading ? 'Fetching...' : 'Fetch CMP'}
-                </Button>
               </>
             )}
           </Paper>
@@ -476,14 +498,28 @@ export default function AdminPage() {
               </Box>
             ) : (
               <>
-                <Typography variant="body1" sx={{ mb: 2 }}>
-                  {ohlcvStatus?.symbols_with_candles || 0} symbols with {ohlcvStatus?.total_candles || 0} total candles
-                </Typography>
+                {/* Data Status */}
+                <Box sx={{ display: 'flex', gap: 3, mb: 2 }}>
+                  <Box>
+                    <Typography variant="body2" color="text.secondary">Total Symbols</Typography>
+                    <Typography variant="h6">{ohlcvStatus?.total_symbols || 0}</Typography>
+                  </Box>
+                  <Box>
+                    <Typography variant="body2" color="text.secondary">Date Range</Typography>
+                    <Typography variant="body1">
+                      {ohlcvStatus?.date_from || '-'} to {ohlcvStatus?.date_to || '-'}
+                    </Typography>
+                  </Box>
+                  <Box>
+                    <Typography variant="body2" color="text.secondary">Total Candles</Typography>
+                    <Typography variant="h6">{ohlcvStatus?.total_candles || 0}</Typography>
+                  </Box>
+                </Box>
 
                 {ohlcvStatus?.last_ohlcv_job && (
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    Last job: {ohlcvStatus.last_ohlcv_job.succeeded_symbols} succeeded, {ohlcvStatus.last_ohlcv_job.failed_symbols} failed ({formatDate(ohlcvStatus.last_ohlcv_job.updated_at)})
-                    {ohlcvStatus.last_ohlcv_job.failed_symbols > 0 && (
+                    Last job: {ohlcvStatus.last_ohlcv_job.symbols_refreshed} refreshed, {ohlcvStatus.last_ohlcv_job.symbols_skipped} skipped, {ohlcvStatus.last_ohlcv_job.symbols_failed} failed ({formatDate(ohlcvStatus.last_ohlcv_job.updated_at)})
+                    {ohlcvStatus.last_ohlcv_job.symbols_failed > 0 && (
                       <Button
                         size="small"
                         onClick={() => {
@@ -501,19 +537,27 @@ export default function AdminPage() {
 
                 <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', mb: 2 }}>
                   <Typography variant="body2" color="text.secondary">
-                    Days back:
+                    Config (days):
                   </Typography>
                   <TextField
                     type="number"
                     size="small"
                     value={ohlcvDays}
-                    onChange={(e) => setOhlcvDays(Math.max(1, parseInt(e.target.value) || 200))}
-                    sx={{ width: 100 }}
-                    inputProps={{ min: 1 }}
+                    onChange={(e) => setOhlcvDays(Math.min(500, Math.max(30, parseInt(e.target.value) || 200)))}
+                    sx={{ width: 80 }}
+                    inputProps={{ min: 30, max: 500 }}
                   />
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={handleSaveOhlcvConfig}
+                    disabled={ohlcvConfigLoading}
+                  >
+                    {ohlcvConfigLoading ? 'Saving...' : 'Save'}
+                  </Button>
                 </Box>
 
-                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2 }}>
                   <Button
                     variant="contained"
                     color="primary"
@@ -521,22 +565,78 @@ export default function AdminPage() {
                     disabled={loading || (ohlcvJobStatus?.job && ['pending', 'running'].includes(ohlcvJobStatus.job.status))}
                     startIcon={loading || (ohlcvJobStatus?.job && ['pending', 'running'].includes(ohlcvJobStatus.job.status)) ? <CircularProgress size={20} color="inherit" /> : <RefreshIcon />}
                   >
-                    Fetch OHLCV
+                    Refresh Data
                   </Button>
                   <Button
                     variant="outlined"
-                    size="small"
-                    onClick={handleLoadLastOhlcvJob}
+                    color="error"
+                    onClick={() => setPurgeConfirmOpen(true)}
+                    disabled={loading}
                   >
-                    Load Last Job
+                    Purge All
                   </Button>
-                  {ohlcvJobId && (
-                    <Button
+                </Box>
+
+                {/* Inspect Symbol Section */}
+                <Box sx={{ mt: 3, pt: 2, borderTop: 1, borderColor: 'divider' }}>
+                  <Typography variant="subtitle2" sx={{ mb: 1 }}>Inspect Symbol</Typography>
+                  <Box sx={{ display: 'flex', gap: 1, mb: 1 }}>
+                    <TextField
                       size="small"
-                      onClick={() => navigate(`/jobs/${ohlcvJobId}`)}
+                      placeholder="Symbol (e.g. LODHA)"
+                      value={inspectSymbol}
+                      onChange={(e) => setInspectSymbol(e.target.value.toUpperCase())}
+                      onKeyPress={(e) => e.key === 'Enter' && handleInspectSymbol()}
+                      sx={{ width: 120 }}
+                    />
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={handleInspectSymbol}
+                      disabled={inspectLoading || !inspectSymbol.trim()}
                     >
-                      View Job #{ohlcvJobId}
+                      {inspectLoading ? '...' : 'Inspect'}
                     </Button>
+                  </Box>
+
+                  {inspectData && (
+                    <Box sx={{ mt: 1 }}>
+                      {inspectData.error ? (
+                        <Alert severity="warning" sx={{ mb: 1 }}>{inspectData.error}</Alert>
+                      ) : (
+                        <>
+                          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                            {inspectData.symbol}: {inspectData.date_from} to {inspectData.date_to} ({inspectData.candles.length} candles)
+                          </Typography>
+                          <TableContainer sx={{ maxHeight: 200 }}>
+                            <Table size="small">
+                              <TableHead>
+                                <TableRow>
+                                  <TableCell>Date</TableCell>
+                                  <TableCell>Open</TableCell>
+                                  <TableCell>High</TableCell>
+                                  <TableCell>Low</TableCell>
+                                  <TableCell>Close</TableCell>
+                                  <TableCell>Volume</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {inspectData.candles.slice(0, 30).map((candle, idx) => (
+                                  <TableRow key={idx}>
+                                    <TableCell>{candle.date}</TableCell>
+                                    <TableCell>{candle.open?.toFixed(2)}</TableCell>
+                                    <TableCell>{candle.high?.toFixed(2)}</TableCell>
+                                    <TableCell>{candle.low?.toFixed(2)}</TableCell>
+                                    <TableCell>{candle.close?.toFixed(2)}</TableCell>
+                                    <TableCell>{candle.volume?.toLocaleString()}</TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                        </>
+                      )}
+                    </Box>
                   )}
                 </Box>
 
@@ -564,6 +664,23 @@ export default function AdminPage() {
           </Alert>
         </Paper>
       )}
+
+      {/* Purge Confirmation Dialog */}
+      <Dialog open={purgeConfirmOpen} onClose={() => setPurgeConfirmOpen(false)}>
+        <DialogTitle>Confirm Purge All OHLCV Data?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            This will permanently delete all OHLCV candle data and metadata for all symbols.
+            This action cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPurgeConfirmOpen(false)}>Cancel</Button>
+          <Button variant="contained" color="error" onClick={handlePurgeAll}>
+            Purge All
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Failures Modal */}
       <Modal

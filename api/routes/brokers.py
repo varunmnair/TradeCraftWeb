@@ -4,7 +4,7 @@ import hashlib
 import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 import requests
 from fastapi import APIRouter, Depends, File, Query, UploadFile
@@ -35,12 +35,36 @@ UPSTOX_AUTH_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 UPSTOX_TOKEN_URL = "https://api.upstox.com/v2/login/authorization/token"
 
 
+def _extract_jwt_expiration(token: str) -> Optional[datetime]:
+    """Extract expiration timestamp from JWT token."""
+    import base64
+    import json
+    try:
+        token_parts = token.split(".")
+        if len(token_parts) >= 2:
+            padding = 4 - len(token_parts[1]) % 4
+            if padding != 4:
+                token_parts[1] += "=" * padding
+            payload = base64.b64decode(token_parts[1])
+            if isinstance(payload, bytes):
+                payload = payload.decode("utf-8")
+            token_payload = json.loads(payload)
+            exp_timestamp = token_payload.get("exp")
+            if exp_timestamp:
+                return datetime.fromtimestamp(exp_timestamp, timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
 class ConnectionStatus(BaseModel):
     connection_id: int
     broker_name: str
     connected: bool
     broker_user_id: Optional[str]
     token_updated_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    token_status: Literal["valid", "expired", "missing"] = "missing"
 
 
 class BrokerConnectResponse(BaseModel):
@@ -217,6 +241,27 @@ def upstox_callback(
             ).isoformat()
         except (ValueError, TypeError):
             expires_iso = None
+    
+    # If expires_in not provided, extract expiration from JWT token
+    if not expires_iso and token_data.get("access_token"):
+        import base64
+        try:
+            token_parts = token_data["access_token"].split(".")
+            if len(token_parts) >= 2:
+                # Add padding if needed
+                padding = 4 - len(token_parts[1]) % 4
+                if padding != 4:
+                    token_parts[1] += "=" * padding
+                payload = base64.b64decode(token_parts[1])
+                if isinstance(payload, bytes):
+                    payload = payload.decode("utf-8")
+                import json
+                token_payload = json.loads(payload)
+                exp_timestamp = token_payload.get("exp")
+                if exp_timestamp:
+                    expires_iso = datetime.fromtimestamp(exp_timestamp, timezone.utc).isoformat()
+        except Exception as e:
+            LOGGER.warning("Failed to extract JWT expiration: %s", e)
 
     bundle_payload = {
         "access_token": token_data.get("access_token"),
@@ -284,30 +329,59 @@ def upstox_status(
             "Connection not found", error_code="not_found", http_status=404
         )
 
-    # Return only the first connected (active) connection or empty list
+    # Return ALL connections with their actual status (connected/expired/missing)
     statuses = []
     for conn in upstox_connections:
         bundle = session_manager.get_token_bundle("upstox", connection_id=conn.id)
 
-        # Check if we have valid tokens (connection is "connected" if tokens exist)
-        is_connected = bundle is not None and bundle.access_token is not None
+        # Determine token status
+        token_status: Literal["valid", "expired", "missing"] = "missing"
+        is_connected = False
+        expires_at_val = None
 
-        if is_connected:
-            # Return only the first connected one
-            statuses.append(
-                {
-                    "connection_id": conn.id,
-                    "broker_name": "upstox",
-                    "connected": is_connected,
-                    "broker_user_id": bundle.broker_user_id if bundle else None,
-                    "token_updated_at": (
-                        conn.token_updated_at.isoformat()
-                        if conn.token_updated_at
-                        else None
-                    ),
-                }
-            )
-            break
+        if bundle is not None and bundle.access_token is not None:
+            # Check token expiration
+            expires_dt = None
+            
+            # First check bundle.expires_at
+            if bundle.expires_at:
+                expires_dt = bundle.expires_at
+                if isinstance(expires_dt, str):
+                    expires_dt = datetime.fromisoformat(expires_dt)
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+            
+            # If no expires_at, extract from JWT token
+            if not expires_dt:
+                expires_dt = _extract_jwt_expiration(bundle.access_token)
+            
+            if expires_dt:
+                expires_at_val = conn.token_updated_at.isoformat() if conn.token_updated_at else None
+                if datetime.now(timezone.utc) >= expires_dt:
+                    token_status = "expired"
+                else:
+                    token_status = "valid"
+                    is_connected = True
+            else:
+                # No expiry found - assume valid (for extended tokens etc)
+                token_status = "valid"
+                is_connected = True
+
+        statuses.append(
+            {
+                "connection_id": conn.id,
+                "broker_name": "upstox",
+                "connected": is_connected,
+                "broker_user_id": bundle.broker_user_id if bundle else None,
+                "token_updated_at": (
+                    conn.token_updated_at.isoformat()
+                    if conn.token_updated_at
+                    else None
+                ),
+                "expires_at": expires_at_val,
+                "token_status": token_status,
+            }
+        )
     return {"connections": statuses}
 
 
@@ -484,6 +558,41 @@ def zerodha_callback(
         "obtained_at": datetime.now(timezone.utc).isoformat(),
         "raw_profile": token_data.get("data", {}),
     }
+    
+    # Extract expiration from Zerodha token (check both JWT exp and kite expiry_timestamp)
+    expires_iso = None
+    kite_data = token_data.get("data", {})
+    
+    # Method 1: Check for kite expiry_timestamp (Zerodha specific)
+    expiry_ts = kite_data.get("expiry_timestamp")
+    if expiry_ts:
+        try:
+            expires_iso = datetime.fromtimestamp(int(expiry_ts), timezone.utc).isoformat()
+        except (ValueError, TypeError):
+            pass
+    
+    # Method 2: Extract from JWT if available
+    if not expires_iso and access_token:
+        import base64
+        try:
+            token_parts = access_token.split(".")
+            if len(token_parts) >= 2:
+                padding = 4 - len(token_parts[1]) % 4
+                if padding != 4:
+                    token_parts[1] += "=" * padding
+                payload = base64.b64decode(token_parts[1])
+                if isinstance(payload, bytes):
+                    payload = payload.decode("utf-8")
+                import json
+                token_payload = json.loads(payload)
+                exp_timestamp = token_payload.get("exp")
+                if exp_timestamp:
+                    expires_iso = datetime.fromtimestamp(exp_timestamp, timezone.utc).isoformat()
+        except Exception as e:
+            LOGGER.warning("Failed to extract JWT expiration for Zerodha: %s", e)
+    
+    if expires_iso:
+        bundle_payload["expires_at"] = expires_iso
 
     LOGGER.info(
         "Zerodha token exchange successful, storing tokens for connection_id=%d",
@@ -550,33 +659,68 @@ def zerodha_status(
             "Connection not found", error_code="not_found", http_status=404
         )
 
-    # Return only the first connected (active) connection or empty list
+    # Return ALL connections with their actual status (connected/expired/missing)
     statuses = []
     for conn in zerodha_connections:
         try:
             bundle = session_manager.get_token_bundle("zerodha", connection_id=conn.id)
-            is_connected = bundle is not None and bundle.access_token is not None
-            broker_user_id = bundle.broker_user_id if bundle else None
-        except Exception as e:
-            LOGGER.error(f"Error getting zerodha bundle for connection {conn.id}: {e}")
+            
+            # Determine token status
+            token_status: Literal["valid", "expired", "missing"] = "missing"
             is_connected = False
+            expires_at_val = None
             broker_user_id = None
 
-        if is_connected:
-            statuses.append(
-                {
-                    "connection_id": conn.id,
-                    "user_id": conn.user_id,
-                    "connected": is_connected,
-                    "broker_user_id": broker_user_id,
-                    "token_updated_at": (
-                        conn.token_updated_at.isoformat()
-                        if conn.token_updated_at
-                        else None
-                    ),
-                }
-            )
-            break
+            if bundle is not None and bundle.access_token is not None:
+                broker_user_id = bundle.broker_user_id
+                # Check token expiration
+                expires_dt = None
+                
+                # First check bundle.expires_at
+                if bundle.expires_at:
+                    expires_dt = bundle.expires_at
+                    if isinstance(expires_dt, str):
+                        expires_dt = datetime.fromisoformat(expires_dt)
+                    if expires_dt.tzinfo is None:
+                        expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+                
+                # If no expires_at, extract from JWT token
+                if not expires_dt:
+                    expires_dt = _extract_jwt_expiration(bundle.access_token)
+                
+                if expires_dt:
+                    expires_at_val = conn.token_updated_at.isoformat() if conn.token_updated_at else None
+                    if datetime.now(timezone.utc) >= expires_dt:
+                        token_status = "expired"
+                    else:
+                        token_status = "valid"
+                        is_connected = True
+                else:
+                    # No expiry found - assume valid
+                    token_status = "valid"
+                    is_connected = True
+        except Exception as e:
+            LOGGER.error(f"Error getting zerodha bundle for connection {conn.id}: {e}")
+            token_status = "missing"
+            is_connected = False
+            broker_user_id = None
+            expires_at_val = None
+
+        statuses.append(
+            {
+                "connection_id": conn.id,
+                "user_id": conn.user_id,
+                "connected": is_connected,
+                "broker_user_id": broker_user_id,
+                "token_updated_at": (
+                    conn.token_updated_at.isoformat()
+                    if conn.token_updated_at
+                    else None
+                ),
+                "expires_at": expires_at_val,
+                "token_status": token_status,
+            }
+        )
     return {"connections": statuses}
 
 

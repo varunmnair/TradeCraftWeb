@@ -22,6 +22,7 @@ import {
   Add as AddIcon, 
   Check as CheckIcon, 
   Error as ErrorIcon, 
+  Warning as WarningIcon,
   CloudDone as UpstoxIcon,
   Cloud as ZerodhaIcon,
   Refresh as RefreshIcon,
@@ -42,6 +43,8 @@ interface BrokerStatus {
   broker_user_id: string | null;
   token_updated_at: string | null;
   connection_id: number;
+  expires_at: string | null;
+  token_status: 'valid' | 'expired' | 'missing';
 }
 
 export default function BrokerConnectionsPage() {
@@ -69,19 +72,25 @@ export default function BrokerConnectionsPage() {
       const data = await api.listBrokerConnections();
       setConnections(data);
       
-      // Fetch Upstox status
+      // Fetch Upstox status - now returns ALL connections, get first one
       try {
         const upstoxResp = await api.getUpstoxStatus();
-        const connectedUpstox = upstoxResp.connections.find(c => c.connected);
-        if (connectedUpstox) {
+        const firstUpstox = upstoxResp.connections[0];
+        if (firstUpstox) {
           const status: BrokerStatus = {
-            connected: connectedUpstox.connected,
-            broker_user_id: connectedUpstox.broker_user_id,
-            token_updated_at: connectedUpstox.token_updated_at,
-            connection_id: connectedUpstox.connection_id,
+            connected: firstUpstox.connected,
+            broker_user_id: firstUpstox.broker_user_id,
+            token_updated_at: firstUpstox.token_updated_at,
+            connection_id: firstUpstox.connection_id,
+            expires_at: firstUpstox.expires_at,
+            token_status: firstUpstox.token_status,
           };
           setUpstoxStatus(status);
-          localStorage.setItem(STORAGE_KEY_UPSTOX, String(status.connection_id));
+          if (firstUpstox.connected) {
+            localStorage.setItem(STORAGE_KEY_UPSTOX, String(status.connection_id));
+          } else {
+            localStorage.removeItem(STORAGE_KEY_UPSTOX);
+          }
         } else {
           setUpstoxStatus(null);
           localStorage.removeItem(STORAGE_KEY_UPSTOX);
@@ -93,16 +102,22 @@ export default function BrokerConnectionsPage() {
       // Fetch Zerodha status
       try {
         const zerodhaResp = await api.getZerodhaStatus();
-        const connectedZerodha = zerodhaResp.connections.find(c => c.connected);
-        if (connectedZerodha) {
+        const firstZerodha = zerodhaResp.connections[0];
+        if (firstZerodha) {
           const status: BrokerStatus = {
-            connected: connectedZerodha.connected,
-            broker_user_id: connectedZerodha.broker_user_id,
-            token_updated_at: connectedZerodha.token_updated_at,
-            connection_id: connectedZerodha.connection_id,
+            connected: firstZerodha.connected,
+            broker_user_id: firstZerodha.broker_user_id,
+            token_updated_at: firstZerodha.token_updated_at,
+            connection_id: firstZerodha.connection_id,
+            expires_at: firstZerodha.expires_at,
+            token_status: firstZerodha.token_status,
           };
           setZerodhaStatus(status);
-          localStorage.setItem(STORAGE_KEY_ZERODHA, String(status.connection_id));
+          if (firstZerodha.connected) {
+            localStorage.setItem(STORAGE_KEY_ZERODHA, String(status.connection_id));
+          } else {
+            localStorage.removeItem(STORAGE_KEY_ZERODHA);
+          }
         } else {
           setZerodhaStatus(null);
           localStorage.removeItem(STORAGE_KEY_ZERODHA);
@@ -156,14 +171,16 @@ export default function BrokerConnectionsPage() {
   const checkUpstoxStatus = useCallback(async (): Promise<BrokerStatus | null> => {
     try {
       const resp = await api.getUpstoxStatus();
-      // Check ALL connections, return first connected one
-      const connected = resp.connections.find(c => c.connected);
-      if (connected) {
+      // Return first connection (now includes all statuses)
+      const first = resp.connections[0];
+      if (first) {
         return {
-          connected: connected.connected,
-          broker_user_id: connected.broker_user_id,
-          token_updated_at: connected.token_updated_at,
-          connection_id: connected.connection_id,
+          connected: first.connected,
+          broker_user_id: first.broker_user_id,
+          token_updated_at: first.token_updated_at,
+          connection_id: first.connection_id,
+          expires_at: first.expires_at,
+          token_status: first.token_status,
         };
       }
     } catch {
@@ -175,14 +192,16 @@ export default function BrokerConnectionsPage() {
   const checkZerodhaStatus = useCallback(async (): Promise<BrokerStatus | null> => {
     try {
       const resp = await api.getZerodhaStatus();
-      // Check ALL connections, return first connected one
-      const connected = resp.connections.find(c => c.connected);
-      if (connected) {
+      // Return first connection (now includes all statuses)
+      const first = resp.connections[0];
+      if (first) {
         return {
-          connected: connected.connected,
-          broker_user_id: connected.broker_user_id,
-          token_updated_at: connected.token_updated_at,
-          connection_id: connected.connection_id,
+          connected: first.connected,
+          broker_user_id: first.broker_user_id,
+          token_updated_at: first.token_updated_at,
+          connection_id: first.connection_id,
+          expires_at: first.expires_at,
+          token_status: first.token_status,
         };
       }
     } catch {
@@ -218,6 +237,18 @@ export default function BrokerConnectionsPage() {
           localStorage.setItem(STORAGE_KEY_ZERODHA, String(status.connection_id));
         }
         await fetchConnections();
+        return;
+      }
+      
+      // Also check for expired tokens - user might need to reconnect
+      if (status?.token_status === 'expired') {
+        pollingActiveRef.current = false;
+        clearPolling();
+        if (step === 1) {
+          setUpstoxStatus(status);
+        } else {
+          setZerodhaStatus(status);
+        }
         return;
       }
       
@@ -333,10 +364,17 @@ export default function BrokerConnectionsPage() {
 
   const [connecting, setConnecting] = useState(false);
 
-  const getStatusChip = (connected: boolean) => {
-    return connected 
-      ? <Chip label="Connected" color="success" size="small" icon={<CheckIcon />} />
-      : <Chip label="Not Connected" size="small" icon={<ErrorIcon />} />;
+  const getStatusChip = (status: BrokerStatus | null) => {
+    if (!status) {
+      return <Chip label="Not Connected" size="small" icon={<ErrorIcon />} />;
+    }
+    if (status.token_status === 'expired') {
+      return <Chip label="Expired" color="warning" size="small" icon={<WarningIcon />} />;
+    }
+    if (status.token_status === 'missing') {
+      return <Chip label="Not Connected" size="small" icon={<ErrorIcon />} />;
+    }
+    return <Chip label="Connected" color="success" size="small" icon={<CheckIcon />} />;
   };
 
   const formatDate = (dateStr: string | null) => {
@@ -390,29 +428,37 @@ export default function BrokerConnectionsPage() {
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
               <UpstoxIcon color="primary" />
               <Typography variant="h6">Upstox</Typography>
-              {getStatusChip(upstoxStatus?.connected ?? false)}
+              {getStatusChip(upstoxStatus)}
             </Box>
-            {upstoxStatus?.connected && (
+            {upstoxStatus && (
               <Box sx={{ mt: 1 }}>
                 <Typography variant="body2" color="text.secondary">
                   User: {upstoxStatus.broker_user_id || 'N/A'}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                  Connected: {formatDate(upstoxStatus.token_updated_at)}
+                  Status: {upstoxStatus.token_status}
                 </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Updated: {formatDate(upstoxStatus.token_updated_at)}
+                </Typography>
+                {upstoxStatus.expires_at && (
+                  <Typography variant="body2" color="text.secondary">
+                    Expires: {formatDate(upstoxStatus.expires_at)}
+                  </Typography>
+                )}
               </Box>
             )}
             <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
               <Button
-                variant={upstoxStatus?.connected ? "outlined" : "contained"}
+                variant={upstoxStatus?.token_status === 'valid' ? "outlined" : "contained"}
                 startIcon={<AddIcon />}
                 onClick={handleConnectUpstox}
                 disabled={connecting}
                 fullWidth
               >
-                {upstoxStatus?.connected ? 'Reconnect' : 'Connect'}
+                {upstoxStatus?.token_status === 'valid' ? 'Reconnect' : 'Connect'}
               </Button>
-              {upstoxStatus?.connected && (
+              {upstoxStatus?.token_status === 'valid' && (
                 <Button
                   variant="outlined"
                   color="error"
@@ -433,29 +479,37 @@ export default function BrokerConnectionsPage() {
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
               <ZerodhaIcon sx={{ color: '#283195' }} />
               <Typography variant="h6">Zerodha</Typography>
-              {getStatusChip(zerodhaStatus?.connected ?? false)}
+              {getStatusChip(zerodhaStatus)}
             </Box>
-            {zerodhaStatus?.connected && (
+            {zerodhaStatus && (
               <Box sx={{ mt: 1 }}>
                 <Typography variant="body2" color="text.secondary">
                   User: {zerodhaStatus.broker_user_id || 'N/A'}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                  Connected: {formatDate(zerodhaStatus.token_updated_at)}
+                  Status: {zerodhaStatus.token_status}
                 </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Updated: {formatDate(zerodhaStatus.token_updated_at)}
+                </Typography>
+                {zerodhaStatus.expires_at && (
+                  <Typography variant="body2" color="text.secondary">
+                    Expires: {formatDate(zerodhaStatus.expires_at)}
+                  </Typography>
+                )}
               </Box>
             )}
             <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
               <Button
-                variant={zerodhaStatus?.connected ? "outlined" : "contained"}
+                variant={zerodhaStatus?.token_status === 'valid' ? "outlined" : "contained"}
                 startIcon={<AddIcon />}
                 onClick={handleConnectZerodha}
                 disabled={connecting}
                 fullWidth
               >
-                {zerodhaStatus?.connected ? 'Reconnect' : 'Connect'}
+                {zerodhaStatus?.token_status === 'valid' ? 'Reconnect' : 'Connect'}
               </Button>
-              {zerodhaStatus?.connected && (
+              {zerodhaStatus?.token_status === 'valid' && (
                 <Button
                   variant="outlined"
                   color="error"
@@ -507,6 +561,19 @@ export default function BrokerConnectionsPage() {
             </Box>
           )}
           
+          {/* Expired Token State */}
+          {connectionStatus?.token_status === 'expired' && !polling && (
+            <Box sx={{ textAlign: 'center', py: 2 }}>
+              <WarningIcon color="warning" sx={{ fontSize: 48, mb: 2 }} />
+              <Typography variant="h6" color="warning">
+                Token Expired
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Your access token has expired. Please reconnect.
+              </Typography>
+            </Box>
+          )}
+          
           {/* Polling State */}
           {polling && !connectionStatus?.connected && (
             <Box sx={{ textAlign: 'center', py: 2 }}>
@@ -547,7 +614,7 @@ export default function BrokerConnectionsPage() {
           )}
         </DialogContent>
         <DialogActions>
-          {connectionStatus?.connected ? (
+          {(connectionStatus?.connected || connectionStatus?.token_status === 'expired') ? (
             <Button onClick={handleCloseDialog} variant="contained" autoFocus>
               Done
             </Button>

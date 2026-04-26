@@ -47,7 +47,7 @@ def test_upstox_broker_uses_session_token(sqlite_session, monkeypatch):
         connection_id=connection_id,
     )
 
-    session_manager = SessionManager(token_store=store, dev_mode=False)
+    session_manager = SessionManager(token_store=store)
     broker = UpstoxBroker(broker_user_id="UPUSER", api_key="key", api_secret="secret", redirect_uri="uri")
     broker.set_session_context(session_manager=session_manager, connection_id=connection_id)
 

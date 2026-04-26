@@ -12,7 +12,7 @@
 - `brokers/`: Broker adapters (`ZerodhaBroker`, `UpstoxBroker`) plus `BrokerFactory`.
 - `agent/`: AI-facing helpers (LLM provider, strategy agent loop, tool registry).
 - `data/`: CSV inputs (tradebooks, ROI history, entry levels). Gitignored for sensitive data.
-- `auth/`: Cached broker tokens. Treat as sensitive, do not commit.
+- `auth/`: OAuth state tokens (temporary). Broker tokens stored encrypted in DB. Treat as sensitive, do not commit.
 
 ## Environment & Setup
 - **Python**: 3.10+ with venv: `python -m venv venv && venv\Scripts\activate` (Windows) or `source venv/bin/activate` (Unix).

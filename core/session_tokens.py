@@ -118,56 +118,6 @@ class BaseTokenStore:
         raise NotImplementedError
 
 
-class FileTokenStore(BaseTokenStore):
-    def __init__(self) -> None:
-        self.base_path = Path("auth")
-        self.base_path.mkdir(parents=True, exist_ok=True)
-
-    def _file_for(self, broker_name: str) -> Path:
-        return self.base_path / f"{broker_name}_access_token.pkl"
-
-    def get_tokens(
-        self,
-        broker_name: str,
-        *,
-        connection_id: Optional[int] = None,
-        broker_user_id: Optional[str] = None,
-    ) -> Optional[TokenBundle]:
-        file_path = self._file_for(broker_name)
-        if file_path.exists():
-            with file_path.open("rb") as fh:
-                raw = pickle.load(fh)
-                return TokenBundle.from_obj(raw)
-        return None
-
-    def store_tokens(
-        self,
-        broker_name: str,
-        tokens: Any,
-        *,
-        connection_id: Optional[int] = None,
-        user_id: Optional[int] = None,
-        broker_user_id: Optional[str] = None,
-    ) -> None:
-        bundle = TokenBundle.from_obj(tokens)
-        file_path = self._file_for(broker_name)
-        with file_path.open("wb") as fh:
-            pickle.dump(bundle.to_payload(), fh)
-
-    def disconnect(
-        self,
-        broker_name: str,
-        *,
-        connection_id: Optional[int] = None,
-        user_id: Optional[int] = None,
-    ) -> bool:
-        file_path = self._file_for(broker_name)
-        if file_path.exists():
-            file_path.unlink()
-            return True
-        return False
-
-
 class DbTokenStore(BaseTokenStore):
     def __init__(self, session_factory=SessionLocal) -> None:
         self._session_factory = session_factory

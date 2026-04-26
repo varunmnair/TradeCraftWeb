@@ -60,6 +60,7 @@ class SessionService:
         return {
             "session_id": context.session_id,
             "broker_user_id": context.broker_user_id,
+            "user_id": context.broker_user_id,
             "broker": context.broker_name,
             "expires_at": (
                 context.expires_at.isoformat() if context.expires_at else None

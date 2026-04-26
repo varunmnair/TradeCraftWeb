@@ -58,7 +58,7 @@ def client(db_session):
     bind = db_session.get_bind()
     SessionTesting = sessionmaker(bind=bind)
     token_store = DbTokenStore(session_factory=SessionTesting)
-    session_manager = SessionManager(token_store=token_store, dev_mode=False)
+    session_manager = SessionManager(token_store=token_store)
     session_registry = SessionRegistry(session_factory=SessionTesting, session_manager=session_manager)
     broker_service = BrokerConnectionService(session_factory=SessionTesting)
     auth_state_service = BrokerAuthStateService(session_factory=SessionTesting)

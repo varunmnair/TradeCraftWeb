@@ -1,4 +1,4 @@
-"""SessionManager that chooses proper token store (file for dev, DB for SaaS)."""
+"""SessionManager that uses DB-only token storage (DbTokenStore)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from typing import Optional
 from core.session_tokens import (
     BaseTokenStore,
     DbTokenStore,
-    FileTokenStore,
     TokenBundle,
 )
 
@@ -18,12 +17,8 @@ class SessionManager:
         self,
         *,
         token_store: BaseTokenStore | None = None,
-        dev_mode: bool = True,
     ) -> None:
-        self.dev_mode = dev_mode
-        self.token_store = token_store or (
-            FileTokenStore() if dev_mode else DbTokenStore()
-        )
+        self.token_store = token_store or DbTokenStore()
 
         self.kite_api_key = os.getenv("KITE_API_KEY")
         self.kite_api_secret = os.getenv("KITE_API_SECRET")

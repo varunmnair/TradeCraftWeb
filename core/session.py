@@ -50,7 +50,14 @@ class SessionCache:
                 self._order_history[symbol].append(trade)
         self._order_history_fetched_at = datetime.now()
         self._order_history_source = source
-        logging.info(f"Stored {len(trades)} trades for {len(self._order_history)} symbols")
+        
+        # Calculate trade count
+        total_trades = sum(len(t) for t in self._order_history.values())
+        logging.info(f"Stored {total_trades} trades for {len(self._order_history)} symbols")
+        
+        # Log symbols
+        symbols = list(self._order_history.keys())[:5]
+        logging.debug(f"Symbols (first 5): {symbols}")
 
     def get_order_history(self, symbol: Optional[str] = None) -> Optional[List[Dict]]:
         """Get order history, optionally filtered by symbol."""
@@ -60,12 +67,23 @@ class SessionCache:
 
     def get_order_history_status(self) -> Dict:
         """Get the current status of order history for this session."""
+        all_dates = []
+        for trades in self._order_history.values():
+            for trade in trades:
+                if trade.get("trade_date"):
+                    all_dates.append(trade["trade_date"])
+        
+        date_from = min(all_dates) if all_dates else None
+        date_to = max(all_dates) if all_dates else None
+        
         return {
             "available": bool(self._order_history),
             "trade_count": sum(len(trades) for trades in self._order_history.values()),
             "symbol_count": len(self._order_history),
             "fetched_at": self._order_history_fetched_at,
             "source": self._order_history_source,
+            "date_from": date_from,
+            "date_to": date_to,
         }
 
     def clear_order_history(self):
@@ -178,19 +196,42 @@ class SessionCache:
             )
 
         self.refresh_holdings()
-        self.refresh_entry_levels(force_clear=True)
+        self.refresh_entry_levels()
         self.refresh_gtt_cache()
         self.refresh_cmp_cache()
         self.last_refreshed = time.time()
 
     def refresh_holdings(self):
         self.holdings = self.broker.get_holdings()
+        self._trigger_ohlcv_refresh()
 
-    def refresh_entry_levels(self, force_clear: bool = False):
+    def _trigger_ohlcv_refresh(self):
+        symbols = set()
+        for h in self.holdings:
+            sym = h.get("symbol") or h.get("tradingsymbol")
+            if sym:
+                symbols.add(str(sym).strip().upper())
+
+        if not symbols:
+            return
+
+        from api.dependencies import get_job_runner, JOB_OHLCV_REFRESH_SYMBOLS
+
+        session_id = self.session_id or f"holdings-{self.user_id or 'unknown'}"
+
+        try:
+            job_runner = get_job_runner()
+            job_runner.start_job(
+                session_id=session_id,
+                job_type=JOB_OHLCV_REFRESH_SYMBOLS,
+                payload={"symbols": list(symbols)},
+            )
+            logging.info(f"Triggered OHLCV refresh for {len(symbols)} symbols")
+        except Exception as e:
+            logging.warning(f"Failed to trigger OHLCV refresh: {e}")
+
+    def refresh_entry_levels(self):
         logging.info(f"refresh_entry_levels: user_id={self.user_id}")
-
-        if force_clear:
-            self._clear_entry_strategies_for_session()
 
         db_entry_levels = self._load_from_db()
         if db_entry_levels:
@@ -199,55 +240,6 @@ class SessionCache:
         else:
             logging.info("No entry levels found in DB")
             self.entry_levels = []
-
-    def _clear_entry_strategies_for_session(self):
-        """Clear entry strategies for the current session scope."""
-        if not self.user_id:
-            return
-
-        broker_name = getattr(self.broker, "broker_name", None) or getattr(
-            self.broker, "broker", None
-        )
-        broker_user_id = getattr(self.broker, "broker_user_id", None)
-
-        if not broker_name:
-            return
-
-        try:
-            from db.database import SessionLocal
-            from db.models import EntryLevel, EntryStrategy
-
-            db = SessionLocal()
-            try:
-                query = db.query(EntryStrategy).filter(
-                    EntryStrategy.user_id == self.user_id,
-                    EntryStrategy.broker == broker_name,
-                )
-                if broker_user_id:
-                    query = query.filter(EntryStrategy.broker_user_id == broker_user_id)
-
-                strategies = query.all()
-
-                if strategies:
-                    strategy_ids = [s.id for s in strategies]
-                    db.query(EntryLevel).filter(
-                        EntryLevel.strategy_id.in_(strategy_ids)
-                    ).delete(synchronize_session=False)
-                    db.query(EntryStrategy).filter(
-                        EntryStrategy.id.in_(strategy_ids)
-                    ).delete(synchronize_session=False)
-                    db.commit()
-                    logging.info(
-                        f"Cleared {len(strategies)} entry strategies for session scope: broker={broker_name}, broker_user_id={broker_user_id}"
-                    )
-                else:
-                    logging.info(
-                        f"No entry strategies to clear for session scope: broker={broker_name}, broker_user_id={broker_user_id}"
-                    )
-            finally:
-                db.close()
-        except Exception as e:
-            logging.warning(f"Failed to clear entry strategies: {e}")
 
     def _load_from_db(self):
         """Load entry levels from DB if available."""

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from api.dependencies import (
-    JOB_CMP_REFRESH,
     JOB_OHLCV_REFRESH,
+    JOB_OHLCV_REFRESH_SYMBOLS,
     JOB_SYMBOL_CATALOG_IMPORT,
     get_auth_service,
+    get_global_cmp_manager,
     get_job_runner,
     get_session_manager,
     get_symbol_catalog_service,
@@ -17,6 +21,7 @@ from api.dependencies import (
 )
 from core.auth.active_connection_store import get_active_connection_store
 from core.auth.context import UserContext
+from core.cmp import CMPManager
 from core.runtime.job_runner import JobRunner
 from core.services.auth_service import AuthService
 from core.services.symbol_catalog_service import SymbolCatalogService
@@ -115,113 +120,30 @@ def get_symbol_catalog_status(
     return service.get_status()
 
 
-@router.post("/market-data/cmp/refresh")
-def refresh_cmp(
-    current_user: UserContext = Depends(require_admin),
-    session_manager: SessionManager = Depends(get_session_manager),
-):
-    """Refresh CMP values from Upstox. Admin only."""
-    from api.dependencies import get_job_runner
-    from core.services.broker_connection_service import BrokerConnectionService
-
-    broker_service = BrokerConnectionService()
-
-    active_store = get_active_connection_store()
-    connection_id = active_store.get_active_connection(current_user.user_id)
-
-    if connection_id:
-        connection = broker_service.get_connection(connection_id)
-    else:
-        connections = broker_service.list_connections(
-            user_id=current_user.user_id,
-        )
-        upstox_conns = [c for c in connections if c.broker_name == "upstox"]
-        connection = upstox_conns[0] if upstox_conns else None
-        connection_id = connection.id if connection else None
-
-    if not connection_id or not connection or connection.broker_name != "upstox":
-        raise HTTPException(
-            status_code=409,
-            detail="UPSTOX_NOT_CONNECTED: No active Upstox connection found. Please connect Upstox from the Brokers page first.",
-        )
-
-    token_bundle = session_manager.get_token_bundle(
-        "upstox", connection_id=connection_id
-    )
-    if not token_bundle:
-        raise HTTPException(
-            status_code=409,
-            detail="UPSTOX_NOT_CONNECTED: Upstox session has expired. Please reconnect Upstox from the Brokers page.",
-        )
-
-    job_runner = get_job_runner()
-    job_id = job_runner.start_job(
-        session_id=f"admin-{current_user.user_id}",
-        job_type=JOB_CMP_REFRESH,
-        payload={
-            "connection_id": connection_id,
-        },
-    )
-
-    return {"job_id": job_id}
-
-
 @router.get("/market-data/cmp/status")
 def get_cmp_status(
     current_user: UserContext = Depends(require_admin),
-    service: SymbolCatalogService = Depends(get_symbol_catalog_service),
-    job_runner: JobRunner = Depends(get_job_runner),
 ):
-    """Get CMP status including coverage stats and last job summary. Admin only."""
-    status = service.get_status()
+    """Get CMP cache status. CMP is now served via in-memory cache with 5-min TTL."""
+    import os
 
-    import json
+    cmp_manager = get_global_cmp_manager()
+    cached_count = len(cmp_manager.cache)
+    last_updated = (
+        datetime.fromtimestamp(cmp_manager.last_updated, tz=timezone.utc).isoformat()
+        if cmp_manager.last_updated > 0
+        else None
+    )
+    ttl_seconds = cmp_manager.ttl
+    has_analytics_token = bool(os.environ.get("UPSTOX_ANALYTICS_TOKEN"))
 
-    from core.services.symbol_catalog_repository import SymbolCatalogRepository
-    from db.database import SessionLocal
-    from db.models import Job
-
-    db = SessionLocal()
-    try:
-        repo = SymbolCatalogRepository(db)
-        cmp_count = repo.get_cmp_count()
-
-        latest_cmp_job = (
-            db.query(Job)
-            .filter(
-                Job.job_type == JOB_CMP_REFRESH,
-                Job.status.in_(["succeeded", "failed"]),
-            )
-            .order_by(Job.updated_at.desc())
-            .first()
-        )
-
-        latest_job = None
-        if latest_cmp_job:
-            result = (
-                json.loads(latest_cmp_job.result_json)
-                if latest_cmp_job.result_json
-                else {}
-            )
-            latest_job = {
-                "job_id": latest_cmp_job.id,
-                "processed": result.get("processed", 0),
-                "succeeded": result.get("succeeded", 0),
-                "failed": result.get("failed", 0),
-                "updated_at": (
-                    latest_cmp_job.updated_at.isoformat()
-                    if latest_cmp_job.updated_at
-                    else None
-                ),
-            }
-
-        return {
-            "total_symbols": status.get("total_symbols", 0),
-            "cmp_present_count": cmp_count,
-            "last_cmp_job": latest_job,
-        }
-    finally:
-        db.close()
+    return {
+        "cached_symbols": cached_count,
+        "last_updated": last_updated,
+        "ttl_seconds": ttl_seconds,
+        "has_analytics_token": has_analytics_token,
+        "note": "CMP is fetched from Upstox API on-demand and cached in-memory with 5-min TTL",
+    }
 
 
 @router.get("/jobs/{job_id}/failures")
@@ -291,17 +213,25 @@ def get_ohlcv_status(
     from db.database import SessionLocal
     from db.models import Job, OhlcvDaily
 
+    from core.services.ohlcv_refresh_service import OhlcvRefreshService
+
+    service = OhlcvRefreshService()
+    config_days = service.get_config_days()
+
     db = SessionLocal()
     try:
         total_candles = db.query(func.count(OhlcvDaily.symbol)).scalar() or 0
-        symbols_with_candles = (
+        total_symbols = (
             db.query(func.count(func.distinct(OhlcvDaily.symbol))).scalar() or 0
         )
+
+        min_date = db.query(func.min(OhlcvDaily.trade_date)).scalar()
+        max_date = db.query(func.max(OhlcvDaily.trade_date)).scalar()
 
         latest_job = (
             db.query(Job)
             .filter(
-                Job.job_type == JOB_OHLCV_REFRESH,
+                Job.job_type.in_([JOB_OHLCV_REFRESH, JOB_OHLCV_REFRESH_SYMBOLS]),
                 Job.status.in_(["succeeded", "failed"]),
             )
             .order_by(Job.updated_at.desc())
@@ -315,72 +245,150 @@ def get_ohlcv_status(
             )
             last_job_info = {
                 "job_id": latest_job.id,
-                "processed_symbols": result.get("processed_symbols", 0),
-                "succeeded_symbols": result.get("succeeded_symbols", 0),
-                "failed_symbols": result.get("failed_symbols", 0),
-                "days": result.get("days", 0),
+                "symbols_refreshed": result.get("symbols_refreshed", 0),
+                "symbols_skipped": result.get("symbols_skipped", 0),
+                "symbols_failed": result.get("symbols_failed", 0),
+                "days": result.get("days", config_days),
                 "updated_at": (
                     latest_job.updated_at.isoformat() if latest_job.updated_at else None
                 ),
             }
 
         return {
+            "config_days": config_days,
+            "total_symbols": total_symbols,
+            "date_from": min_date.isoformat() if min_date else None,
+            "date_to": max_date.isoformat() if max_date else None,
             "total_candles": total_candles,
-            "symbols_with_candles": symbols_with_candles,
+            "last_updated": latest_job.updated_at.isoformat() if latest_job else None,
             "last_ohlcv_job": last_job_info,
         }
     finally:
         db.close()
 
 
+@router.get("/market-data/ohlcv/config")
+def get_ohlcv_config(
+    current_user: UserContext = Depends(require_admin),
+):
+    """Get OHLCV configuration. Admin only."""
+    from core.services.ohlcv_refresh_service import OhlcvRefreshService
+
+    service = OhlcvRefreshService()
+    days = service.get_config_days()
+    return {"days": days}
+
+
+class OhlcvConfigUpdate(BaseModel):
+    days: int = 200
+
+
+@router.put("/market-data/ohlcv/config")
+def update_ohlcv_config(
+    config: OhlcvConfigUpdate,
+    current_user: UserContext = Depends(require_admin),
+):
+    """Update OHLCV configuration. Admin only."""
+    from core.services.ohlcv_refresh_service import OhlcvRefreshService
+
+    if config.days < 30 or config.days > 500:
+        raise HTTPException(
+            status_code=400,
+            detail="Days must be between 30 and 500",
+        )
+
+    service = OhlcvRefreshService()
+    service.set_config_days(config.days)
+    return {"days": config.days}
+
+
+@router.post("/market-data/ohlcv/purge-all")
+def purge_all_ohlcv(
+    current_user: UserContext = Depends(require_admin),
+):
+    """Purge all OHLCV data. Admin only."""
+    from core.services.ohlcv_refresh_service import OhlcvRefreshService
+
+    service = OhlcvRefreshService()
+    result = service.purge_all()
+    return result
+
+
+class PurgeSymbolsRequest(BaseModel):
+    symbols: list[str]
+
+
+@router.post("/market-data/ohlcv/purge-symbols")
+def purge_symbols_ohlcv(
+    request: PurgeSymbolsRequest,
+    current_user: UserContext = Depends(require_admin),
+):
+    """Purge OHLCV data for specific symbols. Admin only."""
+    from core.services.ohlcv_refresh_service import OhlcvRefreshService
+
+    service = OhlcvRefreshService()
+    result = service.purge_for_symbols(request.symbols)
+    return result
+
+
+@router.get("/market-data/ohlcv/inspect/{symbol}")
+def inspect_ohlcv(
+    symbol: str,
+    days: int = 100,
+    current_user: UserContext = Depends(require_admin),
+):
+    """Inspect OHLCV data for a specific symbol. Admin only."""
+    from core.services.ohlcv_refresh_service import OhlcvRefreshService
+
+    service = OhlcvRefreshService()
+    result = service.inspect_symbol(symbol, days)
+    return result
+
+
 @router.post("/market-data/ohlcv/refresh")
 def refresh_ohlcv(
-    days: int = 200,
+    symbols: str = Query("", description="Comma-separated symbols to refresh"),
+    days: int = Query(200, ge=1, le=500, description="Number of days to fetch"),
     current_user: UserContext = Depends(require_admin),
-    session_manager: SessionManager = Depends(get_session_manager),
 ):
-    """Refresh OHLCV data from Upstox. Admin only."""
+    """Refresh OHLCV data. Provide comma-separated symbols or leave empty to use existing. Admin only."""
+    import os
     from api.dependencies import get_job_runner
-    from core.services.broker_connection_service import BrokerConnectionService
 
-    broker_service = BrokerConnectionService()
-
-    active_store = get_active_connection_store()
-    connection_id = active_store.get_active_connection(current_user.user_id)
-
-    if connection_id:
-        connection = broker_service.get_connection(connection_id)
-    else:
-        connections = broker_service.list_connections(
-            user_id=current_user.user_id,
-        )
-        upstox_conns = [c for c in connections if c.broker_name == "upstox"]
-        connection = upstox_conns[0] if upstox_conns else None
-        connection_id = connection.id if connection else None
-
-    if not connection_id or not connection or connection.broker_name != "upstox":
+    analytics_token = os.environ.get("UPSTOX_ANALYTICS_TOKEN")
+    if not analytics_token:
         raise HTTPException(
             status_code=409,
-            detail="UPSTOX_NOT_CONNECTED: No active Upstox connection found. Please connect Upstox from the Brokers page first.",
+            detail="UPSTOX_ANALYTICS_TOKEN not configured. Set UPSTOX_ANALYTICS_TOKEN in .env to refresh OHLCV data.",
         )
 
-    token_bundle = session_manager.get_token_bundle(
-        "upstox", connection_id=connection_id
-    )
-    if not token_bundle:
-        raise HTTPException(
-            status_code=409,
-            detail="UPSTOX_NOT_CONNECTED: Upstox session has expired. Please reconnect Upstox from the Brokers page.",
-        )
+    from core.services.ohlcv_refresh_service import OhlcvRefreshService
+    service = OhlcvRefreshService()
+
+    # Parse symbols from comma-separated string
+    symbol_list = []
+    if symbols:
+        symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    
+    if not symbol_list:
+        symbol_list = service.get_existing_symbols()
+
+    if not symbol_list:
+        return {
+            "job_id": None,
+            "message": "No symbols provided and no existing OHLCV data found. Please provide symbols.",
+            "symbols_count": 0,
+        }
 
     job_runner = get_job_runner()
     job_id = job_runner.start_job(
         session_id=f"admin-{current_user.user_id}",
-        job_type=JOB_OHLCV_REFRESH,
+        job_type=JOB_OHLCV_REFRESH_SYMBOLS,
         payload={
-            "connection_id": connection_id,
+            "symbols": symbol_list,
             "days": days,
+            "force_refresh": True,
         },
     )
 
-    return {"job_id": job_id}
+    return {"job_id": job_id, "symbols_count": len(symbol_list)}

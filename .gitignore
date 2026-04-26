@@ -161,3 +161,6 @@ logs/**/*.json
 **/gtt_plan_cache.json
 
 *.tsbuildinfo
+
+# Pickle files (token storage)
+*.pkl

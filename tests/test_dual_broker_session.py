@@ -41,7 +41,7 @@ def test_zerodha_session_works_without_upstox(engine, monkeypatch):
     """Starting a Zerodha session should work even without Upstox - market data is optional."""
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)
-    session_manager = SessionManager(token_store=store, dev_mode=False)
+    session_manager = SessionManager(token_store=store)
 
     def fake_get_broker(broker_name, broker_user_id, config):
         return DummyBroker(broker_name, broker_user_id, config)
@@ -87,7 +87,7 @@ def test_zerodha_session_succeeds_with_upstox(engine, monkeypatch):
     """Starting a Zerodha session should succeed when both connections exist - Upstox auto-selected for market data."""
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)
-    session_manager = SessionManager(token_store=store, dev_mode=False)
+    session_manager = SessionManager(token_store=store)
 
     def fake_get_broker(broker_name, broker_user_id, config):
         return DummyBroker(broker_name, broker_user_id, config)
@@ -151,7 +151,7 @@ def test_upstox_session_uses_same_connection(engine, monkeypatch):
     """Upstox session should use the same connection for trading and market data."""
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)
-    session_manager = SessionManager(token_store=store, dev_mode=False)
+    session_manager = SessionManager(token_store=store)
 
     def fake_get_broker(broker_name, broker_user_id, config):
         return DummyBroker(broker_name, broker_user_id, config)
@@ -196,7 +196,7 @@ def test_zerodha_with_explicit_market_data_connection(engine, monkeypatch):
     """Zerodha session should use explicit market_data_connection_id if provided."""
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)
-    session_manager = SessionManager(token_store=store, dev_mode=False)
+    session_manager = SessionManager(token_store=store)
 
     def fake_get_broker(broker_name, broker_user_id, config):
         return DummyBroker(broker_name, broker_user_id, config)

@@ -27,5 +27,6 @@ class SessionStartRequest(BaseModel):
 class SessionResponse(BaseModel):
     session_id: str
     broker_user_id: str
+    user_id: Optional[str] = None
     broker: str
     expires_at: Optional[str] = None

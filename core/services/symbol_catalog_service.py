@@ -99,9 +99,6 @@ class SymbolCatalogService:
             for i, row in enumerate(reader, start=2):
                 total_rows += 1
 
-                if total_rows <= 3:
-                    LOGGER.warning(f"Row {i} raw data: {dict(row)}")
-
                 raw_symbol = row.get(
                     normalized_headers.get("SYMBOL", "SYMBOL"), ""
                 ).strip()

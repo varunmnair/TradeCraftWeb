@@ -60,7 +60,7 @@ def test_db_token_store_roundtrip(engine):
 def test_session_registry_reads_tokens_from_db(engine, monkeypatch):
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)
-    session_manager = SessionManager(token_store=store, dev_mode=False)
+    session_manager = SessionManager(token_store=store)
 
     def fake_get_broker(broker_name, broker_user_id, config):
         return DummyBroker(broker_name, broker_user_id, config)
@@ -126,7 +126,7 @@ def test_session_registry_reads_tokens_from_db(engine, monkeypatch):
 def test_session_manager_access_token_from_db(engine):
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)
-    session_manager = SessionManager(token_store=store, dev_mode=False)
+    session_manager = SessionManager(token_store=store)
 
     with SessionTesting() as session:
         user = models.User(email="c@example.com", role="admin")

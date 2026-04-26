@@ -88,6 +88,28 @@ def _get_broker_scope_from_session(
     return broker, broker_user_id
 
 
+def _trigger_ohlcv_for_entry_strategies(symbols: list[str], user_id: int | None):
+    """Trigger OHLCV data refresh for entry strategy symbols with 24-hour skip."""
+    if not symbols:
+        return
+
+    from api.dependencies import get_job_runner, JOB_OHLCV_REFRESH_SYMBOLS
+
+    symbols_stripped = [str(s).strip().upper() for s in symbols]
+    session_id = f"entry-strategies-{user_id or 'unknown'}"
+
+    try:
+        job_runner = get_job_runner()
+        job_runner.start_job(
+            session_id=session_id,
+            job_type=JOB_OHLCV_REFRESH_SYMBOLS,
+            payload={"symbols": symbols_stripped},
+        )
+        logging.info(f"Triggered OHLCV refresh for {len(symbols_stripped)} entry strategy symbols")
+    except Exception as e:
+        logging.warning(f"Failed to trigger OHLCV refresh: {e}")
+
+
 def _require_active_connection_scope(
     current_user: UserContext,
     db: Session,
@@ -647,6 +669,8 @@ async def upload_csv(
 
     db.commit()
 
+    _trigger_ohlcv_for_entry_strategies(list(parsed_strategies.keys()), current_user.user_id)
+
     return EntryStrategyUploadResponse(
         symbols_processed=len(parsed_strategies),
         created_count=created_count,
@@ -674,6 +698,93 @@ def get_template():
         "da_e3_buyback": 5,
         "datrigger_offset": 1,
     }
+
+
+@router.get("/download.csv")
+def download_strategies_csv(
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    """
+    Download entry strategies as CSV for the active broker connection.
+    Use this to save your strategies or re-upload after editing.
+    """
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
+    strategies = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+        )
+        .all()
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "symbol", "allocated", "quality", "exchange",
+        "entry1", "entry2", "entry3",
+        "da_enabled", "da_legs", "da_e1_buyback", "da_e2_buyback", "da_e3_buyback", "datrigger_offset",
+    ])
+
+    for s in strategies:
+        levels = (
+            db.query(EntryLevel)
+            .filter(EntryLevel.strategy_id == s.id)
+            .order_by(EntryLevel.level_no)
+            .all()
+        )
+        
+        entry_prices = {l.level_no: l.price for l in levels}
+        
+        da_legs = None
+        da_buyback = [0, 0, 0]
+        da_trigger = 0
+        if s.averaging_rules_json:
+            try:
+                rules = json.loads(s.averaging_rules_json)
+                da_legs = rules.get("legs")
+                buyback = rules.get("buyback", [])
+                da_trigger = rules.get("trigger_offset", 0)
+                if len(buyback) >= 1:
+                    da_buyback[0] = buyback[0]
+                if len(buyback) >= 2:
+                    da_buyback[1] = buyback[1]
+                if len(buyback) >= 3:
+                    da_buyback[2] = buyback[2]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        writer.writerow([
+            s.symbol,
+            s.allocated or "",
+            s.quality or "",
+            s.exchange or "NSE",
+            entry_prices.get(1, ""),
+            entry_prices.get(2, ""),
+            entry_prices.get(3, ""),
+            "Y" if s.dynamic_averaging_enabled else "N",
+            da_legs or "",
+            da_buyback[0],
+            da_buyback[1],
+            da_buyback[2],
+            da_trigger,
+        ])
+
+    output.seek(0)
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=entry_strategies_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+        },
+    )
 
 
 def _get_cmp_for_symbol(symbol: str, db: Session, user_id: int | None) -> float | None:
@@ -1115,31 +1226,12 @@ def suggest_revision_bulk(
     cmp_prices: dict[str, float | None] = {}
 
     try:
-        from api.dependencies import get_session_registry
-        registry = get_session_registry()
-        for session_id, context in registry._records.items():
-            if context.user_record_id == current_user.user_id:
-                cmp_manager = context.session_cache.get_cmp_manager()
-                if cmp_manager:
-                    for symbol in symbols_upper:
-                        if symbol not in cmp_prices:
-                            try:
-                                ltp = cmp_manager.get_cmp("NSE", symbol)
-                                cmp_prices[symbol] = ltp
-                                logging.debug(f"CMP fetched for {symbol}: {ltp}")
-                            except RuntimeError as e:
-                                cmp_prices[symbol] = None
-                                logging.debug(f"CMP not available for {symbol}: {e}")
-                            except Exception as e:
-                                cmp_prices[symbol] = None
-                                logging.debug(f"CMP error for {symbol}: {e}")
-                    break
-                else:
-                    logging.debug("No CMP manager in session cache")
+        from api.dependencies import get_global_cmp_manager
+        cmp_manager = get_global_cmp_manager()
+        cmp_prices = cmp_manager.get_cmp_for_symbols(symbols_upper, "NSE")
+        logging.debug(f"CMP fetched via global manager: {cmp_prices}")
     except Exception as e:
-        logging.warning(f"Could not fetch CMP from session cache: {e}")
-
-    logging.info(f"suggest_revision_bulk: cmp_prices={cmp_prices}")
+        logging.warning(f"Could not fetch CMP from global manager: {e}")
 
     for symbol in symbols_upper:
         strategy = (

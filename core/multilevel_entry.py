@@ -107,30 +107,7 @@ class MultiLevelEntryPlanner(BaseEntryStrategy):
                 )
                 continue
 
-            ltp = None
-            try:
-                ltp = self.cmp_manager.get_cmp(exchange, symbol)
-            except RuntimeError as e:
-                entry_levels_dict = {
-                    "entry1": entry1 if is_entry1_valid else None,
-                    "entry2": entry2 if is_entry2_valid else None,
-                    "entry3": entry3 if is_entry3_valid else None,
-                }
-                self.pending_cmp_items.append(
-                    create_pending_cmp_item(symbol, exchange, entry_levels_dict)
-                )
-                continue
-            except Exception as e:
-                logging.warning(f"Error fetching CMP for {symbol}: {e}")
-                entry_levels_dict = {
-                    "entry1": entry1 if is_entry1_valid else None,
-                    "entry2": entry2 if is_entry2_valid else None,
-                    "entry3": entry3 if is_entry3_valid else None,
-                }
-                self.pending_cmp_items.append(
-                    create_pending_cmp_item(symbol, exchange, entry_levels_dict)
-                )
-                continue
+            ltp = self.cmp_manager.get_cmp(exchange, symbol)
 
             if ltp is None or ltp == 0 or (isinstance(ltp, float) and math.isnan(ltp)):
                 entry_levels_dict = {

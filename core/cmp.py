@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from datetime import date, timedelta
 
@@ -8,31 +9,36 @@ from core.utils import read_csv
 
 
 class CMPManager:
+    DEFAULT_TTL = 300
+
     def __init__(
         self,
         csv_path: str,
         broker,
         session_manager,
         market_data_connection_id: int = None,
-        ttl: int = 600,
+        ttl: int = DEFAULT_TTL,
     ):
         self.csv_path = csv_path
         self.cache = {}
         self.last_updated = 0
         self.ttl = ttl
-        self.broker = (
-            broker  # The active broker instance (ZerodhaBroker or UpstoxBroker)
-        )
-        self.session_manager = (
-            session_manager  # The SessionManager instance for token handling
-        )
-        self.market_data_connection_id = (
-            market_data_connection_id  # Upstox connection ID for market data
-        )
+        self.broker = broker
+        self.session_manager = session_manager
+        self.market_data_connection_id = market_data_connection_id
+        self._pending_symbols = set()
 
-    # ──────────────── Cache Validity ──────────────── #
     def _is_cache_valid(self):
         return (time.time() - self.last_updated) < self.ttl
+
+    def _is_stale(self, exchange: str, symbol: str) -> bool:
+        key = (exchange.upper(), symbol.upper())
+        return key not in self.cache
+
+    def _round_cmp(self, value: float | None) -> float | None:
+        if value is None:
+            return None
+        return round(value, 1)
 
     # ──────────────── Symbol Collection ──────────────── #
     def _collect_symbols(self, holdings, gtts, entry_levels):
@@ -102,17 +108,15 @@ class CMPManager:
     def _fetch_quotes(self, token, batch_keys):
         headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
         params = {"instrument_key": ",".join(batch_keys)}
-        url = "https://api.upstox.com/v2/market-quote/quotes"
+        url = "https://api.upstox.com/v3/market-quote/ltp"
         return requests.get(url, headers=headers, params=params)
 
     def _fetch_bulk_quote_upstox(self, symbols):
-        # Always use Upstox for market data - use market_data_connection_id if provided
-        connection_id = self.market_data_connection_id
-        token = (
-            self.session_manager.get_access_token("upstox", connection_id=connection_id)
-            if self.session_manager
-            else None
-        )
+        # Use analytics token from env only
+        token = os.environ.get("UPSTOX_ANALYTICS_TOKEN")
+        if not token:
+            logging.warning("UPSTOX_ANALYTICS_TOKEN not set. Skipping quote fetch.")
+            return {}
         instrument_keys = []
         symbol_map = {}
 
@@ -170,7 +174,15 @@ class CMPManager:
         logging.debug(f"Fetched quotes for {len(quote_map)} symbols")
         return quote_map
 
-    # ──────────────── Cache Refresh ──────────────── #
+    def refresh_for_symbols(self, keys: list[tuple[str, str]]):
+        if not keys:
+            return
+        symbols = [(exch.upper(), sym.upper()) for exch, sym in keys]
+        quotes = self._fetch_bulk_quote_upstox(symbols)
+        if quotes:
+            self.cache.update(quotes)
+            self.last_updated = time.time()
+
     def refresh_cache(self, holdings=None, gtts=None, entry_levels=None):
         if holdings is None or gtts is None or entry_levels is None:
             holdings = self.broker.get_holdings()
@@ -181,41 +193,54 @@ class CMPManager:
         self.last_updated = time.time()
         logging.debug(f"CMP cache refreshed with {len(self.cache)} symbols.")
 
-    # ──────────────── CMP Access ──────────────── #
-    def get_quote(self, exchange, symbol):
-        if not self._is_cache_valid():
-            raise RuntimeError("CMP cache is stale. Please refresh it first.")
-        return self.cache.get((exchange, symbol))
-
-    def get_cmp(self, exchange, symbol):
+    def get_cmp(self, exchange: str, symbol: str, auto_refresh: bool = True) -> float | None:
         symbol_clean = str(symbol).replace("-BE", "").strip().upper()
+        exchange_clean = exchange.upper()
+        key = (exchange_clean, symbol_clean)
 
-        try:
-            from core.services.symbol_catalog_repository import SymbolCatalogRepository
-            from db.database import SessionLocal
+        if key in self.cache:
+            quote = self.cache[key]
+            return self._round_cmp(quote.get("last_price"))
 
-            db = SessionLocal()
-            try:
-                repo = SymbolCatalogRepository(db)
-                cmp_value = repo.get_cmp_for_symbol(symbol_clean)
+        if auto_refresh:
+            self._pending_symbols.add(key)
+            self.refresh_for_symbols([key])
+            self._pending_symbols.discard(key)
+            if key in self.cache:
+                quote = self.cache[key]
+                return self._round_cmp(quote.get("last_price"))
 
-                if cmp_value is not None:
-                    return cmp_value
-                else:
-                    raise RuntimeError(
-                        f"CMP not available for {symbol_clean}. "
-                        "Admin must run CMP refresh from the Admin page first."
-                    )
-            finally:
-                db.close()
-        except Exception as e:
-            if "CMP not available" in str(e):
-                raise
-            logging.warning(f"Error reading CMP from symbol catalog: {e}")
-            quote = self.get_quote(exchange, symbol)
-            if quote:
-                return quote.get("last_price")
-            return None
+        logging.debug(f"CMP not available for {symbol_clean} after refresh attempt")
+        return None
+
+    def get_cmp_for_symbols(
+        self, symbols: list[str], exchange: str = "NSE"
+    ) -> dict[str, float | None]:
+        exchange_clean = exchange.upper()
+        keys_needed = set()
+        result = {}
+
+        for sym in symbols:
+            sym_clean = str(sym).replace("-BE", "").strip().upper()
+            key = (exchange_clean, sym_clean)
+            if key in self.cache:
+                result[sym_clean] = self._round_cmp(self.cache[key].get("last_price"))
+            else:
+                keys_needed.add(key)
+                result[sym_clean] = None
+
+        if keys_needed:
+            self._pending_symbols.update(keys_needed)
+            self.refresh_for_symbols(list(keys_needed))
+            self._pending_symbols.difference_update(keys_needed)
+
+            for sym in symbols:
+                sym_clean = str(sym).replace("-BE", "").strip().upper()
+                key = (exchange_clean, sym_clean)
+                if key in self.cache:
+                    result[sym_clean] = self._round_cmp(self.cache[key].get("last_price"))
+
+        return result
 
     def print_all_cmps(self):
         print("\n📊 Cached CMPs:")

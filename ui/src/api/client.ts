@@ -38,6 +38,7 @@ import {
   BulkSuggestRevisionResponse,
   BulkApplyRevisionResponse,
   ActiveConnectionResponse,
+  TradesListResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -245,6 +246,12 @@ class ApiClient {
     });
   }
 
+  async closeSession(sessionId: string): Promise<{ session_id: string; closed: boolean }> {
+    return this.request<{ session_id: string; closed: boolean }>(`/session/${sessionId}`, {
+      method: 'DELETE',
+    });
+  }
+
   async setActiveConnection(brokerConnectionId: number): Promise<ActiveConnectionResponse> {
     return this.request<ActiveConnectionResponse>('/session/active-connection', {
       method: 'POST',
@@ -270,6 +277,10 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  async getAnalyzedHoldings(sessionId: string): Promise<{ results: any[] }> {
+    return this.request<{ results: any[] }>(`/holdings/${sessionId}/analyze`);
   }
 
   async getHoldingsLatest(sessionId: string): Promise<HoldingsLatestResponse> {
@@ -382,6 +393,11 @@ class ApiClient {
     return this.request<{ message: string }>(`/holdings/${sessionId}/order-history`, {
       method: 'DELETE',
     });
+  }
+
+  async getTrades(sessionId: string, symbol?: string): Promise<TradesListResponse> {
+    const params = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
+    return this.request<TradesListResponse>(`/holdings/${sessionId}/trades${params}`);
   }
 
   async generatePlan(data: PlanGenerateRequest): Promise<JobQueuedResponse> {
@@ -545,6 +561,40 @@ class ApiClient {
     return this.request<Record<string, unknown>>('/entry-strategies/template.csv');
   }
 
+  async downloadStrategiesCSV(): Promise<void> {
+    const headers: HeadersInit = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(`${API_BASE_URL}/entry-strategies/download.csv`, {
+      method: 'GET',
+      headers,
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to download strategies');
+    }
+
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const contentDisposition = response.headers.get('Content-Disposition');
+    let filename = 'entry_strategies.csv';
+    if (contentDisposition) {
+      const match = contentDisposition.match(/filename=(.+)/);
+      if (match) {
+        filename = match[1].trim().replace(/"/g, '');
+      }
+    }
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  }
+
   async suggestRevision(symbol: string, method?: string, pctAdjustment?: number): Promise<SuggestRevisionResponse> {
     const params = new URLSearchParams();
     if (method) params.append('method', method);
@@ -683,45 +733,51 @@ class ApiClient {
     return response.json();
   }
 
-  async refreshCMP(): Promise<{ job_id: number }> {
-    return this.request<{ job_id: number }>('/admin/market-data/cmp/refresh', {
-      method: 'POST',
-    });
-  }
-
   async getCMPStatus(): Promise<{
-    total_symbols: number;
-    cmp_present_count: number;
-    last_cmp_job: {
-      job_id: number;
-      processed: number;
-      succeeded: number;
-      failed: number;
-      updated_at: string | null;
-    } | null;
+    cached_symbols: number;
+    last_updated: string | null;
+    ttl_seconds: number;
+    has_analytics_token: boolean;
+    note: string;
   }> {
     return this.request('/admin/market-data/cmp/status');
   }
 
-  async refreshOHLCV(days: number = 200): Promise<{ job_id: number }> {
-    return this.request<{ job_id: number }>(`/admin/market-data/ohlcv/refresh?days=${days}`, {
+  async refreshOHLCV(days: number = 200): Promise<{ job_id: number | null; symbols_count: number }> {
+    return this.request(`/admin/market-data/ohlcv/refresh?days=${days}`, {
       method: 'POST',
     });
   }
 
   async getOHLCVStatus(): Promise<{
+    config_days: number;
+    total_symbols: number;
+    date_from: string | null;
+    date_to: string | null;
     total_candles: number;
-    symbols_with_candles: number;
+    last_updated: string | null;
     last_ohlcv_job: {
       job_id: number;
-      processed_symbols: number;
-      succeeded_symbols: number;
-      failed_symbols: number;
+      symbols_refreshed: number;
+      symbols_skipped: number;
+      symbols_failed: number;
       days: number;
       updated_at: string | null;
     } | null;
   }> {
     return this.request('/admin/market-data/ohlcv/status');
+  }
+
+  async getOHLCVConfig(): Promise<{ days: number }> {
+    return this.request('/admin/market-data/ohlcv/config');
+  }
+
+  async updateOHLCVConfig(days: number): Promise<{ days: number }> {
+    return this.request('/admin/market-data/ohlcv/config', {
+      method: 'PUT',
+      body: JSON.stringify({ days }),
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   async getLastOHLCVJob(): Promise<{
@@ -753,6 +809,28 @@ class ApiClient {
     failures: Array<{ symbol: string; excerpt: string }>;
   }> {
     return this.request(`/admin/jobs/${jobId}/failures`);
+  }
+
+  async purgeAllOHLCV(): Promise<{ operation: string; candles_deleted: number; metadata_deleted: number }> {
+    return this.request('/admin/market-data/ohlcv/purge-all', { method: 'POST' });
+  }
+
+  async purgeOHLCVForSymbols(symbols: string[]): Promise<{ operation: string; symbols_purged: number; candles_deleted: number }> {
+    return this.request('/admin/market-data/ohlcv/purge-symbols', {
+      method: 'POST',
+      body: JSON.stringify({ symbols }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  async inspectOHLCV(symbol: string, days: number = 100): Promise<{
+    symbol: string;
+    date_from: string | null;
+    date_to: string | null;
+    candles: Array<{ date: string; open: number; high: number; low: number; close: number; volume: number }>;
+    error?: string;
+  }> {
+    return this.request(`/admin/market-data/ohlcv/inspect/${symbol.toUpperCase()}?days=${days}`);
   }
 }
 

@@ -124,7 +124,16 @@ export interface OrderHistoryStatus {
   symbol_count: number;
   fetched_at: string | null;
   source: string | null;
+  date_from: string | null;
+  date_to: string | null;
 }
+
+export type AgeReason = 
+  | "order_history_not_fetched"
+  | "no_trades_for_symbol"
+  | "no_buy_trades"
+  | "buy_trades_beyond_400_days"
+  | null;
 
 export interface HoldingsRow {
   symbol: string;
@@ -133,20 +142,15 @@ export interface HoldingsRow {
   average_price: number;
   last_price: number | null;
   invested: number;
-  pnl: number | null;
-  pnl_pct: number | null;
-  avg_buy_price: number | null;
-  total_buy_qty: number | null;
-  avg_sell_price: number | null;
-  total_sell_qty: number | null;
-  buy_value: number | null;
-  sell_value: number | null;
-  net_value: number | null;
-  first_buy_date: string | null;
-  last_buy_date: string | null;
+  profit: number;
+  profit_pct: number;
+  quality: string | null;
+  age: number | null;
+  age_reason: AgeReason;
+  roi_per_day: number | null;
+  profit_per_day: number | null;
+  weighted_roi: number | null;
   trend: string | null;
-  trend_days: number | null;
-  trend_roi: number | null;
 }
 
 export interface HoldingsResponse {
@@ -155,6 +159,22 @@ export interface HoldingsResponse {
   broker_user_id: string;
   holdings: HoldingsRow[];
   order_history: OrderHistoryStatus;
+}
+
+export interface Trade {
+  symbol: string;
+  trade_date: string | null;
+  side: string;
+  quantity: number;
+  price: number;
+  trade_id: string | null;
+  source: string;
+}
+
+export interface TradesListResponse {
+  trades: Trade[];
+  total_count: number;
+  symbol: string | null;
 }
 
 export interface PlanLatestResponse {
@@ -215,6 +235,8 @@ export interface ConnectionStatus {
   connected: boolean;
   broker_user_id: string | null;
   token_updated_at: string | null;
+  expires_at: string | null;
+  token_status: 'valid' | 'expired' | 'missing';
 }
 
 export interface BrokerStatusResponse {

@@ -269,6 +269,22 @@ class OhlcvDaily(Base):
     )
 
 
+class OhlcvConfig(Base):
+    __tablename__ = "ohlcv_config"
+
+    id = Column(Integer, primary_key=True)
+    days = Column(Integer, nullable=False, default=200)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class OhlcvMetadata(Base):
+    __tablename__ = "ohlcv_metadata"
+
+    symbol = Column(String(50), primary_key=True)
+    last_fetched_at = Column(DateTime(timezone=True), nullable=False)
+    days_stored = Column(Integer, nullable=False)
+
+
 class UserTrade(Base):
     __tablename__ = "user_trades"
 
@@ -289,9 +305,47 @@ class UserTrade(Base):
     order_id = Column(String(50), nullable=True)
     order_execution_time = Column(String(50), nullable=True)
     source = Column(String(20), nullable=False)
+    captured_at = Column(DateTime(timezone=True), nullable=True)
+    capture_source = Column(String(20), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint("user_id", "broker", "trade_id", name="uq_user_broker_trade_id"),
         Index("ix_trades_session_symbol", "session_id", "symbol"),
+    )
+
+
+class TradeSyncMetadata(Base):
+    __tablename__ = "trade_sync_metadata"
+
+    user_id = Column(Integer, primary_key=True)
+    broker = Column(String(20), primary_key=True)
+    last_capture_date = Column(Date, nullable=True)
+    last_capture_trade_count = Column(Integer, nullable=True)
+    last_updated_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class SessionHolding(Base):
+    __tablename__ = "session_holdings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False)
+    session_id = Column(String(36), nullable=False, index=True)
+    symbol = Column(String(50), nullable=False)
+    exchange = Column(String(10), nullable=True, default="NSE")
+    quantity = Column(Integer, nullable=False, default=0)
+    average_price = Column(Float, nullable=False, default=0.0)
+    last_price = Column(Float, nullable=True)
+    invested = Column(Float, nullable=True)
+    pnl = Column(Float, nullable=True)
+    pnl_pct = Column(Float, nullable=True)
+    quality = Column(String(20), nullable=True)
+    exchange_token = Column(String(50), nullable=True)
+    instrument_token = Column(String(50), nullable=True)
+    isin = Column(String(50), nullable=True)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "symbol", "exchange", name="uq_session_holding_symbol"),
+        Index("ix_session_holdings_session", "session_id"),
     )

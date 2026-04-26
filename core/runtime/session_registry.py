@@ -12,6 +12,7 @@ from uuid import uuid4
 from brokers.broker_factory import BrokerFactory
 from core.auth.context import UserContext
 from core.session import SessionCache
+from core.session_data import SessionDataManager
 from core.session_manager import SessionManager
 from core.session_tokens import TokenBundle
 from db import models
@@ -283,19 +284,45 @@ class SessionRegistry:
             return len(to_evict)
 
     def _clear_session_data(self, context: "SessionContext") -> None:
-        """Clear all session-scoped data including holdings and order history."""
+        """Clear all session-scoped data including holdings, order history, entry strategies, and entry plans."""
         try:
-            # Clear order history from session cache
+            logger.info(f"Clearing session data for session: {context.session_id}, user_id: {context.user_record_id}")
+            
             if hasattr(context, 'session_cache') and context.session_cache:
                 context.session_cache.clear_order_history()
-            
-            # Clear holdings (set to empty list)
-            if hasattr(context, 'session_cache') and context.session_cache:
                 context.session_cache.holdings = []
+            
+            dm = SessionDataManager(context)
+            logger.info(f"SessionDataManager user_id: {dm.user_id}, broker: {dm.broker_name}")
+            dm.purge_all()
+            
+            self._purge_entry_plans(context.session_id)
             
             logging.info(f"Cleared session data for session: {context.session_id}")
         except Exception as e:
             logging.warning(f"Failed to clear session data: {e}")
+
+    def _purge_entry_plans(self, session_id: str) -> None:
+        """Mark entry plan jobs as purged for this session."""
+        try:
+            from db.database import SessionLocal
+            from db.models import Job
+            
+            db = SessionLocal()
+            try:
+                count = db.query(Job).filter(
+                    Job.session_id == session_id,
+                    Job.job_type.in_(["plan_generate", "dynamic_avg_generate"])
+                ).update(
+                    {"status": "purged", "result_json": None},
+                    synchronize_session=False
+                )
+                db.commit()
+                logger.info(f"Purged {count} entry plan jobs for session {session_id}")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Failed to purge entry plans: {e}")
 
     def active_sessions(self) -> int:
         with self._lock:

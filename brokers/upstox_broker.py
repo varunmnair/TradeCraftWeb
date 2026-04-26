@@ -67,13 +67,29 @@ class UpstoxBroker(BaseBroker):
         self.connection_id = connection_id
 
     def _get_access_token(self) -> str:
+        from datetime import datetime, timezone
+        
         if self.session_manager and self.connection_id:
-            token = self.session_manager.get_access_token(
+            bundle = self.session_manager.get_token_bundle(
                 "upstox", connection_id=self.connection_id
             )
-            if not token:
+            if not bundle:
                 raise RuntimeError(self.TOKEN_ERROR)
-            return token
+            
+            if bundle.expires_at:
+                expires_dt = bundle.expires_at
+                if isinstance(expires_dt, str):
+                    expires_dt = datetime.fromisoformat(expires_dt)
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+                
+                if datetime.now(timezone.utc) >= expires_dt:
+                    raise RuntimeError(
+                        "Upstox token has expired. Please reconnect from Broker Connections."
+                    )
+            
+            return bundle.access_token
+        
         if self.access_token:
             return self.access_token
         raise RuntimeError(self.TOKEN_ERROR)
@@ -414,86 +430,130 @@ class UpstoxBroker(BaseBroker):
             self._trades = read_csv(file_path)
         return self._trades
 
-    def trades(self):
+    def trades(self, days: int = 400):
         """
-        Retrieve the user's trades from the broker's API and format them
-        to match the Zerodha broker's trade structure.
+        Retrieve ALL user's trades from the broker's API using /v2/charges/historical-trades
+        with pagination support. Fetches all pages until no more data is available.
+        
+        Args:
+            days: Number of days of history to fetch (default: 400)
+            
+        Returns:
+            List of formatted trades matching the internal trade structure
         """
-        logging.debug("Getting trades from Upstox API")
+        logging.info(f"Getting trades from Upstox historical-trades API (days={days})")
+        
         try:
-            api_response = self.order_api.get_trade_history("v2")
-            upstox_trades = api_response.data
+            # Get access token
+            access_token = None
+            if hasattr(self, 'session_manager') and self.session_manager:
+                access_token = self.session_manager.get_access_token("upstox")
+            
+            if not access_token:
+                logging.error("No access token available for Upstox trades API")
+                return []
+            
+            # Calculate date range based on requested days
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            
+            url = "https://api.upstox.com/v2/charges/historical-trades"
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {access_token}",
+            }
+            
+            # Log curl command for debugging (first page only)
+            curl_cmd = f'curl -H "Authorization: Bearer {access_token}" "{url}?segment=EQ&start_date={start_date}&end_date={end_date}&page_number=1&page_size=100"'
+            logging.info(f"CURL for debugging: {curl_cmd}")
+            
+            # Paginate through all results
+            all_upstox_trades = []
+            page = 1
+            page_size = 100
+            max_pages = 100  # Safety limit
+            
+            while page <= max_pages:
+                params = {
+                    "segment": "EQ",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "page_number": page,
+                    "page_size": page_size,
+                }
+                
+                logging.info(f"Fetching trades page {page}...")
+                
+                response = requests.get(url, headers=headers, params=params, timeout=30)
+                
+                if response.status_code != 200:
+                    logging.error(f"Upstox trades API returned status {response.status_code}: {response.text}")
+                    break
+                
+                data = response.json()
+                
+                if data.get("status") != "success":
+                    error_msg = data.get("errors", [{"message": "Unknown error"}])[0].get("message", "Unknown error")
+                    logging.error(f"Upstox trades API error: {error_msg}")
+                    break
+                
+                page_trades = data.get("data", [])
+                
+                if not page_trades:
+                    logging.info(f"No more trades on page {page}, stopping pagination")
+                    break
+                
+                all_upstox_trades.extend(page_trades)
+                logging.info(f"Page {page}: {len(page_trades)} trades (total: {len(all_upstox_trades)})")
+                
+                # If we got fewer than page_size, we've reached the end
+                if len(page_trades) < page_size:
+                    logging.info(f"Received {len(page_trades)} < {page_size}, reached end of data")
+                    break
+                
+                page += 1
+            
+            logging.info(f"Upstox API returned {len(all_upstox_trades)} total trades across {page} pages")
+            
+            # Format trades to match our internal structure
             formatted_trades = []
-            for trade in upstox_trades:
-
-                def parse_datetime(date_str):
-                    if not date_str:
-                        return None
-
-                    # List of possible formats
-                    formats_to_try = [
-                        "%Y-%m-%dT%H:%M:%S",  # ISO format
-                        "%Y-%m-%d %H:%M:%S",  # Space separated
-                    ]
-
-                    # Pre-process string to handle variations
-                    date_str = date_str.replace("Z", "")
-                    if "." in date_str:
-                        date_str = date_str.split(".")[0]
-
-                    for fmt in formats_to_try:
-                        try:
-                            return datetime.strptime(date_str, fmt)
-                        except (ValueError, TypeError):
-                            continue
-
-                    # If all formats fail, log a warning and return the original string
-                    logging.warning(
-                        f"Could not parse datetime string '{date_str}' with known formats."
-                    )
-                    return date_str
-
-                def format_time(date_obj):
-                    if not date_obj or not isinstance(date_obj, datetime):
-                        return None
-                    return date_obj.strftime("%H:%M:%S")
-
-                product_mapping = {
-                    "D": "CNC",
-                    "I": "MIS",
-                }  # Add other mappings if needed
-
-                order_timestamp_dt = parse_datetime(trade.order_timestamp)
-
-                tradingsymbol = trade.tradingsymbol
-                instrument_token = trade.instrument_token
-                if (
-                    instrument_token
-                    and instrument_token.startswith("NSE_EQ")
-                    and not tradingsymbol.endswith("-EQ")
-                ):
-                    tradingsymbol += "-EQ"
-
+            for trade in all_upstox_trades:
+                trade_date = trade.get("trade_date")
+                
+                # Parse symbol - remove -EQ suffix if present
+                symbol = trade.get("symbol", "")
+                if symbol.endswith("-EQ"):
+                    symbol = symbol[:-3]
+                symbol = symbol.strip().upper()
+                
                 formatted_trade = {
                     "account_id": self.broker_user_id,
-                    "trade_id": trade.trade_id,
-                    "order_id": trade.order_id,
-                    "exchange": trade.exchange,
-                    "tradingsymbol": tradingsymbol,
-                    "instrument_token": instrument_token,
-                    "product": product_mapping.get(trade.product, trade.product),
-                    "average_price": trade.average_price,
-                    "quantity": trade.quantity,
-                    "exchange_order_id": trade.exchange_order_id,
-                    "transaction_type": trade.transaction_type,
-                    "fill_timestamp": parse_datetime(trade.exchange_timestamp),
-                    "order_timestamp": format_time(order_timestamp_dt),
-                    "exchange_timestamp": parse_datetime(trade.exchange_timestamp),
+                    "trade_id": trade.get("trade_id"),
+                    "order_id": None,  # Not available in this API
+                    "exchange": trade.get("exchange", "NSE"),
+                    "tradingsymbol": symbol,
+                    "instrument_token": trade.get("instrument_token"),
+                    "isin": trade.get("isin"),
+                    "product": "CNC",  # Assume CNC for historical trades
+                    "average_price": trade.get("price", 0),
+                    "quantity": trade.get("quantity", 0),
+                    "exchange_order_id": None,
+                    "transaction_type": trade.get("transaction_type", ""),
+                    "fill_timestamp": datetime.strptime(trade_date, "%Y-%m-%d") if trade_date else None,
+                    "order_timestamp": None,
+                    "exchange_timestamp": datetime.strptime(trade_date, "%Y-%m-%d") if trade_date else None,
                 }
                 formatted_trades.append(formatted_trade)
+            
+            logging.info(f"Formatted {len(formatted_trades)} trades")
             return formatted_trades
-        except ApiException as e:
-            logging.debug(f"Error getting trades from Upstox API: {e}")
+            
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request error getting trades from Upstox API: {e}")
+            return []
+        except Exception as e:
+            logging.error(f"Error getting trades from Upstox API: {e}")
             return []
 
     def place_order(self, order_details):
