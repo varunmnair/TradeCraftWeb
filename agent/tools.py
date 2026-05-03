@@ -9,7 +9,7 @@ class ToolRegistry:
         self.broker = broker
         self.holdings_analyzer = HoldingsAnalyzer(broker.user_id, broker.broker_name)
         session_manager = SessionManager()
-        self.cmp_manager = CMPManager(csv_path="data/Name-symbol-mapping.csv", broker=broker, session_manager=session_manager)
+        self.cmp_manager = CMPManager(broker=broker, session_manager=session_manager)
 
 
     def get_tools(self):

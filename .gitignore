@@ -135,8 +135,6 @@ dmypy.json
 
 # Project Specific
 *.csv
-!name-symbol-mapping.csv
-!*-entry-levels.csv
 *.xlsx
 #*.json
 !config.json

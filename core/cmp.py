@@ -5,21 +5,17 @@ from datetime import date, timedelta
 
 import requests
 
-from core.utils import read_csv
-
 
 class CMPManager:
     DEFAULT_TTL = 300
 
     def __init__(
         self,
-        csv_path: str,
         broker,
         session_manager,
         market_data_connection_id: int = None,
         ttl: int = DEFAULT_TTL,
     ):
-        self.csv_path = csv_path
         self.cache = {}
         self.last_updated = 0
         self.ttl = ttl
@@ -185,9 +181,7 @@ class CMPManager:
 
     def refresh_cache(self, holdings=None, gtts=None, entry_levels=None):
         if holdings is None or gtts is None or entry_levels is None:
-            holdings = self.broker.get_holdings()
-            gtts = self.broker.get_gtt_orders()
-            entry_levels = read_csv("data/entry_levels.csv")
+            raise ValueError("holdings, gtts, and entry_levels must be provided")
         symbols = self._collect_symbols(holdings, gtts, entry_levels)
         self.cache = self._fetch_bulk_quote_upstox(symbols)
         self.last_updated = time.time()

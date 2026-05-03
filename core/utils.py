@@ -80,8 +80,6 @@ def print_table(rows: List[Dict], columns: List[str], title=None, spacing=4):
 
 # ──────────────── CSV Reader ──────────────── #
 
-import os
-
 
 def read_csv(file_path: str) -> List[Dict[str, Any]]:
     try:
@@ -123,23 +121,16 @@ def get_trade_from_tradebook(
 
 def get_symbol_from_isin(isin: str) -> Optional[str]:
     """
-    Retrieves the symbol for a given ISIN from the Name-symbol-mapping.csv file.
-
-    Args:
-        isin (str): The ISIN of the instrument.
-
-    Returns:
-        str: The symbol corresponding to the ISIN, or None if not found.
+    Retrieves the symbol for a given ISIN from the symbol catalog (DB).
     """
     try:
-        mapping_file_path = os.path.join(
-            os.path.dirname(__file__), "..", "data", "Name-symbol-mapping.csv"
-        )
-        df = pd.read_csv(mapping_file_path)
-        df.columns = [col.strip() for col in df.columns]
-        matches = df[df["ISIN NUMBER"] == isin]["SYMBOL"].astype(str).tolist()
-        if matches:
-            return matches[0]
+        from core.services.symbol_catalog_service import SymbolCatalogService
+
+        service = SymbolCatalogService()
+        isin_map = service.get_symbol_isin_map()
+        for symbol, mapped_isin in isin_map.items():
+            if mapped_isin == isin:
+                return symbol
         return None
     except Exception as e:
         logging.error(f"Failed to get symbol from ISIN: {e}")

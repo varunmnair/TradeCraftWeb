@@ -1,6 +1,7 @@
 @echo off
+cd /D "%~dp0\.."
 if not exist venv (
-    echo Virtual environment not found. Please run setup.bat first.
+    echo Virtual environment not found. Please run tools\setup.bat first.
     pause
     exit /b
 )

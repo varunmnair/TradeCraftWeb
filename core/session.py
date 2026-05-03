@@ -188,7 +188,6 @@ class SessionCache:
 
         if not self.cmp_manager:
             self.cmp_manager = CMPManager(
-                csv_path="data/Name-symbol-mapping.csv",
                 broker=self.broker,
                 session_manager=self.session_manager,
                 market_data_connection_id=self.market_data_connection_id,

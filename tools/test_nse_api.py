@@ -52,15 +52,9 @@ def get_equity_candles(session: requests.Session, symbol: str) -> dict:
     """
     Fetch intraday chart candles for an equity.
     NSE commonly serves OHLCV-like series via chart endpoint.
-
-    Returned structure may vary slightly; usually includes arrays under keys like:
-    - 'grapthData' / 'graphData' / 'data'
-    where each item is [timestamp(ms), price] or OHLC points depending on endpoint variant.
     """
     url = f"{BASE}/api/chart-databyindex"
-    # For equities, NSE often uses "symbols" param like: "TCS" or "SBIN"
-    # Some variants accept "index" or "symbol". We'll try the commonly working param.
-    params = {"index": symbol.upper()}  # in practice, works for many equities/indices
+    params = {"index": symbol.upper()}
     r = session.get(url, params=params, timeout=15)
     r.raise_for_status()
     return r.json()
@@ -87,13 +81,7 @@ def pretty_print_quote(quote: dict):
 def normalize_chart_points(chart_json: dict):
     """
     Best-effort normalization for common NSE chart responses.
-    Some NSE chart endpoints return:
-      - graphData: [[ts_ms, price], ...]
-    Others might return OHLC arrays.
-
-    This function returns a list of dict points for easy use.
     """
-    # Try a few common keys seen in community wrappers
     candidates = ["graphData", "grapthData", "data", "candles", "chartData"]
     series = None
     for k in candidates:
@@ -114,7 +102,6 @@ def normalize_chart_points(chart_json: dict):
         elif isinstance(item, dict):
             points.append(item)
         else:
-            # unknown shape
             continue
     return points
 

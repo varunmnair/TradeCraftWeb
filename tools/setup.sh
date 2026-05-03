@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.."
 echo "Setting up TradeCraftX Environment..."
 
 if [ ! -d "venv" ]; then
@@ -8,4 +9,4 @@ fi
 
 source venv/bin/activate
 pip install -r requirements.txt
-echo "Setup complete. You can now run './run.sh'."
+echo "Setup complete. You can now run './tools/run.sh'."

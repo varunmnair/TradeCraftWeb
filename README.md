@@ -40,27 +40,8 @@ TradeCraftX is a multi-broker trading automation and analysis CLI tool designed 
    ```
 
 3. **Configure Credentials:**
-   - Rename `.env.example` to `.env`.
-   - Open `.env` and fill in your API keys for Zerodha, Upstox, and Gemini.
-
-4. **Data Setup:**
-   Before running the project, ensure the following data files are in place:
-   
-   - **`name-symbol-mapping.csv`**: A mapping of stock symbols to their full names.
-     ```csv
-     Symbol,Name
-     RELIANCE,Reliance Industries Ltd
-     TCS,Tata Consultancy Services Ltd
-     ```
-   - **Entry Levels CSV**: A CSV file containing your planned entry levels.
-     - **Naming Convention**: `{user_id}-{broker}-entry-levels.csv` (e.g., `NM9100-zerodha-entry-levels.csv`).
-     - **Format**: Should contain columns like `Symbol`, `Entry_Level`, `Quantity`.
-     ```csv
-     Symbol,Entry_Level,Quantity,Note
-     RELIANCE,2350,10,Support level
-     TCS,3400,5,Long term
-     ```
-     - *Note*: Ensure the filename matches the User ID you input when running the application.
+    - Rename `.env.example` to `.env`.
+    - Open `.env` and fill in your API keys for Zerodha, Upstox, and Gemini.
 
 ## Usage
 

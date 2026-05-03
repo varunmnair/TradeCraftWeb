@@ -55,7 +55,6 @@ _job_runner = JobRunner(SessionLocal, session_registry=_session_registry)
 _trades_service = get_trades_service()
 _symbol_catalog_service = SymbolCatalogService()
 _global_cmp_manager = CMPManager(
-    csv_path="data/Name-symbol-mapping.csv",
     broker=None,
     session_manager=None,
     market_data_connection_id=None,

@@ -1,146 +1,111 @@
 # AGENTS.md
 
 ## Purpose
-- TradeCraftX is an API-first application with a web UI as the primary user interface.
+- TradeCraftX is an API-first trading automation and analysis application for Zerodha and Upstox.
+- Web UI (React/Vite) is the primary interface; CLI exists for legacy/debugging only.
 - This document provides autonomous agents the minimum context they need to work safely.
-- The CLI exists for legacy workflows, debugging, or developer convenience only.
 
 ## Repository Layout
-- `api/`: FastAPI backend; handles authentication, sessions, jobs, and core trading workflows.
-- `ui/`: React UI built with Vite; the primary user interaction layer.
-- `core/`: Trading engines: CLI commands, risk management, CMP cache, session cache, holdings analytics, entry planners.
+- `api/`: FastAPI backend (auth, sessions, jobs, trading workflows). Entry point: `api/main.py`.
+- `ui/`: React + TypeScript + MUI, built with Vite. API calls go directly to `:8000` via `ui/.env` (`VITE_API_BASE_URL=http://localhost:8000`).
+- `core/`: Trading engines — CLI, risk, CMP cache, session cache, holdings analytics, entry planners, services.
 - `brokers/`: Broker adapters (`ZerodhaBroker`, `UpstoxBroker`) plus `BrokerFactory`.
 - `agent/`: AI-facing helpers (LLM provider, strategy agent loop, tool registry).
-- `data/`: CSV inputs (tradebooks, ROI history, entry levels). Gitignored for sensitive data.
-- `auth/`: OAuth state tokens (temporary). Broker tokens stored encrypted in DB. Treat as sensitive, do not commit.
+- `db/`: SQLAlchemy models, Alembic migrations, database config.
+- `data/`: OHLCV cache, tradebook CSVs, runtime artifacts. Gitignored.
+- `auth/`: OAuth state tokens (temporary). Broker tokens stored encrypted in DB. Treat as sensitive.
 
 ## Environment & Setup
-- **Python**: 3.10+ with venv: `python -m venv venv && venv\Scripts\activate` (Windows) or `source venv/bin/activate` (Unix).
+- **Python**: 3.10+ with venv: `python -m venv venv && venv\Scripts\activate` (Windows).
 - **Node.js**: v18+ for frontend.
 - **Backend deps**: `pip install -r requirements.txt`
-- **Frontend deps**: `npm install` in `ui/`
-- **Env files**: Copy `.env.example` to `.env` - keys: `KITE_API_KEY`, `UPSTOX_API_KEY`, `JWT_SECRET`, `TOKEN_ENCRYPTION_KEY`, etc.
-- **Linting**: `.pylintrc` for backend; ESLint for frontend.
+- **Frontend deps**: `cd ui && npm install`
+- **Frontend env**: Copy `ui/.env.example` to `ui/.env` (sets `VITE_API_BASE_URL=http://localhost:8000`)
+- **Env files**: Copy `.env.example` to `.env`. Use `APP_MODE=dev` (or `prod`). `DEV_MODE`/`HOSTED_MODE` are deprecated.
+- **DB init**: `python -m alembic upgrade head` (SQLite at `data/tradecraftx.db` by default).
+- **Dev mode auto-provisioning**: With `APP_MODE=dev`, `POST /auth/login` auto-creates a dev tenant/user.
 
 ## Primary Commands
 
 ### Backend
 ```bash
-# Run API server
-python -m uvicorn api.main:app --reload --port 8000
-
-# Run with production mode (for testing OAuth callbacks)
-APP_MODE=prod python -m uvicorn api.main:app --reload
-
-# CLI workflow
-python menu_cli.py
-
-# Direct Typer command
-python -m typer core.cli -- list-entry-levels
+python -m uvicorn api.main:app --reload --port 8000   # Dev API server
+python menu_cli.py                                      # Legacy CLI menu
 ```
 
 ### Frontend
 ```bash
 cd ui
-npm run dev      # Development server at localhost:5173
-npm run build    # Production build
-npm run preview # Preview production build
+npm run dev      # Dev server at localhost:5173 (proxies API to :8000)
+npm run build    # tsc -b && vite build (outputs to ui/dist/)
+npm run lint     # ESLint
+npm run preview  # Preview production build
 ```
 
-### Testing
+### Docker
 ```bash
-# Run all tests
-python -m pytest -q
+docker compose up   # Runs backend with APP_MODE=prod, auto-migrates DB
+```
 
-# Run single test
-python -m pytest tests/test_holdings.py::TestHoldingsAnalyzer::test_filters
+### Lint & Test
+```bash
+python -m ruff check api core brokers       # Ruff lint (primary linter per pyproject.toml)
+python -m ruff format --check api core      # Format check
+python -m pylint api core brokers            # Pylint (secondary)
+cd ui && npm run lint                        # ESLint
 
-# Run tests matching keyword
-python -m pytest tests/ -k keyword
-
-# Lint backend
-python -m pylint api core brokers
+python -m pytest tests/                      # All tests
+python -m pytest tests/ -k keyword           # Filter by keyword
+python -m pytest tests/test_file.py::TestCls::test_method  # Single test
 ```
 
 ## Architecture Highlights
-- **API-first**: FastAPI handles auth, sessions, jobs, trading workflows.
-- **Session management**: `SessionCache` centralizes holdings, entry levels, CMP/GTT caches with TTL refresh.
-- **Broker adapters**: `brokers/zerodha_broker.py` and `brokers/upstox_broker.py` normalize return structures.
-- **Job-based async**: Long-running tasks use job queue pattern.
-- **Active broker connection**: Use `_require_active_connection_scope()` for endpoints instead of session_id.
+- **API-first**: FastAPI app created in `api/main.py:create_app()` with `app = create_app()` at module level.
+- **Route modules**: `api/routes/` — auth, admin, brokers, broker_connections, session, holdings, holdings_v2, plan, risk, gtt, jobs, ai, entry_strategy, market.
+- **Dependency injection**: `api/dependencies.py` — singletons for all services, `get_current_user`, `require_admin`, `require_trading_enabled`.
+- **Session management**: `SessionRegistry` + `SessionManager` + `SessionService`. Trading sessions are broker-scoped via `connection_id`.
+- **Active broker connection**: Use `_require_active_connection_scope()` for broker-scoped data. Active connection stored in `ActiveConnectionStore`.
+- **Job-based async**: Long-running tasks use `JobRunner` pattern. Job types defined in `api/dependencies.py` (e.g., `JOB_HOLDINGS_ANALYZE`, `JOB_GTT_APPLY`, `JOB_TRADES_SYNC`).
+- **CMP/Market data**: Upstox analytics token (`UPSTOX_ANALYTICS_TOKEN`) provides read-only market data. CMP cached via `CMPManager` with TTL.
 
-## API Endpoints Pattern
+## API Endpoint Patterns
 New endpoints should:
-1. Use `_require_active_connection_scope()` for broker-scoped data
-2. Include trading gate via `require_trading_enabled` dependency for write operations
-3. Add audit logging via `log_audit()` for sensitive operations
+1. Use `_require_active_connection_scope()` for broker-scoped data.
+2. Gate writes with `require_trading_enabled` dependency.
+3. Add audit logging via `log_audit()` for sensitive operations.
+4. Use `ServiceError` (from `api.errors`) for structured error responses.
+
+## Broker Connection Order
+- **Upstox must be connected first** — it provides market data (CMP/OHLCV) for all operations.
+- Zerodha connection depends on Upstox being active.
+- UI enforces this via the `/broker-connections` stepper.
+- OAuth callback endpoints must NOT require auth (use state token instead).
 
 ## Coding Guidelines
-
-### Imports (three-block order)
-```python
-# 1. Stdlib
-import os
-import json
-from typing import List, Dict
-
-# 2. Third-party
-import pandas as pd
-from fastapi import APIRouter, Depends
-
-# 3. Local
-from api.dependencies import get_current_user
-from core.auth.context import UserContext
-```
-
-### Type Hints
-- Use `typing.List`, `typing.Dict`, `tuple[...]` for function signatures.
-- Prefer returning concrete dicts/lists instead of pandas objects.
-- Example: `def get_holdings() -> List[Dict[str, Any]]`
-
-### Naming Conventions
-- `snake_case` for variables/functions
-- `PascalCase` for classes
-- `SCREAMING_SNAKE` for constants (e.g., `DEFAULT_CONFIG`)
-
-### Formatting
-- 4-space indentation, no trailing whitespace
-- 100-character soft limit
-- Use f-strings for interpolation
-
-### Error Handling
-- Wrap external API calls in try/except
-- Log errors with context (broker, symbol, user_id)
-- Return dict with `error` key for agent/tool APIs
-- Never swallow exceptions silently
-
-### Logging vs Print
-- CLI UX can use print/emojis for humans
-- Background code uses `logging` module
-- Log exceptions with context, then raise
-
-### Data Handling
-- Sanitize NaN/None before calculations
-- Use `sanitize_for_json()` when pandas might introduce NaN/inf
-- Normalize column names (strip, lower/replace spaces) before calculations
-- Prefer vectorized pandas operations over loops
+- **Imports**: three-block order — stdlib, third-party, local.
+- **Type hints**: Use `typing.List`, `typing.Dict` or `tuple[...]`. Prefer concrete dicts/lists over pandas objects in return types.
+- **Naming**: `snake_case` functions/vars, `PascalCase` classes, `SCREAMING_SNAKE` constants.
+- **Formatting**: 4-space indent, 100-char soft limit, f-strings. Ruff configured with ignores: E402, E501, E722.
+- **Error handling**: Wrap external API calls in try/except. Log with context. Return `{"error": ...}` for agent/tool APIs.
+- **Data handling**: Sanitize NaN/None before calculations. Use `sanitize_for_json()` for pandas output. Prefer vectorized pandas ops.
 
 ## Testing Guidance
-- Use `pytest` - place tests in `tests/` mirroring `core/`, `agent/`, `brokers/`
-- Mock broker SDKs (KiteConnect, Upstox) - use fixtures that mimic payloads
-- Freeze CMP data and holdings snapshots for deterministic tests
-- Write to `tmp_path` instead of `data/` for test isolation
+- Tests in `tests/` mirroring `core/`, `agent/`, `brokers/`.
+- Mock broker SDKs (KiteConnect, Upstox) with fixtures mimicking real payloads.
+- Freeze CMP data and holdings snapshots for deterministic tests.
+- Write to `tmp_path` instead of `data/` for test isolation.
+- `tests/conftest.py` has shared fixtures.
 
 ## Common Pitfalls
-- Forgetting `current_session` setup in CLI commands → NoneType errors
-- Pandas NaN values breaking string operations → sanitize with `str(value or "").strip()`
-- Windows shell JSON quoting: `--filters '{"P&L%": -5}'`
-- OAuth callback endpoints must NOT require auth (use state token instead)
+- Forgetting `current_session` setup in CLI commands → NoneType errors.
+- Pandas NaN breaking string ops → sanitize with `str(value or "").strip()`.
+- Windows shell JSON quoting: `--filters '{"P&L%": -5}'`.
+- `APP_MODE=prod` requires `JWT_SECRET` and `TOKEN_ENCRYPTION_KEY`.
+- Zerodha OAuth redirect URI must match exactly: `http://localhost:8000/brokers/zerodha/callback`.
+- Upstox OAuth redirect URI must match exactly: `http://localhost:8000/brokers/upstox/callback`.
+- `api.py` at root is legacy — `api/main.py` is the real entry point.
 
 ## Security
-- Never commit `.env`, tokens, or raw CSV exports
-- Use `APP_MODE=prod` in production (not `DEV_MODE=true`)
-- Broker redirect URIs must match exactly in code and developer portal
-
-## Cursor / Copilot Rules
-- No `.cursor/rules` or `.github/copilot-instructions.md` files exist
+- Never commit `.env`, tokens, or raw CSV exports.
+- Broker tokens encrypted with `TOKEN_ENCRYPTION_KEY` in DB.
+- `ALLOW_INSECURE_TOKENS=1` only for dev; required `0` in prod.

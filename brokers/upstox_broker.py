@@ -51,7 +51,6 @@ class UpstoxBroker(BaseBroker):
         self.GTT_TYPE_OCO = "two-leg"
         self.ORDER_TYPE_LIMIT = "LIMIT"
         self.PRODUCT_CNC = "CNC"
-        self.csv_path = "c:\\Users\\nairv1\\OneDrive - Pegasystems Inc\\code\\pycode\\data\\Name-symbol-mapping.csv"
 
         # API clients will be initialized after login
         self.login_api = None
