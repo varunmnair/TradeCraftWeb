@@ -65,22 +65,24 @@ class DynamicAveragingPlanner:
 
             entry = entry_levels_map.get(symbol)
 
-            da_enabled = (
-                entry.get("DA Enabled", "").strip().upper() == "Y" if entry else False
-            )
-            entry_prices = []
-            if entry:
-                for key in ["entry1", "entry2", "entry3"]:
-                    try:
-                        val = float(entry.get(key))
-                        if not math.isnan(val):
-                            entry_prices.append(val)
-                    except (TypeError, ValueError):
-                        continue
-
-            if not entry or not da_enabled or not entry_prices:
+            if not entry:
                 self.skipped_items.append(
-                    create_skipped_item(symbol, "No valid row in entry levels")
+                    create_skipped_item(symbol, "No strategy configured")
+                )
+                continue
+
+            da_status = entry.get("da_status")
+            da_eligible = entry.get("da_eligible")
+
+            if da_status == "THESIS_BREAK":
+                self.skipped_items.append(
+                    create_skipped_item(symbol, "Thesis break - DA not recommended")
+                )
+                continue
+
+            if da_status in ("LOW_VOLUME", "TRENDING", "INSUFFICIENT_RANGE", "INSUFFICIENT_PROFIT", "NO_HOLDING"):
+                self.skipped_items.append(
+                    create_skipped_item(symbol, f"DA not eligible: {da_status}")
                 )
                 continue
 
@@ -88,12 +90,12 @@ class DynamicAveragingPlanner:
             ltp = None
             try:
                 ltp = self.cmp_manager.get_cmp(exchange, symbol)
-            except RuntimeError as e:
+            except RuntimeError:
                 self.skipped_items.append(
                     create_skipped_item(symbol, "CMP not available", exchange=exchange)
                 )
                 continue
-            except Exception as e:
+            except Exception:
                 self.skipped_items.append(
                     create_skipped_item(symbol, "CMP not available", exchange=exchange)
                 )
@@ -102,6 +104,58 @@ class DynamicAveragingPlanner:
             if not ltp or ltp <= 0:
                 self.skipped_items.append(
                     create_skipped_item(symbol, "CMP not available", exchange=exchange)
+                )
+                continue
+
+            # Thesis break check (defense-in-depth beyond da_status)
+            thesis_break_price = entry.get("thesis_break_price")
+            if thesis_break_price is not None and ltp <= thesis_break_price:
+                self.skipped_items.append(
+                    create_skipped_item(symbol, f"Thesis break at ₹{thesis_break_price} — DA paused")
+                )
+                continue
+
+            held_qty = holding["quantity"] + holding.get("t1_quantity", 0)
+            avg_price = holding["average_price"]
+
+            # ── DA evaluation eligible path ────────────────────────────
+            if da_status == "ELIGIBLE":
+                ov_qty_pct = entry.get("override_da_qty_pct")
+                qty_pct = ov_qty_pct if ov_qty_pct is not None else entry.get("da_recommended_qty_pct", 40)
+                sell_qty = int(held_qty * qty_pct / 100)
+                ov_sell_trigger = entry.get("override_sell_price")
+                candidates.append(
+                    {
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "ltp": ltp,
+                        "da_legs": 1,
+                        "da_trigger_offset": 1,
+                        "entry_level": "E1",
+                        "level_idx": 0,
+                        "invested_amount": avg_price * held_qty,
+                        "cumulative_allocs": [],
+                        "allocated": entry.get("Allocated", 0) or 0,
+                        "sell_qty": sell_qty,
+                        "sell_trigger": ov_sell_trigger,
+                        "confidence_score": entry.get("da_confidence_score"),
+                        "da_notes": entry.get("da_notes", ""),
+                    }
+                )
+                continue
+
+            entry_prices = []
+            for key in ["entry1", "entry2", "entry3"]:
+                try:
+                    val = float(entry.get(key))
+                    if not math.isnan(val):
+                        entry_prices.append(val)
+                except (TypeError, ValueError):
+                    continue
+
+            if not entry_prices:
+                self.skipped_items.append(
+                    create_skipped_item(symbol, "No entry prices")
                 )
                 continue
 
@@ -117,8 +171,6 @@ class DynamicAveragingPlanner:
                 )
                 continue
 
-            held_qty = holding["quantity"] + holding.get("t1_quantity", 0)
-            avg_price = holding["average_price"]
             invested_amount = avg_price * held_qty
 
             if invested_amount > allocated:
@@ -204,61 +256,70 @@ class DynamicAveragingPlanner:
             da_legs = c["da_legs"]
             da_trigger_offset = c["da_trigger_offset"]
 
-            level_idx = c["level_idx"]
-            cumulative_allocs = c["cumulative_allocs"]
-            invested_amount = c["invested_amount"]
-
-            target_allocation_for_level = cumulative_allocs[level_idx]
-            amount_to_invest = target_allocation_for_level - invested_amount
-
-            entry_alloc_per_leg = cumulative_allocs[0]
-            if amount_to_invest > (entry_alloc_per_leg * 0.75):
-                self.skipped_items.append(
-                    create_skipped_item(
-                        symbol,
-                        f"Remaining amount {amount_to_invest:.2f} > 75% of leg allocation",
-                        exchange=exchange,
-                        ltp=ltp,
+            if "sell_qty" in c:
+                leg_qty = int(c["sell_qty"] / da_legs)
+                if leg_qty <= 0:
+                    self.skipped_items.append(
+                        create_skipped_item(symbol, "Invalid quantity from eval", exchange=exchange, ltp=ltp)
                     )
-                )
-                continue
+                    continue
+                amount_to_invest = leg_qty * ltp * da_legs
+            else:
+                level_idx = c["level_idx"]
+                cumulative_allocs = c["cumulative_allocs"]
+                invested_amount = c["invested_amount"]
 
-            if amount_to_invest <= 0:
-                self.skipped_items.append(
-                    create_skipped_item(
-                        symbol,
-                        "No amount to invest for this level",
-                        exchange=exchange,
-                        ltp=ltp,
+                target_allocation_for_level = cumulative_allocs[level_idx]
+                amount_to_invest = target_allocation_for_level - invested_amount
+
+                entry_alloc_per_leg = cumulative_allocs[0]
+                if amount_to_invest > (entry_alloc_per_leg * 0.75):
+                    self.skipped_items.append(
+                        create_skipped_item(
+                            symbol,
+                            f"Remaining amount {amount_to_invest:.2f} > 75% of leg allocation",
+                            exchange=exchange,
+                            ltp=ltp,
+                        )
                     )
-                )
-                continue
+                    continue
 
-            remaining_qty = math.floor(amount_to_invest / ltp)
-
-            if remaining_qty <= 0:
-                self.skipped_items.append(
-                    create_skipped_item(
-                        symbol,
-                        "Invalid quantity",
-                        exchange=exchange,
-                        ltp=ltp,
+                if amount_to_invest <= 0:
+                    self.skipped_items.append(
+                        create_skipped_item(
+                            symbol,
+                            "No amount to invest for this level",
+                            exchange=exchange,
+                            ltp=ltp,
+                        )
                     )
-                )
-                continue
+                    continue
 
-            leg_qty = int(remaining_qty / da_legs)
+                remaining_qty = math.floor(amount_to_invest / ltp)
 
-            if leg_qty <= 0:
-                self.skipped_items.append(
-                    create_skipped_item(
-                        symbol,
-                        "Invalid quantity",
-                        exchange=exchange,
-                        ltp=ltp,
+                if remaining_qty <= 0:
+                    self.skipped_items.append(
+                        create_skipped_item(
+                            symbol,
+                            "Invalid quantity",
+                            exchange=exchange,
+                            ltp=ltp,
+                        )
                     )
-                )
-                continue
+                    continue
+
+                leg_qty = int(remaining_qty / da_legs)
+
+                if leg_qty <= 0:
+                    self.skipped_items.append(
+                        create_skipped_item(
+                            symbol,
+                            "Invalid quantity",
+                            exchange=exchange,
+                            ltp=ltp,
+                        )
+                    )
+                    continue
 
             trigger_price = round(ltp * (1 + da_trigger_offset / 100), 2)
             order_price, trigger_price = (
@@ -267,8 +328,14 @@ class DynamicAveragingPlanner:
                 )
             )
 
+            # DA evaluation provides its own sell trigger
+            sell_trigger_from_eval = c.get("sell_trigger")
+            if sell_trigger_from_eval is not None:
+                trigger_price = sell_trigger_from_eval
+                order_price = round(trigger_price * 0.997, 2)
+
             risk_adj_str = "N/A"
-            risk_reasons = ""
+            risk_reasons = c.get("da_notes", "")
             scale_factor = 1.0
 
             if apply_risk_management:

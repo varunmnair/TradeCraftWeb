@@ -101,10 +101,13 @@ class SessionDataManager:
             ).delete()
             
             for h in holdings:
+                symbol = (h.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
                 db.add(SessionHolding(
                     user_id=self.user_id,
                     session_id=self.session_id,
-                    symbol=h.get("symbol", "").upper(),
+                    symbol=symbol,
                     exchange=h.get("exchange", "NSE"),
                     quantity=h.get("quantity", 0),
                     average_price=h.get("average_price", 0.0),
@@ -312,11 +315,67 @@ class SessionDataManager:
         
         return [], "none"
 
-    def refresh_order_history(self) -> tuple[List[Dict[str, Any]], str]:
+    def store_order_history_differential(self, trades: List[Dict[str, Any]], source: str) -> int:
+        """Store only new order history entries (no delete). For premium users."""
+        if not self.session_id or not self.user_id:
+            return 0
+
+        db = SessionLocal()
+        try:
+            existing_ids = set(
+                row[0] for row in db.query(UserTrade.trade_id)
+                .filter(UserTrade.session_id == self.session_id)
+                .all()
+                if row[0]
+            )
+
+            inserted = 0
+            for trade in trades:
+                trade_id = trade.get("trade_id")
+                if not trade_id:
+                    continue
+                if trade_id in existing_ids:
+                    continue
+
+                db.add(UserTrade(
+                    user_id=self.user_id,
+                    session_id=self.session_id,
+                    broker=self.broker_name,
+                    symbol=trade.get("symbol", ""),
+                    isin=trade.get("isin"),
+                    trade_date=trade.get("trade_date", ""),
+                    exchange=trade.get("exchange", ""),
+                    segment=trade.get("segment", ""),
+                    series=trade.get("series", ""),
+                    side=trade.get("side", ""),
+                    quantity=trade.get("quantity", 0),
+                    price=trade.get("price", 0),
+                    trade_id=trade_id,
+                    order_id=trade.get("order_id"),
+                    order_execution_time=trade.get("order_execution_time"),
+                    source=source,
+                ))
+                existing_ids.add(trade_id)
+                inserted += 1
+
+            db.commit()
+            logger.info(f"Inserted {inserted} new trades for session {self.session_id}")
+            return inserted
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to store order history differential: {e}")
+            raise
+        finally:
+            db.close()
+
+    def refresh_order_history(self, differential: bool = False) -> tuple[List[Dict[str, Any]], str]:
         """Fetch from broker and store in DB. Returns (trades, source)."""
         trades, source = self.fetch_order_history()
         if trades:
-            self.store_order_history(trades, source)
+            if differential:
+                self.store_order_history_differential(trades, source)
+            else:
+                self.store_order_history(trades, source)
             cache = self.get_session_cache()
             if cache:
                 cache.set_order_history(trades, source=source)

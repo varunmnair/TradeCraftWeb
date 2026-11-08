@@ -31,6 +31,7 @@ class LoginResult:
     trading_enabled: bool = False
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    is_premium: bool = False
 
 
 class AuthService:
@@ -149,6 +150,7 @@ class AuthService:
                 trading_enabled=user.trading_enabled,
                 first_name=user.first_name,
                 last_name=user.last_name,
+                is_premium=user.is_premium,
             )
 
     def refresh(
@@ -226,6 +228,7 @@ class AuthService:
                 trading_enabled=user.trading_enabled,
                 first_name=user.first_name,
                 last_name=user.last_name,
+                is_premium=user.is_premium,
             )
 
     def logout(self, refresh_token: str) -> None:
@@ -275,6 +278,7 @@ class AuthService:
             email=user.email,
             role=role,
             trading_enabled=user.trading_enabled,
+            is_premium=user.is_premium,
         )
 
     def get_user_broker_connections(self, user_id: int) -> list[Dict[str, Any]]:
@@ -318,6 +322,7 @@ class AuthService:
                 role=user.role,
                 is_dev=True,
                 trading_enabled=user.trading_enabled,
+                is_premium=user.is_premium,
             )
 
     def bootstrap_admin(self, admin_email: str) -> Optional[UserContext]:
@@ -378,9 +383,18 @@ class AuthService:
                 trading_enabled=True,
             )
 
+    def _user_to_dict(self, user: models.User) -> dict:
+        return {
+            "id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "trading_enabled": user.trading_enabled,
+            "is_premium": user.is_premium,
+        }
+
     def set_user_trading_enabled(
         self, user_id: int, enabled: bool, admin_user_id: int
-    ) -> models.User:
+    ) -> dict:
         """Enable or disable trading for a user. Admin action."""
         with self._session_factory() as session:
             user = session.get(models.User, user_id)
@@ -396,8 +410,35 @@ class AuthService:
                 f"Admin action: user {user_id} trading_enabled set to {enabled} by admin {admin_user_id}"
             )
 
-            return user
+            return self._user_to_dict(user)
 
-    def get_user_by_id(self, user_id: int) -> Optional[models.User]:
+    def set_user_premium(
+        self, user_id: int, enabled: bool, admin_user_id: int
+    ) -> dict:
+        """Enable or disable premium for a user. Admin action."""
         with self._session_factory() as session:
-            return session.get(models.User, user_id)
+            user = session.get(models.User, user_id)
+            if not user:
+                raise ValueError(f"User {user_id} not found")
+
+            user.is_premium = enabled
+            session.commit()
+
+            import logging
+
+            logging.getLogger("tradecraftx.auth").info(
+                f"Admin action: user {user_id} is_premium set to {enabled} by admin {admin_user_id}"
+            )
+
+            return self._user_to_dict(user)
+
+    def list_users(self) -> list[dict]:
+        """List all users. Admin action."""
+        with self._session_factory() as session:
+            users = session.query(models.User).order_by(models.User.id).all()
+            return [self._user_to_dict(u) for u in users]
+
+    def get_user_by_id(self, user_id: int) -> Optional[dict]:
+        with self._session_factory() as session:
+            user = session.get(models.User, user_id)
+            return self._user_to_dict(user) if user else None

@@ -70,8 +70,8 @@ REFRESH_TOKEN_EXPIRES_SECONDS = int(
 REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
 REFRESH_TOKEN_COOKIE_MAX_AGE = 60 * 60 * 24 * 7  # 7 days in seconds
 
-# Cookie security - Secure in prod, SameSite=Lax by default
-COOKIE_SECURE = IS_PROD
+# Cookie security - Secure in prod by default, can be overridden via env var
+COOKIE_SECURE = _get_bool_env("COOKIE_SECURE", IS_PROD)
 COOKIE_SAMESITE = (
     "lax" if not _get_env("COOKIE_SAMESITE") else _get_env("COOKIE_SAMESITE")
 )
@@ -89,6 +89,14 @@ if IS_PROD:
             "TOKEN_ENCRYPTION_KEY must be set in production, "
             "or set ALLOW_INSECURE_TOKENS=1 for development"
         )
+
+# Warn about optional but important configs
+_UPSTOX_TOKEN = _get_env("UPSTOX_ANALYTICS_TOKEN")
+if not _UPSTOX_TOKEN:
+    import logging
+    logging.getLogger("tradecraftx.config").warning(
+        "UPSTOX_ANALYTICS_TOKEN not set — OHLCV/market data features will fail silently"
+    )
 
 # ============================================================================
 # Database Configuration
@@ -180,6 +188,7 @@ def get_cors_config() -> dict[str, Any]:
         "allow_credentials": True,
         "allow_methods": ["*"],
         "allow_headers": ["*"],
+        "expose_headers": ["Content-Disposition"],
     }
 
 

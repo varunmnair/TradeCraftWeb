@@ -74,7 +74,7 @@ def get_ohlcv(
         if not candles:
             raise OhlcvStoreError(
                 f"No OHLCV data found for {symbol}. "
-                f"Admin may need to run OHLCV refresh from Market Data page."
+                f"OHLCV data could not be fetched. Check UPSTOX_ANALYTICS_TOKEN."
             )
 
         return [
@@ -165,6 +165,19 @@ def get_latest_date(symbol: str, db: Optional[Session] = None) -> Optional[date]
     finally:
         if should_close:
             db.close()
+
+
+def ensure_ohlcv(symbols: list[str], days: int | None = None) -> None:
+    """Ensure OHLCV data is fresh for the given symbols.
+
+    Fetches only missing days from Upstox for each symbol that needs it.
+    Skips symbols refreshed within the last 24 hours.
+    Safe to call before get_ohlcv() or get_ohlcv_multi().
+    """
+    if not symbols:
+        return
+    from core.services.ohlcv_refresh_service import OhlcvRefreshService
+    OhlcvRefreshService().refresh_for_symbols(symbols, days)
 
 
 def get_stats(db: Optional[Session] = None) -> Dict:

@@ -103,6 +103,7 @@ class ZerodhaBroker:
                         "product": h.get("product"),
                         "price": h.get("price", 0),
                         "quantity": h.get("quantity", 0),
+                        "t1_quantity": h.get("t1_quantity", 0),
                         "average_price": h.get("average_price", 0),
                         "last_price": h.get("last_price", 0),
                         "pnl": h.get("pnl", 0),

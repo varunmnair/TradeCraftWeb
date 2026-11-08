@@ -30,6 +30,8 @@ import {
   EntryStrategyListResponse,
   EntryStrategyFull,
   EntryStrategyUploadResponse,
+  InlineUpdateFields,
+  InlineUpdateResponse,
   SuggestRevisionResponse,
   ApplyRevisionResponse,
   UploadHistoryResponse,
@@ -37,8 +39,17 @@ import {
   RestoreVersionResponse,
   BulkSuggestRevisionResponse,
   BulkApplyRevisionResponse,
+  EvaluateStrategyResponse,
+  DAEvalResult,
+  DABulkEvalResponse,
+  DAOverrideRequest,
+  DAConfig,
   ActiveConnectionResponse,
   TradesListResponse,
+  WroiScore,
+  CandidateGenerateRequest,
+  CandidateGenerateResponse,
+  CandidatePlaceResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -279,6 +290,12 @@ class ApiClient {
     });
   }
 
+  async computeWroiTrend(sessionId: string): Promise<{ wroi_trends: Record<string, string>; scores: Record<string, WroiScore> }> {
+    return this.request<{ wroi_trends: Record<string, string>; scores: Record<string, WroiScore> }>(`/holdings/${sessionId}/wroi-trend`, {
+      method: 'POST',
+    });
+  }
+
   async getAnalyzedHoldings(sessionId: string): Promise<{ results: any[] }> {
     return this.request<{ results: any[] }>(`/holdings/${sessionId}/analyze`);
   }
@@ -512,6 +529,16 @@ class ApiClient {
     return this.request<EntryStrategyListResponse>(`/entry-strategies`);
   }
 
+  async updateEntryStrategyField(
+    symbol: string,
+    fields: InlineUpdateFields
+  ): Promise<InlineUpdateResponse> {
+    return this.request<InlineUpdateResponse>(`/entry-strategies/${encodeURIComponent(symbol)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(fields),
+    });
+  }
+
   async getEntryStrategy(symbol: string): Promise<EntryStrategyFull> {
     return this.request<EntryStrategyFull>(`/entry-strategies/${encodeURIComponent(symbol)}`);
   }
@@ -545,13 +572,9 @@ class ApiClient {
     });
 
     if (!response.ok) {
-      const error: ServiceError = await response.json().catch(() => ({
-        error_code: 'unknown',
-        message: 'Upload failed',
-        context: {},
-        retryable: false,
-      }));
-      throw new Error(error.message || 'Upload failed');
+      const body = await response.json().catch(() => ({}));
+      const message = body.message || body.detail || 'Upload failed';
+      throw new Error(message);
     }
 
     return response.json();
@@ -595,41 +618,39 @@ class ApiClient {
     window.URL.revokeObjectURL(url);
   }
 
-  async suggestRevision(symbol: string, method?: string, pctAdjustment?: number): Promise<SuggestRevisionResponse> {
+  async suggestRevision(symbol: string, style?: string): Promise<SuggestRevisionResponse> {
     const params = new URLSearchParams();
-    if (method) params.append('method', method);
-    if (pctAdjustment !== undefined) params.append('pct_adjustment', String(pctAdjustment));
+    if (style) params.append('style', style);
     const query = params.toString();
     return this.request<SuggestRevisionResponse>(
       `/entry-strategies/${encodeURIComponent(symbol)}/suggest-revision${query ? '?' + query : ''}`
     );
   }
 
-  async applyRevision(symbol: string, levels: Array<{ level_no: number; new_price: number }>): Promise<ApplyRevisionResponse> {
+  async applyRevision(symbol: string, levels: Array<{ level_no: number; new_price: number }>, thesisBreakPrice?: number | null): Promise<ApplyRevisionResponse> {
     return this.request<ApplyRevisionResponse>(
       `/entry-strategies/${encodeURIComponent(symbol)}/apply-revision`,
       {
         method: 'PATCH',
-        body: JSON.stringify({ levels }),
+        body: JSON.stringify({ levels, thesis_break_price: thesisBreakPrice ?? null }),
       }
     );
   }
 
-  async suggestRevisionBulk(symbols: string[], method?: string, pctAdjustment?: number): Promise<BulkSuggestRevisionResponse> {
+  async suggestRevisionBulk(symbols: string[], style?: string): Promise<BulkSuggestRevisionResponse> {
     return this.request<BulkSuggestRevisionResponse>(
       `/entry-strategies/suggest-revision/bulk`,
       {
         method: 'POST',
         body: JSON.stringify({
           symbols,
-          method: method || 'align_to_cmp',
-          pct_adjustment: pctAdjustment || 5.0,
+          style: style || 'balanced',
         }),
       }
     );
   }
 
-  async applyRevisionBulk(updates: Array<{ symbol: string; levels: Array<{ level_no: number; new_price: number }> }>): Promise<BulkApplyRevisionResponse> {
+  async applyRevisionBulk(updates: Array<{ symbol: string; levels: Array<{ level_no: number; new_price: number }>; thesis_break_price?: number | null }>): Promise<BulkApplyRevisionResponse> {
     return this.request<BulkApplyRevisionResponse>(
       `/entry-strategies/apply-revision/bulk`,
       {
@@ -658,17 +679,63 @@ class ApiClient {
     );
   }
 
+  async evaluateStrategy(symbol: string): Promise<EvaluateStrategyResponse> {
+    return this.request<EvaluateStrategyResponse>(
+      `/entry-strategies/${encodeURIComponent(symbol)}/evaluate`,
+      { method: 'POST' }
+    );
+  }
+
+  async evaluateAllStrategies(): Promise<EvaluateStrategyResponse[]> {
+    return this.request<EvaluateStrategyResponse[]>(
+      `/entry-strategies/evaluate-all`,
+      { method: 'POST' }
+    );
+  }
+
+  async evaluateAllDA(sessionId: string): Promise<DABulkEvalResponse> {
+    return this.request<DABulkEvalResponse>(
+      `/entry-strategies/da/evaluate-all`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) }
+    );
+  }
+
+  async evaluateDASymbol(symbol: string): Promise<DAEvalResult> {
+    return this.request<DAEvalResult>(
+      `/entry-strategies/${encodeURIComponent(symbol)}/da/evaluate`,
+      { method: 'POST' }
+    );
+  }
+
+  async updateDAOverrides(symbol: string, overrides: DAOverrideRequest): Promise<{ symbol: string; success: boolean }> {
+    return this.request<{ symbol: string; success: boolean }>(
+      `/entry-strategies/${encodeURIComponent(symbol)}/da/overrides`,
+      { method: 'PUT', body: JSON.stringify(overrides) }
+    );
+  }
+
+  async getDAConfig(): Promise<DAConfig> {
+    return this.request<DAConfig>(`/entry-strategies/da/config`);
+  }
+
+  async updateDAConfig(config: Partial<DAConfig>): Promise<DAConfig> {
+    return this.request<DAConfig>(`/entry-strategies/da/config`, {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    });
+  }
+
   async getCmp(symbols: string[], tradeDate?: string): Promise<{
-    trade_date: string;
-    as_of_ts: string | null;
-    data: Record<string, number>;
-    missing: string[];
+    prices: Record<string, number>;
+    errors: Record<string, string>;
+    fetched_at: string;
+    exchange: string;
   }> {
     return this.request<{
-      trade_date: string;
-      as_of_ts: string | null;
-      data: Record<string, number>;
-      missing: string[];
+      prices: Record<string, number>;
+      errors: Record<string, string>;
+      fetched_at: string;
+      exchange: string;
     }>('/market/cmp', {
       method: 'POST',
       body: JSON.stringify({ symbols, trade_date: tradeDate }),
@@ -831,6 +898,65 @@ class ApiClient {
     error?: string;
   }> {
     return this.request(`/admin/market-data/ohlcv/inspect/${symbol.toUpperCase()}?days=${days}`);
+  }
+
+  // Admin user management
+  async listUsers(): Promise<Array<{
+    id: number;
+    email: string;
+    role: string;
+    trading_enabled: boolean;
+    is_premium: boolean;
+  }>> {
+    return this.request('/admin/users');
+  }
+
+  async setUserPremium(userId: number, enabled: boolean): Promise<{
+    id: number;
+    email: string;
+    role: string;
+    trading_enabled: boolean;
+    is_premium: boolean;
+  }> {
+    return this.request(`/admin/users/${userId}/premium`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  async setUserTradingEnabled(userId: number, enabled: boolean): Promise<{
+    id: number;
+    email: string;
+    role: string;
+    trading_enabled: boolean;
+    is_premium: boolean;
+  }> {
+    return this.request(`/admin/users/${userId}/trading-enabled`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // ── Entry Candidate Pipeline ──────────────────────────────────────────────
+
+  async generateCandidates(sessionId: string, data?: CandidateGenerateRequest): Promise<{ job_id: number }> {
+    return this.request<{ job_id: number }>(`/candidates/generate?session_id=${sessionId}`, {
+      method: 'POST',
+      body: JSON.stringify(data ?? {}),
+    });
+  }
+
+  async getLatestCandidates(sessionId: string): Promise<CandidateGenerateResponse> {
+    return this.request<CandidateGenerateResponse>(`/candidates/${sessionId}/latest`);
+  }
+
+  async placeCandidates(sessionId: string, symbols: string[]): Promise<CandidatePlaceResponse> {
+    return this.request<CandidatePlaceResponse>(`/candidates/${sessionId}/place`, {
+      method: 'POST',
+      body: JSON.stringify({ symbols }),
+    });
   }
 }
 

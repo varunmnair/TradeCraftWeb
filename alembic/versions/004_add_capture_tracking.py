@@ -5,7 +5,7 @@ import sqlalchemy as sa
 
 
 revision = '004_add_capture_tracking'
-down_revision = '003_remove_unexpected_user_trades_constraint'
+down_revision = '002_add_session_holdings'
 branch_labels = None
 depends_on = None
 

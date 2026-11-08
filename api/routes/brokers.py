@@ -356,16 +356,14 @@ def upstox_status(
                 expires_dt = _extract_jwt_expiration(bundle.access_token)
             
             if expires_dt:
-                expires_at_val = conn.token_updated_at.isoformat() if conn.token_updated_at else None
+                expires_at_val = expires_dt.isoformat() if hasattr(expires_dt, 'isoformat') else str(expires_dt)
                 if datetime.now(timezone.utc) >= expires_dt:
                     token_status = "expired"
                 else:
                     token_status = "valid"
                     is_connected = True
             else:
-                # No expiry found - assume valid (for extended tokens etc)
-                token_status = "valid"
-                is_connected = True
+                token_status = "expired"
 
         statuses.append(
             {
@@ -398,6 +396,8 @@ class ZerodhaConnectionStatus(BaseModel):
     connected: bool
     broker_user_id: Optional[str] = None
     token_updated_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    token_status: Literal["valid", "expired", "missing"] = "missing"
 
 
 class ZerodhaStatusResponse(BaseModel):
@@ -593,6 +593,13 @@ def zerodha_callback(
     
     if expires_iso:
         bundle_payload["expires_at"] = expires_iso
+    else:
+        # Zerodha tokens are opaque (not JWT) and Kite API doesn't return
+        # expiry_timestamp.  Default to obtained_at + 12 h which covers
+        # the trading session plus a generous buffer.
+        bundle_payload["expires_at"] = (
+            datetime.now(timezone.utc) + timedelta(hours=12)
+        ).isoformat()
 
     LOGGER.info(
         "Zerodha token exchange successful, storing tokens for connection_id=%d",
@@ -689,16 +696,14 @@ def zerodha_status(
                     expires_dt = _extract_jwt_expiration(bundle.access_token)
                 
                 if expires_dt:
-                    expires_at_val = conn.token_updated_at.isoformat() if conn.token_updated_at else None
+                    expires_at_val = expires_dt.isoformat() if hasattr(expires_dt, 'isoformat') else str(expires_dt)
                     if datetime.now(timezone.utc) >= expires_dt:
                         token_status = "expired"
                     else:
                         token_status = "valid"
                         is_connected = True
                 else:
-                    # No expiry found - assume valid
-                    token_status = "valid"
-                    is_connected = True
+                    token_status = "expired"
         except Exception as e:
             LOGGER.error(f"Error getting zerodha bundle for connection {conn.id}: {e}")
             token_status = "missing"

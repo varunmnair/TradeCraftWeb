@@ -48,6 +48,8 @@ class TradesService:
                 if not quote or quote.get("cmp") is None:
                     missing_cmp.append(sym)
 
+            from core.market_data.ohlcv_store import ensure_ohlcv
+            ensure_ohlcv(holdings_symbols, days=200)
             candles = self._market_repo.get_candles_for_symbols(
                 holdings_symbols, days=200
             )
@@ -186,6 +188,7 @@ class TradesService:
 
         reader = csv.DictReader(lines)
         headers = reader.fieldnames or []
+        logging.info(f"[ZERODHA_UPLOAD] CSV headers received: {headers}")
         expected_headers = {
             "symbol",
             "isin",
@@ -202,8 +205,10 @@ class TradesService:
             "order_execution_time",
         }
         actual_headers = {h.strip().lower() for h in headers}
+        logging.info(f"[ZERODHA_UPLOAD] Normalized headers: {actual_headers}")
         if not expected_headers.issubset(actual_headers):
             missing = expected_headers - actual_headers
+            logging.warning(f"[ZERODHA_UPLOAD] Header mismatch! Missing: {missing}")
             return {
                 "rows_ingested": 0,
                 "symbols_covered": 0,
@@ -226,23 +231,48 @@ class TradesService:
                     continue
                 seen.add(key)
 
+                raw_trade_type = str(row.get("trade_type", "")).strip()
+                side = "BUY" if raw_trade_type.upper() == "BUY" else "SELL"
+                if i <= 5:
+                    logging.info(
+                        f"[ZERODHA_UPLOAD] Row {i}: symbol={row.get('symbol')}, "
+                        f"raw_trade_type='{raw_trade_type}', side='{side}', "
+                        f"trade_date='{row.get('trade_date')}'"
+                    )
+
+                symbol = str(row.get("symbol", "")).strip().upper()
+                trade_date = str(row.get("trade_date", "")).strip()
+                quantity = int(float(row.get("quantity", 0) or 0))
+                price = float(row.get("price", 0) or 0)
+
+                # Field validations
+                if not symbol:
+                    errors.append(f"Row {i}: empty symbol")
+                    continue
+                if quantity <= 0:
+                    errors.append(
+                        f"Row {i}: quantity must be > 0, got {quantity}"
+                    )
+                    continue
+                if price < 0:
+                    errors.append(
+                        f"Row {i}: price must be >= 0, got {price}"
+                    )
+                    continue
+
                 normalized.append(
                     {
                         "user_id": user_id,
                         "broker": "zerodha",
-                        "symbol": str(row.get("symbol", "")).strip().upper(),
+                        "symbol": symbol,
                         "isin": str(row.get("isin", "")).strip() or None,
-                        "trade_date": str(row.get("trade_date", "")).strip(),
+                        "trade_date": trade_date,
                         "exchange": str(row.get("exchange", "")).strip().upper(),
                         "segment": str(row.get("segment", "")).strip().upper() or "EQ",
                         "series": str(row.get("series", "")).strip().upper() or "EQ",
-                        "side": (
-                            "BUY"
-                            if str(row.get("trade_type", "")).upper() == "BUY"
-                            else "SELL"
-                        ),
-                        "quantity": int(float(row.get("quantity", 0) or 0)),
-                        "price": float(row.get("price", 0) or 0),
+                        "side": side,
+                        "quantity": quantity,
+                        "price": price,
                         "trade_id": trade_id,
                         "order_id": str(row.get("order_id", "")).strip() or None,
                         "order_execution_time": str(
@@ -256,14 +286,28 @@ class TradesService:
                 errors.append(f"Row {i}: {str(e)}")
 
         if not normalized:
+            logging.warning(f"[ZERODHA_UPLOAD] No valid rows parsed. Errors: {errors[:10]}")
             return {
                 "rows_ingested": 0,
                 "symbols_covered": 0,
                 "errors": errors if errors else ["No valid rows"],
             }
 
+        from collections import Counter
+        side_counts = Counter(t["side"] for t in normalized)
+        symbol_counts = Counter(t["symbol"] for t in normalized)
+        logging.info(
+            f"[ZERODHA_UPLOAD] Parsed {len(normalized)} trades: "
+            f"user_id={user_id}, side_breakdown={dict(side_counts)}, "
+            f"symbols={dict(symbol_counts)}"
+        )
+
         count = self._repo.upsert_trades(normalized)
         symbols_covered = len(set(t["symbol"] for t in normalized))
+
+        logging.info(
+            f"[ZERODHA_UPLOAD] DB upsert complete: {count} rows, {symbols_covered} symbols"
+        )
 
         return {
             "rows_ingested": count,

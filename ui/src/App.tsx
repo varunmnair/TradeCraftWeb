@@ -13,6 +13,7 @@ import SessionsPage from './pages/SessionsPage';
 import HoldingsPage from './pages/HoldingsPage';
 import BuyEntriesPage from './pages/BuyEntriesPage';
 import EntryStrategiesPage from './pages/EntryStrategiesPage';
+import EntryCandidatesPage from './pages/EntryCandidatesPage';
 import StrategyDetailPage from './pages/StrategyDetailPage';
 import PlanPage from './pages/PlanPage';
 import GTTPage from './pages/GTTPage';
@@ -126,6 +127,16 @@ export default function App() {
                     <PrivateRoute>
                       <Layout>
                         <EntryStrategiesPage />
+                      </Layout>
+                    </PrivateRoute>
+                  }
+                />
+                <Route
+                  path="/entry-candidates"
+                  element={
+                    <PrivateRoute>
+                      <Layout>
+                        <EntryCandidatesPage />
                       </Layout>
                     </PrivateRoute>
                   }

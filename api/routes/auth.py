@@ -145,6 +145,7 @@ def login(
                 "trading_enabled": result.trading_enabled,
                 "first_name": result.first_name,
                 "last_name": result.last_name,
+                "is_premium": result.is_premium,
             },
         ).model_dump(),
     )
@@ -196,6 +197,7 @@ def refresh(
                 "role": result.role,
                 "first_name": result.first_name,
                 "last_name": result.last_name,
+                "is_premium": result.is_premium,
             },
         ).model_dump(),
     )
@@ -265,6 +267,7 @@ def me(current_user: UserContext = Depends(get_current_user)):
         email=user.email,
         role=user.role,
         trading_enabled=user.trading_enabled,
+        is_premium=user.is_premium,
         first_name=user.first_name,
         last_name=user.last_name,
         broker_connections=broker_connections,

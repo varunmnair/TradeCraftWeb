@@ -21,21 +21,25 @@ import {
   DialogContent,
   DialogActions,
   FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
+  FormControlLabel,
+  Radio,
+  RadioGroup,
   Checkbox,
   Tabs,
   Tab,
   TextField,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
   Refresh as RefreshIcon,
   AutoFixHigh as ReviseIcon,
+  ExpandMore as ExpandMoreIcon,
 } from '@mui/icons-material';
 import { api } from '../api/client';
-import { EntryStrategyFull, SuggestRevisionResponse, VersionItem } from '../types';
+import { EntryStrategyFull, SuggestRevisionResponse, VersionItem, EvaluateStrategyResponse } from '../types';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -70,13 +74,24 @@ export default function StrategyDetailPage() {
   const [restoreSuccess, setRestoreSuccess] = useState('');
   const [restoreError, setRestoreError] = useState('');
 
+  // Evaluate state
+  const [evaluating, setEvaluating] = useState(false);
+  const [evaluateResult, setEvaluateResult] = useState<EvaluateStrategyResponse | null>(null);
+
   // Revision modal state
   const [revisionModalOpen, setRevisionModalOpen] = useState(false);
   const [revisionLoading, setRevisionLoading] = useState(false);
   const [revisionError, setRevisionError] = useState('');
   const [revisionData, setRevisionData] = useState<SuggestRevisionResponse | null>(null);
-  const [revisionMethod, setRevisionMethod] = useState('align_to_cmp');
-  const [pctAdjustment, setPctAdjustment] = useState<number>(5);
+  const [revisionStyle, setRevisionStyle] = useState<'conservative' | 'balanced' | 'aggressive'>('balanced');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedOverrides, setAdvancedOverrides] = useState({
+    atrPeriod: 14,
+    emaFast: 20,
+    emaSlow: 50,
+    lookback: 60,
+    atrMultiplier: 1.0,
+  });
   const [selectedLevels, setSelectedLevels] = useState<Set<number>>(new Set());
   const [applyLoading, setApplyLoading] = useState(false);
   const [applyError, setApplyError] = useState('');
@@ -126,6 +141,21 @@ export default function StrategyDetailPage() {
     fetchStrategy();
   };
 
+  const handleEvaluate = async () => {
+    if (!symbol) return;
+    setEvaluating(true);
+    setEvaluateResult(null);
+    try {
+      const result = await api.evaluateStrategy(decodeURIComponent(symbol));
+      setEvaluateResult(result);
+      fetchStrategy();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to evaluate strategy');
+    } finally {
+      setEvaluating(false);
+    }
+  };
+
   const handleBack = () => {
     navigate('/entry-strategies');
   };
@@ -148,31 +178,22 @@ export default function StrategyDetailPage() {
     setApplySuccess('');
   };
 
-  const handleMethodChange = async (method: string) => {
-    setRevisionMethod(method);
+  const handleStyleChange = async (style: string) => {
+    setRevisionStyle(style as 'conservative' | 'balanced' | 'aggressive');
     setRevisionData(null);
     setSelectedLevels(new Set());
-    await fetchRevisionSuggestions(method, pctAdjustment);
+    await fetchRevisionSuggestions(style);
   };
 
-  const handlePctAdjustmentChange = async (pct: number) => {
-    setPctAdjustment(pct);
-    setRevisionData(null);
-    setSelectedLevels(new Set());
-    await fetchRevisionSuggestions(revisionMethod, pct);
-  };
-
-  const fetchRevisionSuggestions = async (method?: string, pct?: number) => {
+  const fetchRevisionSuggestions = async (style?: string) => {
     if (!symbol) return;
     setRevisionLoading(true);
     setRevisionError('');
     try {
-      const effectiveMethod = method || revisionMethod;
-      const effectivePct = pct !== undefined ? pct : pctAdjustment;
+      const effectiveStyle = style || revisionStyle;
       const data = await api.suggestRevision(
-        decodeURIComponent(symbol), 
-        effectiveMethod, 
-        effectivePct
+        decodeURIComponent(symbol),
+        effectiveStyle,
       );
       setRevisionData(data);
     } catch (err) {
@@ -285,7 +306,16 @@ export default function StrategyDetailPage() {
         </Button>
         <Box sx={{ flexGrow: 1 }} />
         <Button startIcon={<ReviseIcon />} onClick={handleOpenRevision} variant="outlined">
-          Revise Levels
+          Revise Entries
+        </Button>
+        <Button
+          variant="outlined"
+          color="success"
+          onClick={handleEvaluate}
+          disabled={evaluating}
+          startIcon={evaluating ? <CircularProgress size={20} /> : undefined}
+        >
+          {evaluating ? 'Evaluating...' : 'Evaluate'}
         </Button>
         <Button startIcon={<RefreshIcon />} onClick={handleRefresh} variant="outlined">
           Refresh
@@ -311,31 +341,128 @@ export default function StrategyDetailPage() {
         </Box>
       </Paper>
 
-      {/* Dynamic Averaging Rules */}
-      {strategy.dynamic_averaging_enabled && (
-        <Paper sx={{ p: 3, mb: 3 }}>
-          <Typography variant="h6" gutterBottom>
-            Dynamic Averaging Rules
-          </Typography>
-          {strategy.averaging_rules_summary ? (
-            <Typography variant="body1" color="text.secondary">
-              {strategy.averaging_rules_summary}
+      {/* Strategy Health */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Strategy Health
+        </Typography>
+        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 2 }}>
+          <Box>
+            <Typography variant="body2" color="text.secondary">Review Status</Typography>
+            <Chip
+              label={strategy.review_status ? strategy.review_status.replace(/_/g, ' ') : 'Not Evaluated'}
+              size="small"
+              color={
+                strategy.review_status === 'ACTIVE'
+                  ? 'success'
+                  : strategy.review_status === 'REVIEW_REQUIRED'
+                    ? 'warning'
+                    : strategy.review_status === 'THESIS_BREAK'
+                      ? 'error'
+                      : 'default'
+              }
+              sx={{ mt: 0.5 }}
+            />
+          </Box>
+          <Box>
+            <Typography variant="body2" color="text.secondary">Swing Eligible</Typography>
+            <Typography variant="body1">
+              {strategy.swing_eligible == null ? 'Not Checked' : strategy.swing_eligible ? 'Yes' : 'No'}
             </Typography>
-          ) : strategy.averaging_rules_json ? (
-            <Card variant="outlined">
-              <CardContent>
-                <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                  {JSON.stringify(JSON.parse(strategy.averaging_rules_json), null, 2)}
-                </pre>
-              </CardContent>
-            </Card>
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              No averaging rules configured
+          </Box>
+          <Box>
+            <Typography variant="body2" color="text.secondary">Thesis Break Price</Typography>
+            <Typography variant="body1">
+              {strategy.thesis_break_price != null ? `₹${strategy.thesis_break_price.toFixed(2)}` : '-'}
             </Typography>
-          )}
-        </Paper>
-      )}
+          </Box>
+          <Box>
+            <Typography variant="body2" color="text.secondary">Last Evaluated</Typography>
+            <Typography variant="body1">
+              {strategy.last_evaluated_at
+                ? new Date(strategy.last_evaluated_at).toLocaleDateString()
+                : '-'}
+            </Typography>
+          </Box>
+          <Box>
+            <Typography variant="body2" color="text.secondary">Last Revised</Typography>
+            <Typography variant="body1">
+              {strategy.last_entry_revision_at
+                ? new Date(strategy.last_entry_revision_at).toLocaleDateString()
+                : '-'}
+            </Typography>
+          </Box>
+        </Box>
+        {evaluateResult && (
+          <Alert severity="info" sx={{ mt: 2 }} onClose={() => setEvaluateResult(null)}>
+            {evaluateResult.reason}
+          </Alert>
+        )}
+      </Paper>
+
+      {/* Dynamic Averaging Intelligence Panel */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Dynamic Averaging Intelligence
+          <Chip
+            label={strategy.dynamic_averaging_enabled ? 'DA Enabled' : 'DA Disabled'}
+            color={strategy.dynamic_averaging_enabled ? 'success' : 'default'}
+            size="small"
+            sx={{ ml: 1 }}
+          />
+        </Typography>
+        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 2, mb: 2 }}>
+          <Box>
+            <Typography variant="body2" color="text.secondary">DA Status</Typography>
+            <Chip
+              label={strategy.da_status ? strategy.da_status.replace(/_/g, ' ') : 'Not Evaluated'}
+              size="small"
+              color={
+                strategy.da_status === 'ELIGIBLE'
+                  ? 'success'
+                  : strategy.da_status === 'LOW_VOLUME'
+                    ? 'warning'
+                    : strategy.da_status === 'TRENDING'
+                      ? 'info'
+                      : strategy.da_status === 'THESIS_BREAK'
+                        ? 'error'
+                        : 'default'
+              }
+              sx={{ mt: 0.5 }}
+            />
+          </Box>
+          <Box>
+            <Typography variant="body2" color="text.secondary">DA Eligible</Typography>
+            <Typography variant="body1">{strategy.da_eligible == null ? 'Not Checked' : strategy.da_eligible ? 'Yes' : 'No'}</Typography>
+          </Box>
+          <Box>
+            <Typography variant="body2" color="text.secondary">Confidence Score</Typography>
+            <Typography variant="body1">{strategy.da_confidence_score != null ? `${strategy.da_confidence_score}/100` : '-'}</Typography>
+          </Box>
+          <Box>
+            <Typography variant="body2" color="text.secondary">Last Evaluated</Typography>
+            <Typography variant="body1">{strategy.da_last_evaluated_at ? new Date(strategy.da_last_evaluated_at).toLocaleDateString() : '-'}</Typography>
+          </Box>
+        </Box>
+        {strategy.da_notes && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="body2" color="text.secondary">Notes</Typography>
+            <Typography variant="body2">{strategy.da_notes}</Typography>
+          </Box>
+        )}
+        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+          <Button
+            size="small"
+            variant="outlined"
+            color="success"
+            onClick={handleEvaluate}
+            disabled={evaluating}
+            startIcon={evaluating ? <CircularProgress size={16} /> : undefined}
+          >
+            {evaluating ? 'Evaluating...' : 'Evaluate DA'}
+          </Button>
+        </Box>
+      </Paper>
 
       {/* Tabs */}
       <Paper sx={{ mb: 3 }}>
@@ -461,7 +588,7 @@ export default function StrategyDetailPage() {
       {/* Revision Modal */}
       <Dialog open={revisionModalOpen} onClose={handleCloseRevision} maxWidth="md" fullWidth>
         <DialogTitle>
-          Revise Entry Levels - {strategy.symbol}
+          Revise Entries - {strategy.symbol}
         </DialogTitle>
         <DialogContent>
           {revisionLoading ? (
@@ -473,29 +600,75 @@ export default function StrategyDetailPage() {
           ) : revisionData ? (
             <Box>
               <Box sx={{ mb: 3 }}>
-                <FormControl fullWidth sx={{ mb: 2 }}>
-                  <InputLabel>Revision Method</InputLabel>
-                  <Select
-                    value={revisionMethod}
-                    label="Revision Method"
-                    onChange={(e) => handleMethodChange(e.target.value)}
-                  >
-                    <MenuItem value="align_to_cmp">Align to CMP</MenuItem>
-                    <MenuItem value="volatility_band">Volatility Band</MenuItem>
-                    <MenuItem value="gap_fill">Gap Fill</MenuItem>
-                    <MenuItem value="fixed_adjustment">Fixed Adjustment</MenuItem>
-                  </Select>
-                </FormControl>
-                {revisionMethod === 'fixed_adjustment' && (
-                  <TextField
-                    type="number"
-                    label="Adjustment %"
-                    value={pctAdjustment}
-                    onChange={(e) => handlePctAdjustmentChange(Number(e.target.value))}
-                    size="small"
-                    sx={{ width: 150 }}
-                    inputProps={{ min: -50, max: 50 }}
-                  />
+                <Typography variant="subtitle2" sx={{ mb: 1 }}>Revision Style</Typography>
+                <RadioGroup
+                  row
+                  value={revisionStyle}
+                  onChange={(e) => handleStyleChange(e.target.value)}
+                  sx={{ mb: 2 }}
+                >
+                  <FormControlLabel value="conservative" control={<Radio size="small" />} label="Conservative" />
+                  <FormControlLabel value="balanced" control={<Radio size="small" />} label="Balanced" />
+                  <FormControlLabel value="aggressive" control={<Radio size="small" />} label="Aggressive" />
+                </RadioGroup>
+
+                <Accordion expanded={advancedOpen} onChange={() => setAdvancedOpen(!advancedOpen)} sx={{ mb: 2 }}>
+                  <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                    <Typography variant="subtitle2">Advanced Settings</Typography>
+                  </AccordionSummary>
+                  <AccordionDetails>
+                    <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                      <TextField
+                        type="number"
+                        label="ATR Period"
+                        value={advancedOverrides.atrPeriod}
+                        onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, atrPeriod: Number(e.target.value) })}
+                        size="small"
+                        sx={{ width: 120 }}
+                        inputProps={{ min: 5, max: 50 }}
+                      />
+                      <TextField
+                        type="number"
+                        label="EMA Fast"
+                        value={advancedOverrides.emaFast}
+                        onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, emaFast: Number(e.target.value) })}
+                        size="small"
+                        sx={{ width: 120 }}
+                        inputProps={{ min: 5, max: 50 }}
+                      />
+                      <TextField
+                        type="number"
+                        label="EMA Slow"
+                        value={advancedOverrides.emaSlow}
+                        onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, emaSlow: Number(e.target.value) })}
+                        size="small"
+                        sx={{ width: 120 }}
+                        inputProps={{ min: 20, max: 200 }}
+                      />
+                      <TextField
+                        type="number"
+                        label="Lookback Days"
+                        value={advancedOverrides.lookback}
+                        onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, lookback: Number(e.target.value) })}
+                        size="small"
+                        sx={{ width: 140 }}
+                        inputProps={{ min: 20, max: 200 }}
+                      />
+                      <TextField
+                        type="number"
+                        label="ATR Spacing Multiplier"
+                        value={advancedOverrides.atrMultiplier}
+                        onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, atrMultiplier: Number(e.target.value) })}
+                        size="small"
+                        sx={{ width: 180 }}
+                        inputProps={{ min: 0.1, max: 5.0, step: 0.05 }}
+                      />
+                    </Box>
+                  </AccordionDetails>
+                </Accordion>
+
+                {revisionData.style && (
+                  <Chip label={`Style: ${revisionData.style}`} size="small" sx={{ mb: 1 }} />
                 )}
                 {revisionData.cmp_price && (
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>

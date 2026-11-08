@@ -6,8 +6,6 @@ import {
   Button,
   Alert,
   CircularProgress,
-  Card,
-  CardContent,
   Tabs,
   Tab,
   Modal,
@@ -17,7 +15,6 @@ import {
   DialogActions,
   IconButton,
   TextField,
-  LinearProgress,
   Table,
   TableBody,
   TableCell,
@@ -30,11 +27,10 @@ import {
   Refresh as RefreshIcon,
   Upload as UploadIcon,
   Close as CloseIcon,
-  Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import type { JobStatusResponse } from '../types';
+import { Switch, FormControlLabel } from '@mui/material';
 
 interface SymbolCatalogStatus {
   total_symbols: number;
@@ -100,9 +96,6 @@ export default function AdminPage() {
   const [catalogStatus, setCatalogStatus] = useState<SymbolCatalogStatus | null>(null);
   const [cmpStatus, setCmpStatus] = useState<CMPStatus | null>(null);
   const [ohlcvStatus, setOhlcvStatus] = useState<OhlcvStatus | null>(null);
-  const [ohlcvJobId, setOhlcvJobId] = useState<number | null>(null);
-  const [ohlcvJobStatus, setOhlcvJobStatus] = useState<JobStatusResponse | null>(null);
-  const [upstoxError, setUpstoxError] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [failuresModalOpen, setFailuresModalOpen] = useState(false);
   const [jobFailures, setJobFailures] = useState<JobFailures | null>(null);
@@ -114,6 +107,19 @@ export default function AdminPage() {
   const [inspectData, setInspectData] = useState<OhlcvInspectData | null>(null);
   const [inspectLoading, setInspectLoading] = useState(false);
   const [purgeConfirmOpen, setPurgeConfirmOpen] = useState(false);
+  const [upstoxWarning, setUpstoxWarning] = useState<string | null>(null);
+
+  interface UserInfo {
+    id: number;
+    email: string;
+    role: string;
+    trading_enabled: boolean;
+    is_premium: boolean;
+  }
+  const [users, setUsers] = useState<UserInfo[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [togglingPremium, setTogglingPremium] = useState<number | null>(null);
+  const [togglingTrading, setTogglingTrading] = useState<number | null>(null);
 
   const fetchCatalogStatus = useCallback(async () => {
     try {
@@ -144,6 +150,48 @@ export default function AdminPage() {
       console.error('Failed to fetch OHLCV status:', err);
     }
   }, []);
+
+  const fetchUsers = useCallback(async () => {
+    setUsersLoading(true);
+    try {
+      const data = await api.listUsers();
+      setUsers(data);
+    } catch (err) {
+      console.error('Failed to fetch users:', err);
+    } finally {
+      setUsersLoading(false);
+    }
+  }, []);
+
+  const handleTogglePremium = async (userId: number, enabled: boolean) => {
+    setTogglingPremium(userId);
+    try {
+      const updated = await api.setUserPremium(userId, enabled);
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, is_premium: updated.is_premium } : u));
+    } catch (err) {
+      setMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to toggle premium',
+      });
+    } finally {
+      setTogglingPremium(null);
+    }
+  };
+
+  const handleToggleTrading = async (userId: number, enabled: boolean) => {
+    setTogglingTrading(userId);
+    try {
+      const updated = await api.setUserTradingEnabled(userId, enabled);
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, trading_enabled: updated.trading_enabled } : u));
+    } catch (err) {
+      setMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to toggle trading',
+      });
+    } finally {
+      setTogglingTrading(null);
+    }
+  };
 
   const handleSaveOhlcvConfig = async () => {
     setOhlcvConfigLoading(true);
@@ -202,57 +250,17 @@ export default function AdminPage() {
     }
   };
 
-  const handleRefreshOhlcv = async () => {
-    setLoading(true);
-    setMessage(null);
-    setOhlcvJobStatus(null);
-    try {
-      const result = await api.refreshOHLCV(ohlcvDays);
-      setOhlcvJobId(result.job_id);
-      if (result.symbols_count === 0) {
-        setMessage({
-          type: 'info',
-          text: 'No symbols with existing OHLCV data to refresh',
-        });
-      } else {
-        setMessage({
-          type: 'success',
-          text: `OHLCV refresh started for ${result.symbols_count} existing symbols...`,
-        });
-      }
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to start OHLCV refresh';
-      if (errorMsg.includes('UPSTOX_NOT_CONNECTED')) {
-        setUpstoxError(true);
-        if (errorMsg.includes('expired')) {
-          setMessage({
-            type: 'warning',
-            text: 'Upstox session has expired. Please reconnect Upstox from the Brokers page.',
-          });
-        } else {
-          setMessage({
-            type: 'warning',
-            text: 'No active Upstox connection found. Please connect Upstox from the Brokers page.',
-          });
-        }
-      } else {
-        setMessage({
-          type: 'error',
-          text: errorMsg,
-        });
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-
-
   useEffect(() => {
     fetchCatalogStatus();
     fetchCMPStatus();
     fetchOhlcvStatus();
   }, [fetchCatalogStatus, fetchCMPStatus, fetchOhlcvStatus]);
+
+  useEffect(() => {
+    if (activeTab === 'users') {
+      fetchUsers();
+    }
+  }, [activeTab, fetchUsers]);
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] || null;
@@ -360,16 +368,16 @@ export default function AdminPage() {
 
       {activeTab === 'market' && (
         <>
-          {upstoxError && (
+          {upstoxWarning && (
             <Alert severity="warning" sx={{ mb: 2 }}>
-              Upstox is not connected. Please connect Upstox from the Brokers page to refresh market data.
+              {upstoxWarning}
               <Button
                 color="inherit"
                 size="small"
                 onClick={() => navigate('/broker-connections')}
                 sx={{ ml: 2 }}
               >
-                Connect Upstox
+                Configure
               </Button>
             </Alert>
           )}
@@ -433,46 +441,24 @@ export default function AdminPage() {
             </Box>
           </Paper>
 
-          {/* CMP Card */}
+          {/* CMP Cache Card */}
           <Paper sx={{ p: 3, mb: 3 }}>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-              <Typography variant="h6">
-                CMP Cache (Current Market Price)
-              </Typography>
-              <Button
-                size="small"
-                startIcon={<RefreshIcon />}
-                onClick={fetchCMPStatus}
-                disabled={loading}
-              >
-                Refresh Status
-              </Button>
-            </Box>
-
-            {loading ? (
-              <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
-                <CircularProgress size={24} />
-              </Box>
-            ) : (
-              <>
-                <Typography variant="body1" sx={{ mb: 1 }}>
-                  {cmpStatus?.cached_symbols || 0} symbols cached in memory
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                  TTL: {cmpStatus?.ttl_seconds || 300} seconds (5 minutes)
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                  Last updated: {formatDate(cmpStatus?.last_updated || null)}
-                </Typography>
-                <Alert severity="info" sx={{ mt: 1 }}>
-                  {cmpStatus?.note || 'CMP is fetched on-demand and cached in-memory'}
-                </Alert>
-                {!cmpStatus?.has_analytics_token && (
-                  <Alert severity="warning" sx={{ mt: 1 }}>
-                    UPSTOX_ANALYTICS_TOKEN not configured. CMP fetching may fail.
-                  </Alert>
-                )}
-              </>
+            <Typography variant="h6" gutterBottom>
+              CMP Cache (Current Market Price)
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              {cmpStatus?.cached_symbols || 0} symbols cached in memory &middot; TTL: {cmpStatus?.ttl_seconds || 300}s
+              {cmpStatus?.last_updated ? ` &middot; Last: ${formatDate(cmpStatus.last_updated)}` : ''}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Note: {cmpStatus?.note || 'Fetched on-demand and cached in-memory. No admin action needed.'}
+            </Typography>
+            {cmpStatus && !cmpStatus.has_analytics_token && (
+              <Alert severity="warning" sx={{ mt: 1 }} action={
+                <Button color="inherit" size="small" onClick={() => navigate('/broker-connections')}>Configure</Button>
+              }>
+                UPSTOX_ANALYTICS_TOKEN not configured.
+              </Alert>
             )}
           </Paper>
 
@@ -516,24 +502,9 @@ export default function AdminPage() {
                   </Box>
                 </Box>
 
-                {ohlcvStatus?.last_ohlcv_job && (
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    Last job: {ohlcvStatus.last_ohlcv_job.symbols_refreshed} refreshed, {ohlcvStatus.last_ohlcv_job.symbols_skipped} skipped, {ohlcvStatus.last_ohlcv_job.symbols_failed} failed ({formatDate(ohlcvStatus.last_ohlcv_job.updated_at)})
-                    {ohlcvStatus.last_ohlcv_job.symbols_failed > 0 && (
-                      <Button
-                        size="small"
-                        onClick={() => {
-                          setActiveFailuresType('ohlcv');
-                          fetchJobFailures(ohlcvStatus.last_ohlcv_job!.job_id);
-                        }}
-                        disabled={loadingFailures}
-                        sx={{ ml: 1 }}
-                      >
-                        View Failures
-                      </Button>
-                    )}
-                  </Typography>
-                )}
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  OHLCV is fetched on-demand via differential refresh when strategies run. No manual refresh needed.
+                </Alert>
 
                 <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', mb: 2 }}>
                   <Typography variant="body2" color="text.secondary">
@@ -554,18 +525,6 @@ export default function AdminPage() {
                     disabled={ohlcvConfigLoading}
                   >
                     {ohlcvConfigLoading ? 'Saving...' : 'Save'}
-                  </Button>
-                </Box>
-
-                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2 }}>
-                  <Button
-                    variant="contained"
-                    color="primary"
-                    onClick={handleRefreshOhlcv}
-                    disabled={loading || (ohlcvJobStatus?.job && ['pending', 'running'].includes(ohlcvJobStatus.job.status))}
-                    startIcon={loading || (ohlcvJobStatus?.job && ['pending', 'running'].includes(ohlcvJobStatus.job.status)) ? <CircularProgress size={20} color="inherit" /> : <RefreshIcon />}
-                  >
-                    Refresh Data
                   </Button>
                   <Button
                     variant="outlined"
@@ -640,14 +599,6 @@ export default function AdminPage() {
                   )}
                 </Box>
 
-                {ohlcvJobId && ohlcvJobStatus?.job && ['pending', 'running'].includes(ohlcvJobStatus.job.status) && (
-                  <Box sx={{ mt: 2 }}>
-                    <LinearProgress sx={{ mb: 1 }} />
-                    <Typography variant="body2" color="text.secondary">
-                      Job #{ohlcvJobId} - {Math.round((ohlcvJobStatus.job.progress || 0) * 100)}% complete
-                    </Typography>
-                  </Box>
-                )}
               </>
             )}
           </Paper>
@@ -659,9 +610,58 @@ export default function AdminPage() {
           <Typography variant="h6" gutterBottom>
             User Management
           </Typography>
-          <Alert severity="info">
-            User management coming soon
-          </Alert>
+          <TableContainer>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell>ID</TableCell>
+                  <TableCell>Email</TableCell>
+                  <TableCell>Role</TableCell>
+                  <TableCell>Trading Enabled</TableCell>
+                  <TableCell>Premium</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {usersLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={5} align="center">
+                      <CircularProgress size={24} />
+                    </TableCell>
+                  </TableRow>
+                ) : users.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} align="center">
+                      <Typography color="text.secondary">No users found</Typography>
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  users.map(user => (
+                    <TableRow key={user.id}>
+                      <TableCell>{user.id}</TableCell>
+                      <TableCell>{user.email}</TableCell>
+                      <TableCell>{user.role}</TableCell>
+                      <TableCell>
+                        <Switch
+                          checked={user.trading_enabled}
+                          onChange={(_, checked) => handleToggleTrading(user.id, checked)}
+                          disabled={togglingTrading === user.id}
+                          size="small"
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Switch
+                          checked={user.is_premium}
+                          onChange={(_, checked) => handleTogglePremium(user.id, checked)}
+                          disabled={togglingPremium === user.id}
+                          size="small"
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </TableContainer>
         </Paper>
       )}
 

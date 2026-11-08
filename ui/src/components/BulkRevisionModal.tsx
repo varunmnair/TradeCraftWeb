@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -15,26 +15,33 @@ import {
   Box,
   Typography,
   Checkbox,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
+  FormControlLabel,
+  Radio,
+  RadioGroup,
   CircularProgress,
   Alert,
   Chip,
+  TextField,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
 } from '@mui/material';
+import { ExpandMore as ExpandMoreIcon } from '@mui/icons-material';
 import { api } from '../api/client';
-import { BulkSuggestRevisionItem, BulkApplyRevisionResponse } from '../types';
+import { BulkSuggestRevisionItem, BulkApplyRevisionResponse, EntryStrategySummary } from '../types';
 
 interface BulkRevisionModalProps {
   open: boolean;
   onClose: () => void;
   selectedSymbols: string[];
+  strategies: EntryStrategySummary[];
   onApply: () => void;
 }
 
 interface SymbolRevisionState {
   symbol: string;
+  thesis_break_price: number | null;
+  revision_reason: string | null;
   levels: {
     [levelNo: number]: {
       originalPrice: number;
@@ -50,22 +57,48 @@ export function BulkRevisionModal({
   open,
   onClose,
   selectedSymbols,
+  strategies,
   onApply,
 }: BulkRevisionModalProps) {
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [method, setMethod] = useState('align_to_cmp');
-  const [pctAdjustment, setPctAdjustment] = useState(5);
+  const [style, setStyle] = useState<'conservative' | 'balanced' | 'aggressive'>('balanced');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedOverrides, setAdvancedOverrides] = useState({
+    atrPeriod: 14,
+    emaFast: 20,
+    emaSlow: 50,
+    lookback: 60,
+    atrMultiplier: 1.0,
+  });
   const [suggestions, setSuggestions] = useState<BulkSuggestRevisionItem[]>([]);
   const [revisionState, setRevisionState] = useState<SymbolRevisionState[]>([]);
   const [error, setError] = useState('');
   const [applyResult, setApplyResult] = useState<BulkApplyRevisionResponse | null>(null);
+  const [includeHoldings, setIncludeHoldings] = useState(false);
+
+  const holdingSymbols = useMemo(() => {
+    const holdingSet = new Set(
+      strategies.filter((s) => s.is_holding).map((s) => s.symbol)
+    );
+    return holdingSet;
+  }, [strategies]);
+
+  const effectiveSymbols = useMemo(() => {
+    if (includeHoldings) return selectedSymbols;
+    return selectedSymbols.filter((sym) => !holdingSymbols.has(sym));
+  }, [selectedSymbols, holdingSymbols, includeHoldings]);
+
+  const filteredCount = selectedSymbols.length - effectiveSymbols.length;
 
   useEffect(() => {
-    if (open && selectedSymbols.length > 0) {
+    if (open && effectiveSymbols.length > 0) {
       fetchSuggestions();
+    } else if (open) {
+      setSuggestions([]);
+      setRevisionState([]);
     }
-  }, [open, selectedSymbols, method, pctAdjustment]);
+  }, [open, effectiveSymbols, style]);
 
   const fetchSuggestions = async () => {
     setLoading(true);
@@ -73,9 +106,8 @@ export function BulkRevisionModal({
     setApplyResult(null);
     try {
       const response = await api.suggestRevisionBulk(
-        selectedSymbols,
-        method,
-        pctAdjustment
+        effectiveSymbols,
+        style,
       );
       setSuggestions(response.suggestions);
 
@@ -90,7 +122,13 @@ export function BulkRevisionModal({
             accepted: false,
           };
         });
-        return { symbol: item.symbol, levels, anyAccepted };
+        return {
+          symbol: item.symbol,
+          thesis_break_price: item.thesis_break_price ?? null,
+          revision_reason: item.revision_reason ?? null,
+          levels,
+          anyAccepted,
+        };
       });
       setRevisionState(initialState);
     } catch (err) {
@@ -148,6 +186,7 @@ export function BulkRevisionModal({
               level_no: Number(levelNo),
               new_price: level.suggestedPrice,
             })),
+          thesis_break_price: item.thesis_break_price,
         }));
 
       if (updates.length === 0) {
@@ -191,43 +230,97 @@ export function BulkRevisionModal({
     <Dialog open={open} onClose={handleClose} maxWidth="lg" fullWidth>
       <DialogTitle>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <Typography variant="h6">Revise Entry Levels - Bulk Review</Typography>
-          <Chip label={`${selectedSymbols.length} symbols selected`} size="small" color="primary" />
+          <Typography variant="h6">Revise Entries - Bulk Review</Typography>
+          <Chip label={`${effectiveSymbols.length} symbols`} size="small" color="primary" />
+          {filteredCount > 0 && (
+            <Chip label={`${filteredCount} holding(s) excluded`} size="small" color="warning" variant="outlined" />
+          )}
         </Box>
       </DialogTitle>
       <DialogContent>
-        <Box sx={{ mb: 3, display: 'flex', gap: 2, alignItems: 'center' }}>
-          <FormControl size="small" sx={{ minWidth: 200 }}>
-            <InputLabel>Method</InputLabel>
-            <Select
-              value={method}
-              label="Method"
-              onChange={(e) => setMethod(e.target.value)}
-            >
-              <MenuItem value="align_to_cmp">Align to CMP</MenuItem>
-              <MenuItem value="volatility_band">Volatility Band</MenuItem>
-              <MenuItem value="gap_fill">Gap Fill</MenuItem>
-              <MenuItem value="fixed_adjustment">Fixed Adjustment</MenuItem>
-            </Select>
-          </FormControl>
-          {(method === 'volatility_band' || method === 'fixed_adjustment') && (
-            <FormControl size="small" sx={{ minWidth: 120 }}>
-              <InputLabel>Adjustment %</InputLabel>
-              <Select
-                value={pctAdjustment}
-                label="Adjustment %"
-                onChange={(e) => setPctAdjustment(e.target.value as number)}
+        <Box sx={{ mb: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Revision Style</Typography>
+              <RadioGroup
+                row
+                value={style}
+                onChange={(e) => setStyle(e.target.value as 'conservative' | 'balanced' | 'aggressive')}
               >
-                <MenuItem value={3}>3%</MenuItem>
-                <MenuItem value={5}>5%</MenuItem>
-                <MenuItem value={10}>10%</MenuItem>
-                <MenuItem value={15}>15%</MenuItem>
-              </Select>
-            </FormControl>
-          )}
-          <Button variant="outlined" onClick={handleRefreshSuggestions} disabled={loading}>
-            Refresh Suggestions
-          </Button>
+                <FormControlLabel value="conservative" control={<Radio size="small" />} label="Conservative" />
+                <FormControlLabel value="balanced" control={<Radio size="small" />} label="Balanced" />
+                <FormControlLabel value="aggressive" control={<Radio size="small" />} label="Aggressive" />
+              </RadioGroup>
+            </Box>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={includeHoldings}
+                  onChange={(e) => setIncludeHoldings(e.target.checked)}
+                  size="small"
+                />
+              }
+              label="Include holding stocks"
+            />
+            <Button variant="outlined" onClick={handleRefreshSuggestions} disabled={loading}>
+              Refresh Suggestions
+            </Button>
+          </Box>
+
+          <Accordion expanded={advancedOpen} onChange={() => setAdvancedOpen(!advancedOpen)}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography variant="subtitle2">Advanced Settings</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                <TextField
+                  type="number"
+                  label="ATR Period"
+                  value={advancedOverrides.atrPeriod}
+                  onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, atrPeriod: Number(e.target.value) })}
+                  size="small"
+                  sx={{ width: 120 }}
+                  inputProps={{ min: 5, max: 50 }}
+                />
+                <TextField
+                  type="number"
+                  label="EMA Fast"
+                  value={advancedOverrides.emaFast}
+                  onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, emaFast: Number(e.target.value) })}
+                  size="small"
+                  sx={{ width: 120 }}
+                  inputProps={{ min: 5, max: 50 }}
+                />
+                <TextField
+                  type="number"
+                  label="EMA Slow"
+                  value={advancedOverrides.emaSlow}
+                  onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, emaSlow: Number(e.target.value) })}
+                  size="small"
+                  sx={{ width: 120 }}
+                  inputProps={{ min: 20, max: 200 }}
+                />
+                <TextField
+                  type="number"
+                  label="Lookback Days"
+                  value={advancedOverrides.lookback}
+                  onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, lookback: Number(e.target.value) })}
+                  size="small"
+                  sx={{ width: 140 }}
+                  inputProps={{ min: 20, max: 200 }}
+                />
+                <TextField
+                  type="number"
+                  label="ATR Spacing Multiplier"
+                  value={advancedOverrides.atrMultiplier}
+                  onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, atrMultiplier: Number(e.target.value) })}
+                  size="small"
+                  sx={{ width: 180 }}
+                  inputProps={{ min: 0.1, max: 5.0, step: 0.05 }}
+                />
+              </Box>
+            </AccordionDetails>
+          </Accordion>
         </Box>
 
         {error && (
@@ -314,6 +407,11 @@ export function BulkRevisionModal({
                           onChange={(e) => handleToggleSymbol(item.symbol, e.target.checked)}
                         />
                         {item.symbol}
+                        {item.thesis_break_price != null && (
+                          <Typography variant="caption" display="block" color="text.secondary" sx={{ ml: 4 }}>
+                            Break: ₹{item.thesis_break_price.toFixed(2)}
+                          </Typography>
+                        )}
                       </TableCell>
                       <TableCell>
                         {cmpPrice ? `₹${cmpPrice.toFixed(2)}` : '-'}
@@ -370,8 +468,8 @@ export function BulkRevisionModal({
                         ) : '-'}
                       </TableCell>
                       <TableCell>
-                        <Typography variant="body2" color="text.secondary">
-                          {e1?.rationale || e2?.rationale || e3?.rationale || '-'}
+                        <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-wrap' }}>
+                          {item.revision_reason || e1?.rationale || e2?.rationale || e3?.rationale || '-'}
                         </Typography>
                       </TableCell>
                     </TableRow>

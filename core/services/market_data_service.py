@@ -51,16 +51,17 @@ class MarketDataService:
         }
 
     def get_candles(self, symbols: List[str], days: int = 400) -> Dict[str, any]:
-        from core.market_data.ohlcv_store import OhlcvStoreError, get_ohlcv_multi
+        from core.market_data.ohlcv_store import OhlcvStoreError, ensure_ohlcv, get_ohlcv_multi
 
         repo = self._get_repo()
         try:
+            ensure_ohlcv(symbols, days=days)
             candles = get_ohlcv_multi(symbols, days=days, db=repo._db)
         except OhlcvStoreError:
             return {
                 "data": {},
                 "missing_symbols": sanitize_for_json(symbols),
-                "error": "OHLCV data not available. Admin may need to run OHLCV refresh from Market Data page.",
+                "error": "OHLCV data not available. Check UPSTOX_ANALYTICS_TOKEN.",
             }
 
         data = {}

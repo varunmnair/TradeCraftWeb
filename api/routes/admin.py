@@ -34,11 +34,30 @@ class TradingEnabledRequest(BaseModel):
     enabled: bool
 
 
+class PremiumRequest(BaseModel):
+    enabled: bool
+
+
 class UserResponse(BaseModel):
     id: int
     email: str
     role: str
     trading_enabled: bool
+    is_premium: bool
+
+
+def _user_to_response(user: dict) -> UserResponse:
+    return UserResponse(**user)
+
+
+@router.get("/users", response_model=list[UserResponse])
+def list_users(
+    current_user: UserContext = Depends(require_admin),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """List all users. Admin only."""
+    users = auth_service.list_users()
+    return [_user_to_response(u) for u in users]
 
 
 @router.post("/users/{user_id}/trading-enabled", response_model=UserResponse)
@@ -53,12 +72,24 @@ def set_user_trading_enabled(
         user = auth_service.set_user_trading_enabled(
             user_id, payload.enabled, current_user.user_id
         )
-        return UserResponse(
-            id=user.id,
-            email=user.email,
-            role=user.role,
-            trading_enabled=user.trading_enabled,
+        return _user_to_response(user)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/users/{user_id}/premium", response_model=UserResponse)
+def set_user_premium(
+    user_id: int,
+    payload: PremiumRequest,
+    current_user: UserContext = Depends(require_admin),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """Enable or disable premium for a user. Admin only."""
+    try:
+        user = auth_service.set_user_premium(
+            user_id, payload.enabled, current_user.user_id
         )
+        return _user_to_response(user)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -73,12 +104,7 @@ def get_user(
     user = auth_service.get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return UserResponse(
-        id=user.id,
-        email=user.email,
-        role=user.role,
-        trading_enabled=user.trading_enabled,
-    )
+    return _user_to_response(user)
 
 
 @router.post("/symbol-catalog/import")

@@ -11,7 +11,6 @@ import {
   TextField,
   IconButton,
   Tooltip,
-  TooltipProps,
 } from '@mui/material';
 import { DataGrid, GridColDef, GridSortModel, GridRenderCellParams } from '@mui/x-data-grid';
 import { 
@@ -22,38 +21,127 @@ import {
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
-import type { HoldingsRow, OrderHistoryStatus, AgeReason, Trade } from '../types';
+import type { HoldingsRow, OrderHistoryStatus, AgeReason, Trade, WroiScore } from '../types';
 
 const AGE_REASON_MESSAGES: Record<Exclude<AgeReason, null>, string> = {
-  order_history_not_fetched: "Order history not fetched. Click 'Get Order History' to calculate age.",
-  no_trades_for_symbol: "No trade history found for this symbol in the fetched period.",
-  no_buy_trades: "Only sell trades found. Cannot calculate holding age.",
-  buy_trades_beyond_400_days: "Oldest buy trade is beyond 400 days. Age capped at 400 days.",
+  order_history_not_fetched: "Order history not uploaded. Upload CSV to calculate age.",
+  no_trades_for_symbol: "No trade records found for this symbol.",
+  no_buy_trades: "Only sell trades found — no buy history to calculate age from.",
+  buy_trades_beyond_400_days: "Oldest buy is >400 days old. Age capped at 400 days.",
+  trade_qty_mismatch: "",  // Dynamic — built from age_trade_qty + age_holding_qty
 };
 
-const getHoldingsColumns = (): GridColDef[] => [
+const NOT_CALCULATED_TOOLTIP = "Click 'Calculate Trend' to compute";
+
+const UnpopulatedIcon = () => (
+  <Tooltip title={NOT_CALCULATED_TOOLTIP} arrow>
+    <InfoOutlined sx={{ fontSize: 16, color: '#999', cursor: 'help' }} />
+  </Tooltip>
+);
+
+const getHoldingsColumns = (wroiTrends: Record<string, string> | null): GridColDef[] => [
   { field: 'symbol', headerName: 'Symbol', width: 120, sortable: true },
-  { field: 'exchange', headerName: 'Exchange', width: 80, sortable: true },
-  { field: 'quantity', headerName: 'Qty', type: 'number', width: 80, sortable: true },
-  { field: 'average_price', headerName: 'Avg Price', type: 'number', width: 100, sortable: true },
-  { field: 'last_price', headerName: 'CMP', type: 'number', width: 100, sortable: true },
-  { field: 'invested', headerName: 'Invested', type: 'number', width: 110, sortable: true },
-  { field: 'profit', headerName: 'Profit', type: 'number', width: 100, sortable: true },
-  { field: 'profit_pct', headerName: 'Profit %', type: 'number', width: 90, sortable: true },
-  { field: 'quality', headerName: 'Quality', width: 100, sortable: true },
+  {
+    field: 'exit_action',
+    headerName: 'Signal',
+    width: 120,
+    sortable: true,
+    renderCell: (params: GridRenderCellParams<HoldingsRow>) => {
+      const { row } = params;
+      if (wroiTrends == null) return <UnpopulatedIcon />;
+      const action = row.exit_action;
+      if (!action) return <span style={{ color: '#999' }}>-</span>;
+
+      // BREAK takes precedence over all other signals
+      if (action === 'BREAK') {
+        const breakPrice = row.thesis_break_price;
+        const cmp = row.last_price;
+        const breakPct = row.thesis_break_pct;
+        const breakLines = [];
+        if (breakPrice != null) breakLines.push(`Thesis Break Price: ₹${breakPrice}`);
+        if (cmp != null) breakLines.push(`CMP: ₹${cmp.toFixed(2)}`);
+        if (breakPct != null) breakLines.push(`% below break: ${breakPct.toFixed(2)}%`);
+        breakLines.push('');
+        breakLines.push('Automation Paused – Manual Review Required');
+        return (
+          <Tooltip title={breakLines.join('\n')} arrow>
+            <Chip
+              label="BREAK"
+              size="small"
+              color="error"
+              variant="outlined"
+            />
+          </Tooltip>
+        );
+      }
+
+      const color = action === 'HOLD' ? 'success'
+        : action === 'WATCH' ? 'warning'
+        : action === 'REDUCE' ? 'warning'
+        : 'error';
+      const ema = row.ema_score;
+      const vol = row.volume_score;
+      const wroi = row.wroi_score;
+      const total = row.exit_score;
+      const breakdown = [
+        ema != null ? `EMA: ${ema}/50` : 'EMA: --',
+        vol != null ? `Volume: ${vol}/30` : 'Volume: --',
+        wroi != null ? `WROI: ${wroi}/20` : 'WROI: --',
+      ].join(' • ');
+      const summary = total != null ? `Total: ${total}/100 → ${action}` : '';
+      return (
+        <Tooltip title={`${breakdown}${summary ? `\n${summary}` : ''}`} arrow>
+          <Chip
+            label={action}
+            size="small"
+            color={color}
+            variant={action === 'REDUCE' ? 'outlined' : 'filled'}
+          />
+        </Tooltip>
+      );
+    },
+  },
+  { field: 'weighted_roi', headerName: 'WTD ROI', type: 'number', width: 100, sortable: true, valueFormatter: (v: number | null) => v != null ? v.toFixed(4) : '-' },
+  {
+    field: 'wroi_trend',
+    headerName: 'Trend',
+    width: 110,
+    sortable: true,
+    renderCell: (params: GridRenderCellParams<HoldingsRow>) => {
+      if (wroiTrends == null) return <UnpopulatedIcon />;
+      const val = params.value;
+      if (!val || val === 'NA') return <span style={{ color: '#999' }}>-</span>;
+      const color = val === 'STRONG_UP' ? '#1b5e20'
+        : val === 'UP' ? '#2e7d32'
+        : val === 'NEUTRAL' ? '#e65100'
+        : '#c62828';
+      return <span style={{ color, fontWeight: 600 }}>{val.replace('_', ' ')}</span>;
+    },
+  },
+  { field: 'profit', headerName: 'Profit', type: 'number', width: 100, sortable: true, valueFormatter: (v: number | null) => v != null ? v.toFixed(0) : '-' },
+  { field: 'profit_pct', headerName: 'Profit%', type: 'number', width: 90, sortable: true, valueFormatter: (v: number | null) => v != null ? v.toFixed(1) : '-' },
+  { field: 'profit_per_day', headerName: 'Pr/Day', type: 'number', width: 100, sortable: true, valueFormatter: (v: number | null) => v != null ? v.toFixed(1) : '-' },
   {
     field: 'age',
     headerName: 'Age',
     type: 'number',
-    width: 100,
+    width: 80,
     sortable: true,
     renderCell: (params: GridRenderCellParams<HoldingsRow>) => {
       const { row } = params;
       if (row.age === null && row.age_reason) {
+        let tooltipText = AGE_REASON_MESSAGES[row.age_reason] || row.age_reason;
+        if (row.age_reason === 'trade_qty_mismatch') {
+          if (!row.age_trade_qty || row.age_trade_qty === 0) {
+            tooltipText = `No trade records found (holding: ${row.age_holding_qty ?? '?'} shares)`;
+          } else {
+            tooltipText = `Trade qty (${row.age_trade_qty}) ≠ Holding qty (${row.age_holding_qty ?? '?'})`;
+          }
+        }
         return (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, width: '100%' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 0.5, width: '100%' }}>
             <span style={{ color: '#999' }}>-</span>
-            <Tooltip title={AGE_REASON_MESSAGES[row.age_reason]} arrow>
+            <Tooltip title={tooltipText} arrow>
               <InfoOutlined sx={{ fontSize: 16, color: '#999', cursor: 'help' }} />
             </Tooltip>
           </Box>
@@ -62,10 +150,36 @@ const getHoldingsColumns = (): GridColDef[] => [
       return params.value ?? '-';
     },
   },
-  { field: 'roi_per_day', headerName: 'ROI/Day', type: 'number', width: 100, sortable: true },
-  { field: 'profit_per_day', headerName: 'Profit/Day', type: 'number', width: 110, sortable: true },
-  { field: 'weighted_roi', headerName: 'W ROI', type: 'number', width: 100, sortable: true },
-  { field: 'trend', headerName: 'Trend', width: 100, sortable: true },
+  { field: 'invested', headerName: 'Invested', type: 'number', width: 100, sortable: true, valueFormatter: (v: number | null) => v != null ? v.toFixed(0) : '-' },
+  { field: 'quantity', headerName: 'Qty', type: 'number', width: 70, sortable: true },
+  { field: 'average_price', headerName: 'Avg Price', type: 'number', width: 100, sortable: true, valueFormatter: (v: number | null) => v != null ? v.toFixed(1) : '-' },
+  { field: 'last_price', headerName: 'CMP', type: 'number', width: 90, sortable: true },
+  { field: 'quality', headerName: 'Quality', width: 90, sortable: true },
+  {
+    field: 'exit_score',
+    headerName: 'Exit Score',
+    type: 'number',
+    width: 105,
+    sortable: true,
+    renderCell: (params: GridRenderCellParams<HoldingsRow>) => {
+      if (wroiTrends == null) return <UnpopulatedIcon />;
+      const score = params.value;
+      if (score == null) return <span style={{ color: '#999' }}>-</span>;
+      const bg = score >= 80 ? 'rgba(76, 175, 80, 0.15)'
+        : score >= 60 ? 'rgba(255, 193, 7, 0.15)'
+        : score >= 40 ? 'rgba(255, 152, 0, 0.15)'
+        : 'rgba(244, 67, 54, 0.15)';
+      const fg = score >= 80 ? '#1b5e20'
+        : score >= 60 ? '#e65100'
+        : score >= 40 ? '#bf360c'
+        : '#b71c1c';
+      return (
+        <Box sx={{ backgroundColor: bg, color: fg, fontWeight: 600, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {score}
+        </Box>
+      );
+    },
+  },
 ];
 
 export default function HoldingsPage() {
@@ -86,6 +200,9 @@ export default function HoldingsPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [searchingTrades, setSearchingTrades] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [wroiTrends, setWroiTrends] = useState<Record<string, string> | null>(null);
+  const [scores, setScores] = useState<Record<string, WroiScore> | null>(null);
+  const [computingWroiTrend, setComputingWroiTrend] = useState(false);
 
   const handleSearchTrades = useCallback(async () => {
     if (!sessionId || !symbolSearch.trim()) return;
@@ -133,6 +250,20 @@ export default function HoldingsPage() {
       api.getOrderHistoryStatus(sessionId).then(setOrderHistory).catch(() => setOrderHistory(null));
     }
   }, [sessionId, fetchHoldings]);
+
+  const handleComputeWroiTrend = async () => {
+    if (!sessionId) return;
+    setComputingWroiTrend(true);
+    try {
+      const result = await api.computeWroiTrend(sessionId);
+      setWroiTrends(result.wroi_trends);
+      setScores(result.scores);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to compute trend and scores');
+    } finally {
+      setComputingWroiTrend(false);
+    }
+  };
 
   const handleRefresh = () => {
     fetchHoldings();
@@ -184,7 +315,7 @@ export default function HoldingsPage() {
   const formatDateRange = (from: string, to: string) => {
     const fromDate = new Date(from);
     const toDate = new Date(to);
-    const format = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    const format = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     return `${format(fromDate)} - ${format(toDate)}`;
   };
 
@@ -223,6 +354,14 @@ export default function HoldingsPage() {
           </Tooltip>
         </Box>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleComputeWroiTrend}
+            disabled={computingWroiTrend}
+          >
+            {computingWroiTrend ? 'Computing...' : 'Calculate Trend'}
+          </Button>
           {lastUpdated && (
             <Typography variant="body2" color="text.secondary">
               Last updated: {lastUpdated.toLocaleTimeString()}
@@ -265,7 +404,7 @@ export default function HoldingsPage() {
 
           {orderHistory?.fetched_at && (
             <Typography variant="caption" color="text.secondary">
-              fetched {new Date(orderHistory.fetched_at).toLocaleDateString()}
+              Updated on: {new Date(orderHistory.fetched_at).toLocaleDateString()}
             </Typography>
           )}
 
@@ -394,6 +533,19 @@ export default function HoldingsPage() {
         )}
       </Paper>
 
+      {/* Upload warnings */}
+      {orderHistory?.skipped_symbols && orderHistory.skipped_symbols.length > 0 && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Skipped symbols (invalid data): {orderHistory.skipped_symbols.join(', ')}
+        </Alert>
+      )}
+      {orderHistory?.errors && orderHistory.errors.length > 0 && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Upload notes: {orderHistory.errors.slice(0, 5).join('; ')}
+          {orderHistory.errors.length > 5 && ` (+${orderHistory.errors.length - 5} more)`}
+        </Alert>
+      )}
+
       {/* Holdings Table */}
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
@@ -408,8 +560,8 @@ export default function HoldingsPage() {
       ) : (
         <Paper sx={{ height: 600, width: '100%' }}>
           <DataGrid
-            rows={holdings}
-            columns={getHoldingsColumns()}
+            rows={holdings.map(h => ({ ...h, wroi_trend: wroiTrends?.[h.symbol] ?? 'NA', ...(scores?.[h.symbol] || {}) }))}
+            columns={getHoldingsColumns(wroiTrends)}
             sortModel={sortModel}
             onSortModelChange={setSortModel}
             initialState={{

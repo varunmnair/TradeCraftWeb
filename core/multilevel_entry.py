@@ -2,7 +2,7 @@ import logging
 import math
 from typing import Dict, List, Tuple
 
-from core.entry import BaseEntryStrategy, create_skipped_item, create_pending_cmp_item
+from core.entry import BaseEntryStrategy, create_pending_cmp_item, create_skipped_item
 from core.risk_manager import RiskManager
 
 
@@ -120,6 +120,30 @@ class MultiLevelEntryPlanner(BaseEntryStrategy):
                 )
                 continue
 
+            # Determine current entry level based on LTP position
+            current_entry_level = None
+            if is_entry3_valid and ltp <= entry3:
+                current_entry_level = "E3"
+            elif is_entry2_valid and ltp <= entry2:
+                current_entry_level = "E2"
+            elif is_entry1_valid and ltp <= entry1:
+                current_entry_level = "E1"
+
+            # Thesis break check — skip if price fell below break level
+            thesis_break_price = scrip.get("thesis_break_price")
+            if thesis_break_price is not None and ltp <= thesis_break_price:
+                level_tag = f"({current_entry_level})" if current_entry_level else ""
+                self.skipped_items.append(
+                    create_skipped_item(
+                        symbol,
+                        f"Thesis break at ₹{thesis_break_price} — {symbol}{level_tag} paused",
+                        exchange=exchange,
+                        ltp=ltp,
+                        entry=current_entry_level,
+                    )
+                )
+                continue
+
             candidate_scrip = scrip.copy()
             candidate_scrip["ltp"] = ltp
             candidate_scrip["num_entries"] = num_entries
@@ -225,16 +249,27 @@ class MultiLevelEntryPlanner(BaseEntryStrategy):
             ltp = scrip["ltp"]
             allocated = scrip["Allocated"]
 
+            # Determine current entry level based on LTP position
+            current_entry_level = None
+            if scrip.get("is_entry3_valid") and ltp <= scrip.get("entry3", float("inf")):
+                current_entry_level = "E3"
+            elif scrip.get("is_entry2_valid") and ltp <= scrip.get("entry2", float("inf")):
+                current_entry_level = "E2"
+            elif scrip.get("is_entry1_valid") and ltp <= scrip.get("entry1", float("inf")):
+                current_entry_level = "E1"
+
             total_qty, average_price = self._get_holding_details(holdings_map, symbol)
             invested_amount = total_qty * average_price
 
             if invested_amount >= allocated:
+                level_tag = f"({current_entry_level})" if current_entry_level else ""
                 self.skipped_items.append(
                     create_skipped_item(
                         symbol,
-                        "Holding has reached or exceeded allocated amount",
+                        f"Holding has reached or exceeded allocated amount — {symbol}{level_tag}",
                         exchange,
                         ltp,
+                        entry=current_entry_level,
                     )
                 )
                 continue
@@ -244,12 +279,14 @@ class MultiLevelEntryPlanner(BaseEntryStrategy):
             )
 
             if not entry_level:
+                level_tag = f"({current_entry_level})" if current_entry_level else ""
                 self.skipped_items.append(
                     create_skipped_item(
                         symbol,
-                        "Holding does not qualify for any entry level",
+                        f"Holding does not qualify for any entry level — {symbol}{level_tag}",
                         exchange,
                         ltp,
+                        entry=current_entry_level,
                     )
                 )
                 continue
@@ -368,6 +405,8 @@ class MultiLevelEntryPlanner(BaseEntryStrategy):
         try:
             quote = self.cmp_manager.get_quote(exchange, symbol)
             try:
+                from core.market_data.ohlcv_store import ensure_ohlcv
+                ensure_ohlcv([symbol], days=200)
                 historical_data = get_ohlcv(symbol, days=200)
             except OhlcvStoreError as e:
                 logging.warning(f"OHLCV data not available for {symbol}: {e}")

@@ -27,10 +27,6 @@ class CMPManager:
     def _is_cache_valid(self):
         return (time.time() - self.last_updated) < self.ttl
 
-    def _is_stale(self, exchange: str, symbol: str) -> bool:
-        key = (exchange.upper(), symbol.upper())
-        return key not in self.cache
-
     def _round_cmp(self, value: float | None) -> float | None:
         if value is None:
             return None
@@ -193,8 +189,10 @@ class CMPManager:
         key = (exchange_clean, symbol_clean)
 
         if key in self.cache:
-            quote = self.cache[key]
-            return self._round_cmp(quote.get("last_price"))
+            if self._is_cache_valid():
+                quote = self.cache[key]
+                return self._round_cmp(quote.get("last_price"))
+            del self.cache[key]
 
         if auto_refresh:
             self._pending_symbols.add(key)
@@ -218,7 +216,12 @@ class CMPManager:
             sym_clean = str(sym).replace("-BE", "").strip().upper()
             key = (exchange_clean, sym_clean)
             if key in self.cache:
-                result[sym_clean] = self._round_cmp(self.cache[key].get("last_price"))
+                if self._is_cache_valid():
+                    result[sym_clean] = self._round_cmp(self.cache[key].get("last_price"))
+                else:
+                    del self.cache[key]
+                    keys_needed.add(key)
+                    result[sym_clean] = None
             else:
                 keys_needed.add(key)
                 result[sym_clean] = None

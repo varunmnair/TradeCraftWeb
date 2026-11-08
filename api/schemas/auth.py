@@ -27,6 +27,7 @@ class AuthUser(BaseModel):
     email: EmailStr
     role: str
     trading_enabled: bool = False
+    is_premium: bool = False
     first_name: Optional[str] = None
     last_name: Optional[str] = None
 

@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from api.dependencies import get_current_user, get_db_session
@@ -21,11 +23,17 @@ from api.schemas.entry_strategy import (
     BulkSuggestRevisionItem,
     BulkSuggestRevisionRequest,
     BulkSuggestRevisionResponse,
+    DABulkEvalResponse,
+    DAConfigSchema,
+    DAEvalResultSchema,
+    DAOverrideRequest,
     EntryLevelSchema,
     EntryStrategyFullSchema,
     EntryStrategyListResponse,
     EntryStrategySummarySchema,
     EntryStrategyUploadResponse,
+    InlineUpdateRequest,
+    InlineUpdateResponse,
     RestoreVersionResponse,
     SuggestedRevision,
     SuggestRevisionResponse,
@@ -89,25 +97,15 @@ def _get_broker_scope_from_session(
 
 
 def _trigger_ohlcv_for_entry_strategies(symbols: list[str], user_id: int | None):
-    """Trigger OHLCV data refresh for entry strategy symbols with 24-hour skip."""
+    """Ensure OHLCV data is fresh for entry strategy symbols."""
     if not symbols:
         return
 
-    from api.dependencies import get_job_runner, JOB_OHLCV_REFRESH_SYMBOLS
+    from core.market_data.ohlcv_store import ensure_ohlcv
 
     symbols_stripped = [str(s).strip().upper() for s in symbols]
-    session_id = f"entry-strategies-{user_id or 'unknown'}"
-
-    try:
-        job_runner = get_job_runner()
-        job_runner.start_job(
-            session_id=session_id,
-            job_type=JOB_OHLCV_REFRESH_SYMBOLS,
-            payload={"symbols": symbols_stripped},
-        )
-        logging.info(f"Triggered OHLCV refresh for {len(symbols_stripped)} entry strategy symbols")
-    except Exception as e:
-        logging.warning(f"Failed to trigger OHLCV refresh: {e}")
+    ensure_ohlcv(symbols_stripped)
+    logging.info(f"Ensured OHLCV data for {len(symbols_stripped)} entry strategy symbols")
 
 
 def _require_active_connection_scope(
@@ -171,6 +169,21 @@ def list_entry_strategies(
         .all()
     )
 
+    # Build holdings map from active session (if available)
+    holdings_map = {}
+    try:
+        from api.dependencies import get_session_registry
+        registry = get_session_registry()
+        session = registry.find_session_for_user(current_user.user_id)
+        if session:
+            holdings = session.session_cache.get_holdings()
+            for h in holdings:
+                sym = h.get("tradingsymbol", "").replace("-BE", "").replace("#", "").upper()
+                if sym:
+                    holdings_map[sym] = h
+    except Exception:
+        pass
+
     result = []
     for s in strategies:
         levels = (
@@ -212,6 +225,26 @@ def list_entry_strategies(
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        # Map old THESIS_BREAK to REVIEW_REQUIRED — thesis break is now holdings-only
+        review_status = s.review_status
+        if review_status == "THESIS_BREAK":
+            review_status = "REVIEW_REQUIRED"
+
+        # Determine holdings status and entry level
+        sym_clean = s.symbol.replace("-BE", "").replace("#", "").upper()
+        holding = holdings_map.get(sym_clean)
+        is_holding = holding is not None
+        holding_entry_level = None
+        if is_holding:
+            # Determine which entry level the holding's average price is at
+            avg_price = holding.get("average_price", 0) or 0
+            if entry3 is not None and avg_price <= entry3:
+                holding_entry_level = "E3"
+            elif entry2 is not None and avg_price <= entry2:
+                holding_entry_level = "E2"
+            elif entry1 is not None and avg_price <= entry1:
+                holding_entry_level = "E1"
+
         result.append(
             EntryStrategySummarySchema(
                 symbol=s.symbol,
@@ -228,7 +261,23 @@ def list_entry_strategies(
                 da_e3_buyback=da_e3_buyback,
                 da_trigger_offset=da_trigger_offset,
                 levels_count=len(levels),
+                created_at=s.created_at,
                 updated_at=s.updated_at,
+                swing_eligible=s.swing_eligible,
+                swing_avg_volume=s.swing_avg_volume,
+                swing_atr_percent=s.swing_atr_percent,
+                swing_range_percent=s.swing_range_percent,
+                swing_reasons=json.loads(s.swing_reasons) if s.swing_reasons else None,
+                thesis_break_price=s.thesis_break_price,
+                review_status=review_status,
+                last_evaluated_at=s.last_evaluated_at,
+                last_entry_revision_at=s.last_entry_revision_at,
+                da_eligible=s.da_eligible,
+                da_status=s.da_status,
+                da_confidence_score=s.da_confidence_score,
+                da_last_evaluated_at=s.da_last_evaluated_at,
+                is_holding=is_holding,
+                holding_entry_level=holding_entry_level,
             )
         )
 
@@ -264,6 +313,132 @@ def delete_entry_strategy(
     db.commit()
 
     return {"deleted": symbol.upper(), "success": True}
+
+
+@router.patch("/{symbol}", response_model=InlineUpdateResponse)
+def update_entry_strategy_inline(
+    symbol: str,
+    payload: InlineUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    """Inline update of allocation and/or entry levels for a strategy."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
+    strategy = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+            EntryStrategy.symbol == symbol.upper(),
+        )
+        .first()
+    )
+
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    now = datetime.utcnow()
+    updated_fields: list[str] = []
+    levels_changed = False
+
+    # Update allocation if provided
+    if payload.allocated is not None:
+        strategy.allocated = payload.allocated
+        updated_fields.append("allocated")
+
+    # Collect current entry level prices for validation
+    old_levels = (
+        db.query(EntryLevel)
+        .filter(EntryLevel.strategy_id == strategy.id)
+        .all()
+    )
+    current_prices: dict[int, float] = {}
+    for lvl in old_levels:
+        if lvl.is_active:
+            current_prices[lvl.level_no] = lvl.price
+
+    # Build final entry prices
+    e1 = payload.entry1 if payload.entry1 is not None else current_prices.get(1)
+    e2 = payload.entry2 if payload.entry2 is not None else current_prices.get(2)
+    e3 = payload.entry3 if payload.entry3 is not None else current_prices.get(3)
+
+    # Auto-sort descending: Entry 1 (highest) > Entry 2 > Entry 3 (lowest)
+    values = sorted([v for v in [e1, e2, e3] if v is not None], reverse=True)
+    if len(values) >= 1 and e1 is not None:
+        e1 = values[0]
+    if len(values) >= 2 and e2 is not None:
+        e2 = values[1]
+    if len(values) >= 3 and e3 is not None:
+        e3 = values[2]
+
+    # Update entry levels
+    for level_no, new_price in [
+        (1, e1),
+        (2, e2),
+        (3, e3),
+    ]:
+        if new_price is None:
+            continue
+        if new_price <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Entry {level_no} must be greater than 0",
+            )
+
+        level = next((lvl for lvl in old_levels if lvl.level_no == level_no), None)
+        if level:
+            if level.price != new_price:
+                level.price = new_price
+                level.updated_at = now
+                updated_fields.append(f"entry{level_no}")
+                levels_changed = True
+        else:
+            # Create level if it doesn't exist (shouldn't happen for normal flow)
+            new_level = EntryLevel(
+                strategy_id=strategy.id,
+                level_no=level_no,
+                price=new_price,
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(new_level)
+            updated_fields.append(f"entry{level_no}")
+            levels_changed = True
+
+    if not updated_fields:
+        return InlineUpdateResponse(
+            symbol=strategy.symbol,
+            updated_fields=[],
+            updated_at=now,
+        )
+
+    # Create version snapshot before entry level changes
+    if levels_changed and old_levels:
+        changes = [f for f in updated_fields if f.startswith("entry")]
+        _create_version(
+            db=db,
+            strategy=strategy,
+            action="inline_edit",
+            changes_summary=f"Inline edit: {', '.join(changes)}",
+            levels=old_levels,
+        )
+
+    strategy.updated_at = now
+    if levels_changed:
+        strategy.last_entry_revision_at = now
+
+    db.commit()
+
+    return InlineUpdateResponse(
+        symbol=strategy.symbol,
+        updated_fields=updated_fields,
+        updated_at=now,
+    )
 
 
 @router.post("/bulk-delete")
@@ -305,6 +480,112 @@ def bulk_delete_entry_strategies(
         "not_found": not_found,
         "success": True,
     }
+
+
+@router.get("/template.csv")
+def get_template():
+    return {
+        "symbol": "BEL",
+        "allocated": 30000,
+        "entry1": 386.5,
+        "entry2": 375,
+        "entry3": 369,
+    }
+
+
+@router.get("/download.csv")
+def download_strategies_csv(
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    """
+    Download entry strategies as CSV for the active broker connection.
+    Use this to save your strategies or re-upload after editing.
+    """
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
+    strategies = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+        )
+        .all()
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "Symbol", "Allocated", "Entry1", "Entry2", "Entry3",
+    ])
+
+    for s in strategies:
+        levels = (
+            db.query(EntryLevel)
+            .filter(EntryLevel.strategy_id == s.id)
+            .order_by(EntryLevel.level_no)
+            .all()
+        )
+
+        entry_prices = {l.level_no: l.price for l in levels}
+
+        writer.writerow([
+            s.symbol,
+            s.allocated or "",
+            entry_prices.get(1, ""),
+            entry_prices.get(2, ""),
+            entry_prices.get(3, ""),
+        ])
+
+    output.seek(0)
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=entry_levels_{broker}_{broker_user_id}_{datetime.utcnow().strftime('%d%m')}.csv"
+        },
+    )
+
+
+@router.get("/uploads", response_model=UploadHistoryResponse)
+def get_upload_history(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    """Get upload history for the current user."""
+    uploads = (
+        db.query(EntryStrategyUpload)
+        .filter(
+            EntryStrategyUpload.user_id == current_user.user_id,
+        )
+        .order_by(EntryStrategyUpload.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return UploadHistoryResponse(
+        uploads=[
+            UploadHistoryItem(
+                id=u.id,
+                filename=u.filename,
+                symbols=json.loads(u.symbols_json) if u.symbols_json else [],
+                created_at=u.created_at,
+            )
+            for u in uploads
+        ]
+    )
+
+
+@router.get("/da/config", response_model=DAConfigSchema)
+def get_da_config_endpoint():
+    from core.da_config import get_da_config
+    return get_da_config()
 
 
 @router.get("/{symbol}", response_model=EntryStrategyFullSchema)
@@ -361,7 +642,156 @@ def get_entry_strategy(
         ],
         created_at=strategy.created_at,
         updated_at=strategy.updated_at,
+        swing_eligible=strategy.swing_eligible,
+        thesis_break_price=strategy.thesis_break_price,
+        review_status=strategy.review_status,
+        last_evaluated_at=strategy.last_evaluated_at,
+        last_entry_revision_at=strategy.last_entry_revision_at,
+        da_eligible=strategy.da_eligible,
+        da_status=strategy.da_status,
+        da_last_evaluated_at=strategy.da_last_evaluated_at,
+        da_confidence_score=strategy.da_confidence_score,
+        da_notes=strategy.da_notes,
+        override_da_enabled=strategy.override_da_enabled,
+        override_da_qty_pct=strategy.override_da_qty_pct,
+        override_sell_offset=strategy.override_sell_offset,
+        override_buyback_price=strategy.override_buyback_price,
+        override_sell_price=strategy.override_sell_price,
     )
+
+
+def _parse_entry_strategies_csv(
+    text_content: str,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Parse the entry-strategy CSV into {symbol: strategy} dicts and row errors.
+
+    Expected columns: Symbol, Allocated, Entry1, Entry2, Entry3. Header matching is
+    case/space/underscore tolerant. Symbols are uppercased and any "NSE:"/"BSE:"
+    prefix is stripped. Entry prices are auto-sorted descending (E1 > E2 > E3).
+    """
+    reader = csv.DictReader(io.StringIO(text_content))
+    field_names = [fn.strip() for fn in reader.fieldnames or []]
+
+    # Normalize header names so case/space/underscore variants all resolve
+    # (e.g. "Entry1", "entry 1", "entry_1" -> "entry1")
+    def _normalize_header(name: str) -> str:
+        return name.strip().lower().replace(" ", "").replace("_", "")
+
+    col_map: dict[str, str] = {}
+    for fn in field_names:
+        col_map.setdefault(_normalize_header(fn), fn)
+
+    symbol_col = col_map.get("symbol")
+    allocated_col = col_map.get("allocated")
+    entry_cols = {i: col_map.get(f"entry{i}") for i in (1, 2, 3)}
+
+    if not symbol_col or not entry_cols[1]:
+        missing = []
+        if not symbol_col:
+            missing.append("Symbol")
+        if not entry_cols[1]:
+            missing.append("Entry1")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "CSV must have Symbol, Allocated, Entry1, Entry2, Entry3 columns"
+                + (f". Missing: {', '.join(missing)}" if missing else "")
+            ),
+        )
+
+    parsed_strategies: dict[str, dict[str, Any]] = {}
+    row_errors: list[dict[str, Any]] = []
+
+    for row_num, row in enumerate(reader, start=2):
+        try:
+            row = {k.strip(): (v.strip() if v else "") for k, v in row.items()}
+
+            # Symbol normalization: uppercase + strip "NSE:"/"BSE:" prefix
+            symbol = row.get(symbol_col, "") or ""
+            symbol = symbol.upper().strip()
+            if symbol.startswith("NSE:") or symbol.startswith("BSE:"):
+                symbol = symbol.split(":")[-1].strip()
+
+            if not symbol:
+                row_errors.append({"row": row_num, "error": "symbol is empty"})
+                continue
+
+            allocated = None
+            allocated_val = row.get(allocated_col, "") if allocated_col else ""
+            if allocated_val:
+                try:
+                    allocated = float(allocated_val)
+                except ValueError:
+                    row_errors.append(
+                        {
+                            "row": row_num,
+                            "error": f"allocated '{allocated_val}' is not a valid number",
+                        }
+                    )
+                    continue
+                if allocated <= 0:
+                    row_errors.append(
+                        {"row": row_num, "error": "allocated must be greater than 0"}
+                    )
+                    continue
+
+            row_invalid = False
+            levels: dict[int, float] = {}
+            for level_num, col in entry_cols.items():
+                if not col:
+                    continue
+                price_str = row.get(col, "").strip()
+                if not price_str:
+                    continue
+                try:
+                    price = float(price_str)
+                except ValueError:
+                    row_errors.append(
+                        {
+                            "row": row_num,
+                            "error": f"Entry {level_num} '{price_str}' is not a valid number",
+                        }
+                    )
+                    row_invalid = True
+                    break
+                if price <= 0:
+                    row_errors.append(
+                        {
+                            "row": row_num,
+                            "error": f"Entry {level_num} must be greater than 0",
+                        }
+                    )
+                    row_invalid = True
+                    break
+                levels[level_num] = price
+
+            if row_invalid:
+                continue
+
+            if not levels:
+                row_errors.append(
+                    {"row": row_num, "error": f"no valid entry prices for {symbol}"}
+                )
+                continue
+
+            # Auto-sort descending: Entry 1 (highest) > Entry 2 > Entry 3 (lowest)
+            levels = {
+                level_num + 1: price
+                for level_num, price in enumerate(sorted(levels.values(), reverse=True))
+            }
+
+            parsed_strategies[symbol] = {
+                "symbol": symbol,
+                "allocated": allocated,
+                "quality": None,
+                "exchange": "NSE",
+                "levels": levels,
+            }
+
+        except Exception as e:
+            row_errors.append({"row": row_num, "error": str(e)})
+
+    return parsed_strategies, row_errors
 
 
 @router.post("/upload-csv", response_model=EntryStrategyUploadResponse)
@@ -384,176 +814,7 @@ async def upload_csv(
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="Invalid UTF-8 encoding")
 
-    reader = csv.DictReader(io.StringIO(text_content))
-    field_names = [fn.strip() for fn in reader.fieldnames or []]
-
-    # Map column names (handle spaces like "DA Enabled" -> "DA Enabled")
-    has_entry_format = any(fn in field_names for fn in ["entry1", "entry2", "entry3"])
-    has_level_format = "level_no" in field_names and "price" in field_names
-
-    # Build lookup for normalized column names
-    col_lookup = {}
-    for fn in field_names:
-        key = fn.strip().lower().replace(" ", "_")
-        col_lookup[key] = fn
-        col_lookup[fn.lower()] = fn
-        col_lookup[fn] = fn
-
-    has_entry_format = any(fn in field_names for fn in ["entry1", "entry2", "entry3"])
-    has_level_format = "level_no" in field_names and "price" in field_names
-
-    if has_entry_format:
-        required_fields = {"symbol", "entry1"}
-        if not required_fields.issubset(field_names):
-            missing = required_fields - set(field_names)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing required columns: {', '.join(missing)}",
-            )
-    elif has_level_format:
-        required_fields = {"symbol", "level_no", "price"}
-        if not required_fields.issubset(field_names):
-            missing = required_fields - set(field_names)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing required columns: {', '.join(missing)}",
-            )
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="CSV must have either entry1/entry2/entry3 columns or level_no/price columns",
-        )
-
-    parsed_strategies: dict[str, dict[str, Any]] = {}
-    row_errors: list[dict[str, Any]] = []
-
-    # Helper to get column value by trying multiple possible column names
-    def get_col(row: dict, *names: str) -> str:
-        for name in names:
-            if name in row:
-                return row[name]
-            # Try normalized version
-            normalized = name.lower().replace(" ", "_")
-            for k, v in row.items():
-                if k.lower().replace(" ", "_") == normalized:
-                    return v
-        return ""
-
-    for row_num, row in enumerate(reader, start=2):
-        try:
-            row = {k.strip(): (v.strip() if v else "") for k, v in row.items()}
-
-            # Get symbol - prefer "symbol" column, fall back to "Raw Symbol"
-            symbol = get_col(row, "symbol", "raw symbol", "Raw Symbol") or ""
-            if symbol.startswith("nse:") or symbol.startswith("bse:"):
-                symbol = symbol.split(":")[-1]
-            symbol = symbol.upper().strip()
-
-            if not symbol:
-                row_errors.append({"row": row_num, "error": "symbol is empty"})
-                continue
-
-            if symbol not in parsed_strategies:
-                allocated_val = get_col(row, "allocated", "Allocated")
-                allocated = None
-                if allocated_val:
-                    try:
-                        allocated = float(allocated_val)
-                    except ValueError:
-                        pass
-
-                quality = get_col(row, "quality", "Quality") or None
-                exchange = get_col(row, "exchange", "Exchange") or "NSE"
-
-                da_enabled_str = get_col(
-                    row, "da_enabled", "DA Enabled", "da enabled"
-                ).lower()
-                da_enabled = da_enabled_str in ("y", "yes", "true", "1")
-
-                da_legs_str = get_col(row, "da_legs", "DA legs", "da legs")
-                da_legs = (
-                    int(da_legs_str)
-                    if da_legs_str.isdigit()
-                    else (1 if da_enabled else 0)
-                )
-
-                e1_buyback = (
-                    get_col(row, "da_e1_buyback", "DA E1 Buyback", "da e1 buyback")
-                    or "0"
-                )
-                e2_buyback = (
-                    get_col(row, "da_e2_buyback", "DA E2 Buyback", "da e2 buyback")
-                    or "0"
-                )
-                e3_buyback = (
-                    get_col(row, "da_e3_buyback", "DA E3 Buyback", "da e3 buyback")
-                    or "0"
-                )
-                trigger_offset = (
-                    get_col(
-                        row, "datrigger_offset", "DATriggerOffset", "datrigger offset"
-                    )
-                    or "0"
-                )
-
-                averaging_rules = None
-                if da_enabled:
-                    try:
-                        buyback = [
-                            int(e1_buyback) if e1_buyback.isdigit() else 0,
-                            int(e2_buyback) if e2_buyback.isdigit() else 0,
-                            int(e3_buyback) if e3_buyback.isdigit() else 0,
-                        ]
-                        averaging_rules = json.dumps(
-                            {
-                                "legs": da_legs,
-                                "buyback": buyback,
-                                "trigger_offset": (
-                                    int(trigger_offset)
-                                    if trigger_offset.isdigit()
-                                    else 0
-                                ),
-                            }
-                        )
-                    except (ValueError, TypeError):
-                        pass
-
-                parsed_strategies[symbol] = {
-                    "symbol": symbol,
-                    "allocated": allocated,
-                    "quality": quality,
-                    "exchange": exchange,
-                    "dynamic_averaging_enabled": da_enabled,
-                    "averaging_rules_json": averaging_rules,
-                    "levels": {},
-                }
-
-            if has_entry_format:
-                for level_num in [1, 2, 3]:
-                    entry_key = f"entry{level_num}"
-                    price_str = row.get(entry_key, "").strip()
-                    if price_str:
-                        try:
-                            price = float(price_str)
-                            parsed_strategies[symbol]["levels"][level_num] = price
-                        except ValueError:
-                            pass
-            else:
-                level_no_str = row.get("level_no", "")
-                price_str = row.get("price", "")
-                if level_no_str and price_str:
-                    try:
-                        level_no = int(level_no_str)
-                        price = float(price_str)
-                        parsed_strategies[symbol]["levels"][level_no] = price
-                    except ValueError:
-                        pass
-
-        except Exception as e:
-            row_errors.append({"row": row_num, "error": str(e)})
-
-    if not parsed_strategies and not row_errors:
-        raise HTTPException(status_code=400, detail="CSV file is empty")
+    parsed_strategies, row_errors = _parse_entry_strategies_csv(text_content)
 
     if not parsed_strategies and not row_errors:
         raise HTTPException(status_code=400, detail="CSV file is empty")
@@ -564,22 +825,23 @@ async def upload_csv(
     deleted_count = 0
     now = datetime.utcnow()
 
-    # Delete old strategies not in the uploaded CSV
-    old_strategies = (
-        db.query(EntryStrategy)
-        .filter(
-            EntryStrategy.user_id == current_user.user_id,
-            EntryStrategy.broker == broker,
-            EntryStrategy.broker_user_id == broker_user_id,
+    # Delete old strategies not in the uploaded CSV (non-premium only)
+    if not current_user.is_premium:
+        old_strategies = (
+            db.query(EntryStrategy)
+            .filter(
+                EntryStrategy.user_id == current_user.user_id,
+                EntryStrategy.broker == broker,
+                EntryStrategy.broker_user_id == broker_user_id,
+            )
+            .all()
         )
-        .all()
-    )
-    for old in old_strategies:
-        if old.symbol not in symbols_processed:
-            # Delete levels first
-            db.query(EntryLevel).filter(EntryLevel.strategy_id == old.id).delete()
-            db.delete(old)
-            deleted_count += 1
+        for old in old_strategies:
+            if old.symbol not in symbols_processed:
+                # Delete levels first
+                db.query(EntryLevel).filter(EntryLevel.strategy_id == old.id).delete()
+                db.delete(old)
+                deleted_count += 1
 
     for symbol, strategy_data in parsed_strategies.items():
         levels_dict = strategy_data["levels"]
@@ -599,10 +861,6 @@ async def upload_csv(
             existing.allocated = strategy_data.get("allocated")
             existing.quality = strategy_data.get("quality")
             existing.exchange = strategy_data.get("exchange", "NSE")
-            existing.dynamic_averaging_enabled = strategy_data.get(
-                "dynamic_averaging_enabled", False
-            )
-            existing.averaging_rules_json = strategy_data.get("averaging_rules_json")
             existing.updated_at = now
 
             old_levels = (
@@ -638,10 +896,6 @@ async def upload_csv(
                 allocated=strategy_data.get("allocated"),
                 quality=strategy_data.get("quality"),
                 exchange=strategy_data.get("exchange", "NSE"),
-                dynamic_averaging_enabled=strategy_data.get(
-                    "dynamic_averaging_enabled", False
-                ),
-                averaging_rules_json=strategy_data.get("averaging_rules_json"),
                 created_at=now,
                 updated_at=now,
             )
@@ -681,132 +935,6 @@ async def upload_csv(
     )
 
 
-@router.get("/template.csv")
-def get_template():
-    return {
-        "symbol": "AMJLAND",
-        "allocated": 30000,
-        "quality": "Excellent",
-        "exchange": "NSE",
-        "entry1": 49,
-        "entry2": 47,
-        "entry3": 40,
-        "da_enabled": "Y",
-        "da_legs": 1,
-        "da_e1_buyback": 3,
-        "da_e2_buyback": 3,
-        "da_e3_buyback": 5,
-        "datrigger_offset": 1,
-    }
-
-
-@router.get("/download.csv")
-def download_strategies_csv(
-    db: Session = Depends(get_db),
-    current_user: UserContext = Depends(get_current_user),
-):
-    """
-    Download entry strategies as CSV for the active broker connection.
-    Use this to save your strategies or re-upload after editing.
-    """
-    connection_id, broker, broker_user_id = _require_active_connection_scope(
-        current_user, db
-    )
-
-    strategies = (
-        db.query(EntryStrategy)
-        .filter(
-            EntryStrategy.user_id == current_user.user_id,
-            EntryStrategy.broker == broker,
-            EntryStrategy.broker_user_id == broker_user_id,
-        )
-        .all()
-    )
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-
-    writer.writerow([
-        "symbol", "allocated", "quality", "exchange",
-        "entry1", "entry2", "entry3",
-        "da_enabled", "da_legs", "da_e1_buyback", "da_e2_buyback", "da_e3_buyback", "datrigger_offset",
-    ])
-
-    for s in strategies:
-        levels = (
-            db.query(EntryLevel)
-            .filter(EntryLevel.strategy_id == s.id)
-            .order_by(EntryLevel.level_no)
-            .all()
-        )
-        
-        entry_prices = {l.level_no: l.price for l in levels}
-        
-        da_legs = None
-        da_buyback = [0, 0, 0]
-        da_trigger = 0
-        if s.averaging_rules_json:
-            try:
-                rules = json.loads(s.averaging_rules_json)
-                da_legs = rules.get("legs")
-                buyback = rules.get("buyback", [])
-                da_trigger = rules.get("trigger_offset", 0)
-                if len(buyback) >= 1:
-                    da_buyback[0] = buyback[0]
-                if len(buyback) >= 2:
-                    da_buyback[1] = buyback[1]
-                if len(buyback) >= 3:
-                    da_buyback[2] = buyback[2]
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        writer.writerow([
-            s.symbol,
-            s.allocated or "",
-            s.quality or "",
-            s.exchange or "NSE",
-            entry_prices.get(1, ""),
-            entry_prices.get(2, ""),
-            entry_prices.get(3, ""),
-            "Y" if s.dynamic_averaging_enabled else "N",
-            da_legs or "",
-            da_buyback[0],
-            da_buyback[1],
-            da_buyback[2],
-            da_trigger,
-        ])
-
-    output.seek(0)
-    
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": f"attachment; filename=entry_strategies_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
-        },
-    )
-
-
-def _get_cmp_for_symbol(symbol: str, db: Session, user_id: int | None) -> float | None:
-    """Get current market price for a symbol from DB if available."""
-    try:
-        from db.models import EntryStrategy
-
-        strategy = (
-            db.query(EntryStrategy)
-            .filter(
-                EntryStrategy.user_id == user_id,
-                EntryStrategy.symbol == symbol.upper(),
-            )
-            .first()
-        )
-        if not strategy:
-            return None
-        return None
-    except Exception:
-        return None
-
-
 def _create_version(
     db: Session,
     strategy: EntryStrategy,
@@ -841,36 +969,6 @@ def _create_version(
     )
     db.add(version)
     return version
-
-
-@router.get("/uploads", response_model=UploadHistoryResponse)
-def get_upload_history(
-    limit: int = 20,
-    db: Session = Depends(get_db),
-    current_user: UserContext = Depends(get_current_user),
-):
-    """Get upload history for the current user."""
-    uploads = (
-        db.query(EntryStrategyUpload)
-        .filter(
-            EntryStrategyUpload.user_id == current_user.user_id,
-        )
-        .order_by(EntryStrategyUpload.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-
-    return UploadHistoryResponse(
-        uploads=[
-            UploadHistoryItem(
-                id=u.id,
-                filename=u.filename,
-                symbols=json.loads(u.symbols_json) if u.symbols_json else [],
-                created_at=u.created_at,
-            )
-            for u in uploads
-        ]
-    )
 
 
 @router.get("/{symbol}/versions", response_model=VersionListResponse)
@@ -1004,12 +1102,11 @@ def restore_version(
 @router.post("/{symbol}/suggest-revision", response_model=SuggestRevisionResponse)
 def suggest_revision(
     symbol: str,
-    method: str = "align_to_cmp",
-    pct_adjustment: float = 5.0,
+    style: str = "balanced",
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
 ):
-    """Suggest revised entry levels based on current market price or adjustment."""
+    """Suggest revised entry levels using market structure analysis with a given style."""
     connection_id, broker, broker_user_id = _require_active_connection_scope(
         current_user, db
     )
@@ -1049,70 +1146,70 @@ def suggest_revision(
     except Exception:
         pass
 
-    revised_levels: list[SuggestedRevision] = []
+    from core.services.market_structure_revision import (
+        get_market_structure_revision_service,
+    )
+    from core.services.swing_eligibility import get_swing_eligibility_service
 
-    if method == "align_to_cmp" and cmp_price:
-        for level in levels:
-            if level.level_no == 1:
-                suggested = cmp_price
-                rationale = f"CMP aligned to Level 1 (CMP: ₹{cmp_price:.2f})"
-            else:
-                gap_pct = (level.level_no - 1) * 5
-                suggested = cmp_price * (1 - gap_pct / 100)
-                rationale = f"Level {level.level_no} at {gap_pct}% below CMP"
+    revised_levels: list[SuggestedRevision] = []
+    swing_eligible = None
+    review_status = strategy.review_status
+    thesis_break_price = strategy.thesis_break_price
+    revision_reason = None
+
+    revision_svc = get_market_structure_revision_service()
+    revision = revision_svc.suggest_revision(
+        strategy.symbol,
+        [{"level_no": l.level_no, "price": l.price} for l in levels],
+        [],
+        cmp_price,
+        style=style,
+    )
+
+    revision_reason = revision.get("revision_reason")
+    thesis_break_price = revision.get("thesis_break_price")
+
+    suggested_entries = {
+        1: revision.get("suggested_entry1"),
+        2: revision.get("suggested_entry2"),
+        3: revision.get("suggested_entry3"),
+    }
+
+    for level in levels:
+        suggested = suggested_entries.get(level.level_no)
+        if suggested is not None:
             revised_levels.append(
                 SuggestedRevision(
                     level_no=level.level_no,
                     original_price=level.price,
                     suggested_price=round(suggested, 2),
-                    rationale=rationale,
+                    rationale=revision_reason or "Market structure based revision",
                 )
             )
-    elif method == "volatility_band":
-        for level in levels:
-            suggested = level.price * (1 + (level.level_no - 1) * pct_adjustment / 100)
-            rationale = f"Volatility adjustment: {pct_adjustment}% per level"
-            revised_levels.append(
-                SuggestedRevision(
-                    level_no=level.level_no,
-                    original_price=level.price,
-                    suggested_price=round(suggested, 2),
-                    rationale=rationale,
-                )
-            )
-    elif method == "gap_fill":
-        sorted_levels = sorted(levels, key=lambda x: x.price)
-        base_price = sorted_levels[0].price if sorted_levels else 0
-        for level in levels:
-            gap = (level.price - base_price) / len(levels) if len(levels) > 1 else 0
-            suggested = base_price + gap * level.level_no
-            rationale = f"Even gap distribution from base ₹{base_price:.2f}"
-            revised_levels.append(
-                SuggestedRevision(
-                    level_no=level.level_no,
-                    original_price=level.price,
-                    suggested_price=round(suggested, 2),
-                    rationale=rationale,
-                )
-            )
-    else:
-        for level in levels:
-            adjustment = pct_adjustment / 100
-            suggested = level.price * (1 - adjustment)
-            rationale = f"Fixed {pct_adjustment}% downward adjustment"
-            revised_levels.append(
-                SuggestedRevision(
-                    level_no=level.level_no,
-                    original_price=level.price,
-                    suggested_price=round(suggested, 2),
-                    rationale=rationale,
-                )
-            )
+
+    if revised_levels:
+        try:
+            swing_svc = get_swing_eligibility_service()
+            from core.market_data.ohlcv_store import get_ohlcv_multi
+
+            symbol_clean = strategy.symbol.replace("-BE", "").replace("#", "").upper()
+            ohlcv_data = get_ohlcv_multi([symbol_clean], days=60)
+            candles = ohlcv_data.get(symbol_clean, [])
+            if candles and len(candles) >= 20:
+                swing_result = swing_svc.evaluate(strategy.symbol, candles)
+                swing_eligible = swing_result["swing_eligible"]
+        except Exception:
+            pass
 
     return SuggestRevisionResponse(
         symbol=strategy.symbol,
         cmp_price=cmp_price,
         revised_levels=revised_levels,
+        swing_eligible=swing_eligible,
+        review_status=review_status,
+        thesis_break_price=thesis_break_price,
+        revision_reason=revision_reason,
+        style=style,
     )
 
 
@@ -1178,6 +1275,10 @@ def apply_revision(
         updated_level_nos.append(item.level_no)
 
     strategy.updated_at = now
+    strategy.last_entry_revision_at = now
+    strategy.review_status = "ACTIVE"
+    if payload.thesis_break_price is not None:
+        strategy.thesis_break_price = payload.thesis_break_price
 
     if old_levels:
         _create_version(
@@ -1203,13 +1304,13 @@ def suggest_revision_bulk(
     db: Session = Depends(get_db),
     current_user: UserContext = Depends(get_current_user),
 ):
-    """Suggest revised entry levels for multiple symbols based on current market price or adjustment."""
+    """Suggest revised entry levels for multiple symbols using market structure analysis."""
     connection_id, broker, broker_user_id = _require_active_connection_scope(
         current_user, db
     )
 
     logging.info(
-        f"suggest_revision_bulk: symbols={payload.symbols}, method={payload.method}, pct_adjustment={payload.pct_adjustment}"
+        f"suggest_revision_bulk: symbols={payload.symbols}, style={payload.style}"
     )
 
     if not payload.symbols:
@@ -1232,6 +1333,13 @@ def suggest_revision_bulk(
         logging.debug(f"CMP fetched via global manager: {cmp_prices}")
     except Exception as e:
         logging.warning(f"Could not fetch CMP from global manager: {e}")
+
+    from core.services.market_structure_revision import (
+        get_market_structure_revision_service,
+    )
+    from core.services.swing_eligibility import get_swing_eligibility_service
+
+    revision_svc = get_market_structure_revision_service()
 
     for symbol in symbols_upper:
         strategy = (
@@ -1278,74 +1386,88 @@ def suggest_revision_bulk(
         cmp_price = cmp_prices.get(symbol)
 
         revised_levels: list[SuggestedRevision] = []
-        method = payload.method
-        pct_adjustment = payload.pct_adjustment
+        swing_eligible = None
+        thesis_break_price = strategy.thesis_break_price
+        review_status = strategy.review_status
+        revision_reason = None
 
-        if method == "align_to_cmp" and cmp_price:
-            for level in levels:
-                if level.level_no == 1:
-                    suggested = cmp_price
-                    rationale = f"CMP aligned to Level 1 (CMP: ₹{cmp_price:.2f})"
-                else:
-                    gap_pct = (level.level_no - 1) * 5
-                    suggested = cmp_price * (1 - gap_pct / 100)
-                    rationale = f"Level {level.level_no} at {gap_pct}% below CMP"
+        revision = revision_svc.suggest_revision(
+            symbol,
+            [{"level_no": l.level_no, "price": l.price} for l in levels],
+            [],
+            cmp_price,
+            style=payload.style,
+        )
+
+        base_reason = revision.get("revision_reason") or "Market structure based revision"
+        ema20 = revision.get("ema20")
+        ema50 = revision.get("ema50")
+        atr14 = revision.get("atr14")
+        close_val = revision.get("current_close")
+        zone = revision.get("trading_zone")
+        support = revision.get("nearest_support")
+        resistance = revision.get("nearest_resistance")
+        gap_val = revision.get("gap")
+        parts = [base_reason]
+        if close_val is not None:
+            parts.append(f"Close: {close_val:.2f}")
+        if ema20 is not None:
+            parts.append(f"EMA20: {ema20:.2f}")
+        if ema50 is not None:
+            parts.append(f"EMA50: {ema50:.2f}")
+        if atr14 is not None:
+            parts.append(f"ATR14: {atr14:.2f}")
+        if zone:
+            parts.append(f"Zone: {zone}")
+        if support is not None:
+            parts.append(f"Support: {support:.2f}")
+        if resistance is not None:
+            parts.append(f"Resistance: {resistance:.2f}")
+        if gap_val is not None:
+            parts.append(f"Gap: {gap_val:.2f}")
+        revision_reason = " | ".join(parts)
+        thesis_break_price = revision.get("thesis_break_price")
+
+        for level in levels:
+            suggested_map = {
+                1: revision.get("suggested_entry1"),
+                2: revision.get("suggested_entry2"),
+                3: revision.get("suggested_entry3"),
+            }
+            suggested = suggested_map.get(level.level_no)
+            if suggested is not None:
                 revised_levels.append(
                     SuggestedRevision(
                         level_no=level.level_no,
                         original_price=level.price,
                         suggested_price=round(suggested, 2),
-                        rationale=rationale,
+                        rationale=revision_reason,
                     )
                 )
-        elif method == "volatility_band":
-            for level in levels:
-                suggested = level.price * (
-                    1 + (level.level_no - 1) * pct_adjustment / 100
-                )
-                rationale = f"Volatility adjustment: {pct_adjustment}% per level"
-                revised_levels.append(
-                    SuggestedRevision(
-                        level_no=level.level_no,
-                        original_price=level.price,
-                        suggested_price=round(suggested, 2),
-                        rationale=rationale,
-                    )
-                )
-        elif method == "gap_fill":
-            sorted_levels = sorted(levels, key=lambda x: x.price)
-            base_price = sorted_levels[0].price if sorted_levels else 0
-            for level in levels:
-                gap = (level.price - base_price) / len(levels) if len(levels) > 1 else 0
-                suggested = base_price + gap * level.level_no
-                rationale = f"Even gap distribution from base ₹{base_price:.2f}"
-                revised_levels.append(
-                    SuggestedRevision(
-                        level_no=level.level_no,
-                        original_price=level.price,
-                        suggested_price=round(suggested, 2),
-                        rationale=rationale,
-                    )
-                )
-        else:
-            for level in levels:
-                adjustment = pct_adjustment / 100
-                suggested = level.price * (1 - adjustment)
-                rationale = f"Fixed {pct_adjustment}% downward adjustment"
-                revised_levels.append(
-                    SuggestedRevision(
-                        level_no=level.level_no,
-                        original_price=level.price,
-                        suggested_price=round(suggested, 2),
-                        rationale=rationale,
-                    )
-                )
+
+        try:
+            swing_svc = get_swing_eligibility_service()
+            from core.market_data.ohlcv_store import get_ohlcv_multi
+
+            symbol_clean = symbol.replace("-BE", "").replace("#", "").upper()
+            ohlcv_data = get_ohlcv_multi([symbol_clean], days=60)
+            candles = ohlcv_data.get(symbol_clean, [])
+            if candles and len(candles) >= 20:
+                swing_result = swing_svc.evaluate(symbol, candles)
+                swing_eligible = swing_result["swing_eligible"]
+        except Exception:
+            pass
 
         suggestions.append(
             BulkSuggestRevisionItem(
                 symbol=strategy.symbol,
                 cmp_price=cmp_price,
                 revised_levels=revised_levels,
+                swing_eligible=swing_eligible,
+                review_status=review_status,
+                thesis_break_price=thesis_break_price,
+                revision_reason=revision_reason,
+                style=payload.style,
             )
         )
 
@@ -1445,6 +1567,10 @@ def apply_revision_bulk(
                 updated_level_nos.append(item.level_no)
 
             strategy.updated_at = now
+            strategy.last_entry_revision_at = now
+            strategy.review_status = "ACTIVE"
+            if update.thesis_break_price is not None:
+                strategy.thesis_break_price = update.thesis_break_price
 
             if old_levels:
                 _create_version(
@@ -1493,3 +1619,391 @@ def apply_revision_bulk(
         total_updated=total_updated,
         total_failed=total_failed,
     )
+
+
+class EvaluateStrategyResponse(BaseModel):
+    symbol: str
+    review_status: str
+    swing_eligible: bool | None = None
+    swing_avg_volume: float | None = None
+    swing_atr_percent: float | None = None
+    swing_range_percent: float | None = None
+    swing_reasons: list[str] | None = None
+    thesis_break_price: float | None = None
+    last_evaluated_at: datetime | None = None
+    reason: str | None = None
+
+
+@router.post("/{symbol}/evaluate", response_model=EvaluateStrategyResponse)
+def evaluate_strategy(
+    symbol: str,
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    """Evaluate a single entry strategy for review eligibility and thesis breach."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
+    strategy = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+            EntryStrategy.symbol == symbol.upper(),
+        )
+        .first()
+    )
+
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    from core.market_data.ohlcv_store import ensure_ohlcv, get_ohlcv_multi
+    from core.services.swing_eligibility import get_swing_eligibility_service
+    from core.strategy_config import get_strategy_config
+
+    config = get_strategy_config()
+    symbol_clean = symbol.replace("-BE", "").replace("#", "").upper()
+    ensure_ohlcv([symbol_clean], days=90)
+    ohlcv_data = get_ohlcv_multi([symbol_clean], days=90)
+    candles = ohlcv_data.get(symbol_clean, [])
+
+    now = datetime.utcnow()
+    review_status = "ACTIVE"
+    reason = None
+    swing_eligible = strategy.swing_eligible
+    swing_avg_volume: float | None = None
+    swing_atr_percent: float | None = None
+    swing_range_percent: float | None = None
+    swing_reasons: list[str] | None = None
+
+    if candles and len(candles) >= 20:
+        swing_svc = get_swing_eligibility_service()
+        swing_result = swing_svc.evaluate(symbol, candles)
+        swing_eligible = swing_result["swing_eligible"]
+        swing_avg_volume = swing_result.get("avg_volume_20")
+        swing_atr_percent = swing_result.get("atr_percent")
+        swing_range_percent = swing_result.get("range_percent")
+        swing_reasons = swing_result.get("reasons") or []
+
+        updated_at = strategy.updated_at
+        if updated_at and updated_at.tzinfo is not None:
+            updated_at = updated_at.replace(tzinfo=None)
+        if updated_at:
+            days_since_update = (now - updated_at).days
+            review_days = config.strategy_review_days
+            if days_since_update >= review_days:
+                review_status = "REVIEW_REQUIRED"
+                reason = f"Last update {days_since_update}d ago (review every {review_days}d)"
+            else:
+                review_status = "ACTIVE"
+                reason = f"Last update {days_since_update}d ago, next review in {review_days - days_since_update}d"
+        else:
+            review_status = "REVIEW_REQUIRED"
+            reason = "No update history — initial review needed"
+    else:
+        reason = "Insufficient OHLCV data for evaluation"
+
+    strategy.swing_eligible = swing_eligible
+    strategy.swing_avg_volume = swing_avg_volume
+    strategy.swing_atr_percent = swing_atr_percent
+    strategy.swing_range_percent = swing_range_percent
+    strategy.swing_reasons = json.dumps(swing_reasons) if swing_reasons else None
+    strategy.review_status = review_status
+    strategy.last_evaluated_at = now
+    db.commit()
+
+    return EvaluateStrategyResponse(
+        symbol=strategy.symbol,
+        review_status=review_status,
+        swing_eligible=swing_eligible,
+        swing_avg_volume=swing_avg_volume,
+        swing_atr_percent=swing_atr_percent,
+        swing_range_percent=swing_range_percent,
+        swing_reasons=swing_reasons,
+        thesis_break_price=strategy.thesis_break_price,
+        last_evaluated_at=now,
+        reason=reason,
+    )
+
+
+@router.post("/evaluate-all", response_model=list[EvaluateStrategyResponse])
+def evaluate_all_strategies(
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    """Evaluate all entry strategies for the current user."""
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
+    strategies = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+        )
+        .all()
+    )
+
+    from core.market_data.ohlcv_store import ensure_ohlcv, get_ohlcv_multi
+    from core.services.swing_eligibility import get_swing_eligibility_service
+    from core.strategy_config import get_strategy_config
+
+    config = get_strategy_config()
+    symbols_clean = [
+        s.symbol.replace("-BE", "").replace("#", "").upper()
+        for s in strategies
+    ]
+    ensure_ohlcv(symbols_clean, days=90)
+    ohlcv_data = get_ohlcv_multi(symbols_clean, days=90)
+
+    swing_svc = get_swing_eligibility_service()
+    now = datetime.utcnow()
+    results: list[EvaluateStrategyResponse] = []
+
+    for strategy in strategies:
+        symbol_clean = strategy.symbol.replace("-BE", "").replace("#", "").upper()
+        candles = ohlcv_data.get(symbol_clean, [])
+        review_status = "ACTIVE"
+        reason = None
+        swing_eligible = strategy.swing_eligible
+        swing_avg_volume: float | None = None
+        swing_atr_percent: float | None = None
+        swing_range_percent: float | None = None
+        swing_reasons: list[str] | None = None
+
+        if candles and len(candles) >= 20:
+            swing_result = swing_svc.evaluate(strategy.symbol, candles)
+            swing_eligible = swing_result["swing_eligible"]
+            swing_avg_volume = swing_result.get("avg_volume_20")
+            swing_atr_percent = swing_result.get("atr_percent")
+            swing_range_percent = swing_result.get("range_percent")
+            swing_reasons = swing_result.get("reasons") or []
+
+            review_days = config.strategy_review_days
+            updated_at = strategy.updated_at
+            if updated_at and updated_at.tzinfo is not None:
+                updated_at = updated_at.replace(tzinfo=None)
+            days_since_update = (now - updated_at).days if updated_at else 999
+            if days_since_update >= review_days:
+                review_status = "REVIEW_REQUIRED"
+                reason = f"Last update {days_since_update}d ago (review every {review_days}d)"
+            else:
+                review_status = "ACTIVE"
+                reason = f"Last update {days_since_update}d ago, next review in {review_days - days_since_update}d"
+        else:
+            reason = "Insufficient OHLCV data for evaluation"
+
+        strategy.swing_eligible = swing_eligible
+        strategy.swing_avg_volume = swing_avg_volume
+        strategy.swing_atr_percent = swing_atr_percent
+        strategy.swing_range_percent = swing_range_percent
+        strategy.swing_reasons = json.dumps(swing_reasons) if swing_reasons else None
+        strategy.review_status = review_status
+        strategy.last_evaluated_at = now
+        results.append(
+            EvaluateStrategyResponse(
+                symbol=strategy.symbol,
+                review_status=review_status,
+                swing_eligible=swing_eligible,
+                swing_avg_volume=swing_avg_volume,
+                swing_atr_percent=swing_atr_percent,
+                swing_range_percent=swing_range_percent,
+                swing_reasons=swing_reasons,
+                thesis_break_price=strategy.thesis_break_price,
+                last_evaluated_at=now,
+                reason=reason,
+            )
+        )
+
+    db.commit()
+    return results
+
+
+@router.post("/{symbol}/da/evaluate", response_model=DAEvalResultSchema)
+def evaluate_da(
+    symbol: str,
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+    strategy = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+            EntryStrategy.symbol == symbol.upper(),
+        )
+        .first()
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    from core.market_data.ohlcv_store import ensure_ohlcv, get_ohlcv_multi
+    from core.services.da_evaluation import get_da_evaluation_service
+
+    symbol_clean = symbol.replace("-BE", "").replace("#", "").upper()
+    ensure_ohlcv([symbol_clean], days=90)
+    ohlcv_data = get_ohlcv_multi([symbol_clean], days=90)
+    candles = ohlcv_data.get(symbol_clean, [])
+
+    from core.services.entry_strategy_service import _strategy_to_entry_dict
+
+    strategy_dict = _strategy_to_entry_dict(strategy)
+    svc = get_da_evaluation_service()
+    result = svc.evaluate(
+        symbol=symbol,
+        holding=None,
+        entry_strategy=strategy_dict,
+        candles=candles,
+    )
+
+    strategy.da_eligible = result["da_eligible"]
+    strategy.da_status = result["da_status"]
+    strategy.da_last_evaluated_at = result["da_last_evaluated_at"]
+    strategy.da_confidence_score = result["da_confidence_score"]
+    strategy.da_notes = result["da_notes"]
+    db.commit()
+
+    return _prune_da_result(result)
+
+
+@router.post("/da/evaluate-all", response_model=DABulkEvalResponse)
+def evaluate_all_da(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    session_id = payload.get("session_id", "")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+
+    from api.dependencies import get_session_registry
+    registry = get_session_registry()
+    registry.require_access(session_id, current_user)
+    context = registry.get_session(session_id)
+    if not context:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from core.session_data import SessionDataManager
+    dm = SessionDataManager(context)
+    dm.load_or_refresh_holdings()
+    holdings = [h for h in (context.session_cache.holdings or []) if h.get("symbol", "").strip()]
+    strategies = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+        )
+        .all()
+    )
+    strategy_dicts: dict[str, dict] = {}
+    symbols = []
+    for s in strategies:
+        d = {
+            "symbol": s.symbol,
+            "dynamic_averaging_enabled": s.dynamic_averaging_enabled,
+            "thesis_break_price": s.thesis_break_price,
+            "override_da_enabled": s.override_da_enabled,
+            "override_da_qty_pct": s.override_da_qty_pct,
+            "override_sell_offset": s.override_sell_offset,
+            "override_buyback_price": s.override_buyback_price,
+            "override_sell_price": s.override_sell_price,
+        }
+        strategy_dicts[s.symbol] = d
+        symbols.append(s.symbol)
+
+    symbols_clean = [s.replace("-BE", "").replace("#", "").upper() for s in symbols]
+    from core.market_data.ohlcv_store import ensure_ohlcv, get_ohlcv_multi
+    ensure_ohlcv(symbols_clean, days=90)
+    ohlcv_data = get_ohlcv_multi(symbols_clean, days=90)
+
+    from core.services.da_evaluation import get_da_evaluation_service
+    svc = get_da_evaluation_service()
+    results = svc.evaluate_all(holdings, strategy_dicts, ohlcv_data)
+
+    for r in results:
+        symbol = r["symbol"]
+        s = next((x for x in strategies if x.symbol == symbol), None)
+        if s:
+            s.da_eligible = r["da_eligible"]
+            s.da_status = r["da_status"]
+            s.da_last_evaluated_at = r["da_last_evaluated_at"]
+            s.da_confidence_score = r["da_confidence_score"]
+            s.da_notes = r["da_notes"]
+    db.commit()
+
+    return DABulkEvalResponse(
+        session_id=session_id,
+        results=[_prune_da_result(r) for r in results],
+    )
+
+
+@router.put("/{symbol}/da/overrides", response_model=dict)
+def update_da_overrides(
+    symbol: str,
+    payload: DAOverrideRequest,
+    db: Session = Depends(get_db),
+    current_user: UserContext = Depends(get_current_user),
+):
+    connection_id, broker, broker_user_id = _require_active_connection_scope(
+        current_user, db
+    )
+    strategy = (
+        db.query(EntryStrategy)
+        .filter(
+            EntryStrategy.user_id == current_user.user_id,
+            EntryStrategy.broker == broker,
+            EntryStrategy.broker_user_id == broker_user_id,
+            EntryStrategy.symbol == symbol.upper(),
+        )
+        .first()
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    if payload.override_da_enabled is not None:
+        strategy.override_da_enabled = payload.override_da_enabled
+    if payload.override_da_qty_pct is not None:
+        strategy.override_da_qty_pct = payload.override_da_qty_pct
+    if payload.override_sell_offset is not None:
+        strategy.override_sell_offset = payload.override_sell_offset
+    if payload.override_buyback_price is not None:
+        strategy.override_buyback_price = payload.override_buyback_price
+    if payload.override_sell_price is not None:
+        strategy.override_sell_price = payload.override_sell_price
+
+    strategy.updated_at = datetime.utcnow()
+    db.commit()
+
+    return {"symbol": symbol, "success": True}
+
+
+@router.put("/da/config", response_model=DAConfigSchema)
+def update_da_config_endpoint(payload: DAConfigSchema):
+    from core.da_config import update_da_config
+    return update_da_config(payload.model_dump(exclude_unset=True))
+
+
+def _prune_da_result(r: dict) -> dict:
+    keys = [
+        "symbol", "da_eligible", "da_status", "da_confidence_score",
+        "da_confidence_label", "da_last_evaluated_at", "da_notes",
+        "recommended_sell_trigger", "recommended_sell_limit",
+        "recommended_buyback_price", "recommended_da_qty", "recommended_da_qty_pct",
+        "expected_sell_value", "expected_buyback_value", "expected_charges",
+        "expected_net_profit", "position_risk_score",
+        "range_high", "range_low", "range_width", "range_pct",
+    ]
+    return {k: r.get(k) for k in keys}

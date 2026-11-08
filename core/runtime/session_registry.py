@@ -73,8 +73,9 @@ class SessionRegistry:
         ttl_minutes: int = 60,
     ) -> SessionContext:
         user_record_id = None
+        connection_broker_user_id = None
         if broker_connection_id is not None:
-            broker_user_id, broker_name, broker_config, user_record_id = (
+            broker_user_id, broker_name, broker_config, user_record_id, connection_broker_user_id = (
                 self._load_broker_connection(broker_connection_id)
             )
 
@@ -111,6 +112,7 @@ class SessionRegistry:
             session_manager=session_manager,
             market_data_connection_id=market_data_connection_id,
             user_id=user_record_id,
+            connection_broker_user_id=connection_broker_user_id,
         )
         session_cache.broker = broker  # type: ignore[attr-defined]
 
@@ -177,7 +179,7 @@ class SessionRegistry:
 
     def _load_broker_connection(
         self, connection_id: int
-    ) -> tuple[str, str, Dict[str, Any], Optional[int]]:
+    ) -> tuple[str, str, Dict[str, Any], Optional[int], Optional[str]]:
         with self._session_factory() as db:
             connection = db.get(models.BrokerConnection, connection_id)
             if not connection:
@@ -201,7 +203,7 @@ class SessionRegistry:
                 or metadata.get("broker_user_id")
                 or str(connection.user_id)
             )
-            return broker_user_id, broker_name, config, connection.user_id
+            return broker_user_id, broker_name, config, connection.user_id, connection.broker_user_id
 
     @staticmethod
     def _build_broker_config(
@@ -241,13 +243,41 @@ class SessionRegistry:
     def _load_session_order_history(self, context: "SessionContext") -> None:
         """Load order history from database into session cache."""
         try:
-            from api.routes.holdings_v2 import _load_trades_from_db
+            from api.routes.holdings_v2 import _load_trades_from_db, _load_trades_by_user, _update_trades_session_id
             
             trades = _load_trades_from_db(context.session_id)
+            source = None
+            if not trades:
+                source = "user_fallback"
+                trades = _load_trades_by_user(
+                    context.user_record_id, context.broker_name
+                ) if context.user_record_id else []
+                if trades:
+                    _update_trades_session_id(
+                        context.user_record_id,
+                        context.broker_name,
+                        context.session_id,
+                    )
+            else:
+                source = "session_lookup"
+
             if trades:
-                source = trades[0].get("source", "unknown") if trades else None
+                from collections import Counter
+                side_counts = Counter(t.get("side", "unknown") for t in trades)
+                symbol_counts = Counter(t.get("symbol", "unknown") for t in trades)
+                logger.info(
+                    f"[SESSION_TRADES] Loaded {len(trades)} trades: "
+                    f"source={source}, broker={context.broker_name}, "
+                    f"session_id={context.session_id}, "
+                    f"sides={dict(side_counts)}, "
+                    f"symbols={dict(symbol_counts)}"
+                )
                 context.session_cache.set_order_history(trades, source=source)
-                logger.info(f"Loaded {len(trades)} trades from DB for session {context.session_id}")
+            else:
+                logger.info(
+                    f"[SESSION_TRADES] No trades found: session_id={context.session_id}, "
+                    f"user_id={context.user_record_id}, broker={context.broker_name}"
+                )
         except Exception as e:
             logger.warning(f"Failed to load order history from DB: {e}")
 
@@ -294,8 +324,24 @@ class SessionRegistry:
             
             dm = SessionDataManager(context)
             logger.info(f"SessionDataManager user_id: {dm.user_id}, broker: {dm.broker_name}")
-            dm.purge_all()
-            
+
+            # Check if user is premium
+            is_premium = False
+            if context.user_record_id:
+                from db.database import SessionLocal as _SessionLocal
+                db = _SessionLocal()
+                try:
+                    user = db.query(models.User).filter(models.User.id == context.user_record_id).first()
+                    is_premium = user.is_premium if user else False
+                finally:
+                    db.close()
+
+            if is_premium:
+                logger.info(f"Premium user - only purging holdings, keeping entry strategies and order history")
+                dm.purge_holdings()
+            else:
+                dm.purge_all()
+
             self._purge_entry_plans(context.session_id)
             
             logging.info(f"Cleared session data for session: {context.session_id}")
@@ -327,3 +373,14 @@ class SessionRegistry:
     def active_sessions(self) -> int:
         with self._lock:
             return len(self._records)
+
+    def find_session_for_user(self, user_id: int) -> Optional[SessionContext]:
+        """Find an active (non-expired) session for the given user_id."""
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            for context in self._records.values():
+                if context.user_record_id == user_id:
+                    if context.expires_at and context.expires_at < now:
+                        continue
+                    return context
+        return None

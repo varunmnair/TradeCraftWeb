@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import { api } from '../api/client';
 
 interface CmpSnapshot {
-  data: Record<string, number>;
-  missing: string[];
-  trade_date: string;
-  as_of_ts: string | null;
+  prices: Record<string, number>;
+  errors: Record<string, string>;
+  fetched_at: string;
+  exchange: string;
 }
 
 export function useCmpSnapshot(symbols: string[], enabled: boolean = true) {

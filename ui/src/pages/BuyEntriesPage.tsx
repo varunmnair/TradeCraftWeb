@@ -24,6 +24,7 @@ import {
   DialogContent,
   DialogActions,
   Tooltip,
+  IconButton,
 } from '@mui/material';
 import { DataGrid, GridColDef, GridRowSelectionModel, GridRenderCellParams } from '@mui/x-data-grid';
 import { 
@@ -36,14 +37,17 @@ import {
   TrendingUp as PriceUpIcon,
   ArrowForward as ArrowForwardIcon,
   Delete as PurgeIcon,
+  Settings as SettingsIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
+import { useAuth } from '../context/AuthContext';
 import { useStartJob } from '../context/JobsContext';
 import { GTTConfirmResponse } from '../types';
 import { SkippedItemsDialog } from '../components/SkippedItemsDialog';
 import { useJobRunner } from '../hooks/useJobRunner';
+import { DASettingsModal } from '../components/DASettingsModal';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -110,6 +114,7 @@ function computeChanges(original: Record<string, unknown>, adjusted: Record<stri
 
 export default function BuyEntriesPage() {
   const { sessionId } = useSession();
+  const { user } = useAuth();
   const { start: startJob, job, isDone, isError } = useStartJob();
   
   const [tabValue, setTabValue] = useState(0);
@@ -160,6 +165,9 @@ export default function BuyEntriesPage() {
   const [daRiskJobRunning, setDaRiskJobRunning] = useState(false);
   const [daOriginalPlanRows, setDaOriginalPlanRows] = useState<PlanRow[]>([]);
   const [daHasPlan, setDaHasPlan] = useState(false);
+  const [daEvaluating, setDaEvaluating] = useState(false);
+  const [daEvalError, setDaEvalError] = useState('');
+  const [daSettingsOpen, setDaSettingsOpen] = useState(false);
 
   // Dynamic Averaging Job Runner
   const {
@@ -223,17 +231,21 @@ export default function BuyEntriesPage() {
     }
   }, [daPlan]);
 
-  // Auto-generate plans when visiting tab
+  // Auto-fetch DA plan when tab switches
   useEffect(() => {
     if (!sessionId) return;
 
     if (tabValue === 0 && !mlHasPlan && !isMlGenerating) {
-      // Try to fetch existing plan first
       fetchMlPlan(true);
-    } else if (tabValue === 1 && !daHasPlan && !isDaGenerating) {
-      fetchDaPlan(true);
+    } else if (tabValue === 1) {
+      setDaEvaluating(true);
+      setDaEvalError('');
+      api.evaluateAllDA(sessionId)
+        .then(() => fetchDaPlan())
+        .catch((err) => setDaEvalError(err instanceof Error ? err.message : 'Evaluation failed'))
+        .finally(() => setDaEvaluating(false));
     }
-  }, [tabValue, sessionId]);
+  }, [tabValue]);
 
   const fetchMlPlan = async (autoGenerate = false) => {
     if (!sessionId || mlLoading) return;
@@ -326,61 +338,52 @@ export default function BuyEntriesPage() {
       return;
     }
     
-    const firstRow = items[0];
-    const cols: GridColDef[] = [];
-    
-    Object.keys(firstRow).map((key) => {
-      if (key.startsWith('_')) return;
-      
-      const value = firstRow[key];
-      let type: 'string' | 'number' | 'boolean' | 'date' = 'string';
-      
-      if (typeof value === 'number') type = 'number';
-      else if (typeof value === 'boolean') type = 'boolean';
-      
-      const renderCell = (params: GridRenderCellParams) => {
+    const renderChangedCell = (field: string, formatter?: (v: unknown) => string) =>
+      (params: GridRenderCellParams) => {
         const row = params.row as PlanRow;
         const originalRow = mlOriginalPlanMap.get(getRowKey(row));
-        
+        const currVal = params.value;
+
         if (originalRow && mlRiskEnabled) {
-          const origVal = originalRow[key];
-          const currVal = params.value;
-          
-          const origNum = Number(origVal);
-          const currNum = Number(currVal);
-          const isNumericChange = !isNaN(origNum) && !isNaN(currNum) && origNum !== currNum;
-          
-          if (isNumericChange) {
-            const changed = currNum < origNum ? 'decreased' : 'increased';
+          const origVal = originalRow[field];
+          if (origVal != null && currVal != null && currVal !== origVal) {
+            const changed = currVal < origVal ? 'decreased' : 'increased';
             return (
               <Tooltip title={`Original: ${origVal} → Now: ${currVal}`}>
-                <Box sx={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: 0.5,
+                <Box sx={{
+                  display: 'flex', alignItems: 'center', gap: 0.5,
                   color: changed === 'decreased' ? 'error.main' : 'success.main',
                   fontWeight: 'bold',
                 }}>
                   {changed === 'decreased' ? <PriceDownIcon fontSize="small" /> : <PriceUpIcon fontSize="small" />}
-                  {String(currVal)}
+                  {formatter ? formatter(currVal) : String(currVal)}
                 </Box>
               </Tooltip>
             );
           }
         }
-        return String(params.value ?? '');
+        return params.value != null
+          ? (formatter ? formatter(params.value) : String(params.value))
+          : '-';
       };
-      
-      cols.push({
-        field: key,
-        headerName: key,
-        type,
-        width: type === 'number' ? 120 : 180,
-        flex: type === 'string' ? 1 : 0,
-        renderCell,
-      });
-    });
-    
+
+    const cols: GridColDef[] = [
+      { field: 'symbol', headerName: 'Symbol', width: 150 },
+      { field: 'price', headerName: 'Price', type: 'number', width: 110,
+        renderCell: renderChangedCell('price', (v) => Number(v).toFixed(1)) },
+      { field: 'trigger', headerName: 'Trigger At', type: 'number', width: 120,
+        renderCell: renderChangedCell('trigger', (v) => Number(v).toFixed(2)) },
+      { field: 'ltp', headerName: 'CMP', type: 'number', width: 110,
+        renderCell: (params) => params.value != null ? Number(params.value).toFixed(2) : '-' },
+      { field: 'entry', headerName: 'Entry', width: 80 },
+      { field: 'original_amount', headerName: 'Allocation', type: 'number', width: 130,
+        renderCell: renderChangedCell('original_amount', (v) => Math.round(Number(v)).toLocaleString()) },
+      { field: 'risk_adj', headerName: 'risk_adj', width: 180,
+        renderCell: (params) => params.value ?? '-' },
+      { field: 'risk_reasons', headerName: 'risk_reasons', flex: 1,
+        renderCell: (params) => params.value ?? '-' },
+    ];
+
     if (mlRiskEnabled) {
       cols.push({
         field: '_changes',
@@ -406,7 +409,7 @@ export default function BuyEntriesPage() {
         },
       });
     }
-    
+
     setMlColumns(cols);
   };
 
@@ -543,6 +546,20 @@ export default function BuyEntriesPage() {
       await runDaGenerate(() => Promise.resolve({ job_id: response.job_id }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to generate DA plan');
+    }
+  };
+
+  const handleDaEvaluate = async () => {
+    if (!sessionId) return;
+    setDaEvaluating(true);
+    setDaEvalError('');
+    try {
+      await api.evaluateAllDA(sessionId);
+      await fetchDaPlan();
+    } catch (err) {
+      setDaEvalError(err instanceof Error ? err.message : 'Evaluation failed');
+    } finally {
+      setDaEvaluating(false);
     }
   };
 
@@ -1054,6 +1071,16 @@ export default function BuyEntriesPage() {
               {isDaGenerating ? 'Generating...' : daRiskJobRunning ? 'Applying Risk...' : daHasPlan ? 'Refresh' : 'Generate Candidates'}
             </Button>
 
+            <Button
+              variant="outlined"
+              color="success"
+              startIcon={daEvaluating ? <CircularProgress size={16} /> : undefined}
+              onClick={handleDaEvaluate}
+              disabled={daEvaluating}
+            >
+              {daEvaluating ? 'Evaluating...' : 'Evaluate DA'}
+            </Button>
+
             <TextField
               size="small"
               placeholder="Search symbol..."
@@ -1075,6 +1102,10 @@ export default function BuyEntriesPage() {
             />
 
             <Box sx={{ flexGrow: 1 }} />
+
+            <IconButton onClick={() => setDaSettingsOpen(true)} title="DA Settings">
+              <SettingsIcon />
+            </IconButton>
 
             <FormControlLabel
               control={
@@ -1114,6 +1145,18 @@ export default function BuyEntriesPage() {
           {daRiskEnabled && (
             <Alert severity="info" sx={{ mt: 2 }}>
               Showing risk-adjusted values. Prices/amounts may be modified based on risk analysis.
+            </Alert>
+          )}
+
+          {daEvaluating && (
+            <Alert severity="info" sx={{ mt: 2 }} icon={<CircularProgress size={16} />}>
+              Running DA evaluation...
+            </Alert>
+          )}
+
+          {daEvalError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              DA evaluation failed: {daEvalError}
             </Alert>
           )}
 
@@ -1224,14 +1267,18 @@ export default function BuyEntriesPage() {
           ) : (
             <>
               <Button onClick={handleCloseConfirm} disabled={placingOrders}>Cancel</Button>
-              <Button 
-                onClick={handlePlaceOrders} 
-                variant="contained" 
-                color="success"
-                disabled={placingOrders}
-              >
-                {placingOrders ? 'Placing...' : 'Place Orders'}
-              </Button>
+              <Tooltip title={!user?.is_premium ? 'Premium subscription required to place orders' : ''}>
+                <span>
+                  <Button 
+                    onClick={handlePlaceOrders} 
+                    variant="contained" 
+                    color="success"
+                    disabled={placingOrders || !user?.is_premium}
+                  >
+                    {placingOrders ? 'Placing...' : !user?.is_premium ? 'Premium Required' : 'Place Orders'}
+                  </Button>
+                </span>
+              </Tooltip>
             </>
           )}
         </DialogActions>
@@ -1303,14 +1350,18 @@ export default function BuyEntriesPage() {
           ) : (
             <>
               <Button onClick={handleDaCloseConfirm} disabled={daPlacingOrders}>Cancel</Button>
-              <Button 
-                onClick={handleDaPlaceOrders} 
-                variant="contained" 
-                color="success"
-                disabled={daPlacingOrders}
-              >
-                {daPlacingOrders ? 'Placing...' : 'Place Orders'}
-              </Button>
+              <Tooltip title={!user?.is_premium ? 'Premium subscription required to place orders' : ''}>
+                <span>
+                  <Button 
+                    onClick={handleDaPlaceOrders} 
+                    variant="contained" 
+                    color="success"
+                    disabled={daPlacingOrders || !user?.is_premium}
+                  >
+                    {daPlacingOrders ? 'Placing...' : !user?.is_premium ? 'Premium Required' : 'Place Orders'}
+                  </Button>
+                </span>
+              </Tooltip>
             </>
           )}
         </DialogActions>
@@ -1347,6 +1398,9 @@ export default function BuyEntriesPage() {
         title="Skipped Items - Dynamic Averaging Plan"
         items={daSkipped}
       />
+
+      {/* DA Settings Modal */}
+      <DASettingsModal open={daSettingsOpen} onClose={() => setDaSettingsOpen(false)} />
     </Box>
   );
 }

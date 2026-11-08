@@ -7,6 +7,7 @@ from fastapi import Depends, Request
 from api import config
 from api.errors import ServiceError
 from core.auth.context import UserContext
+from core.cmp import CMPManager
 from core.runtime.job_runner import JobRunner
 from core.runtime.session_registry import SessionRegistry
 from core.security.confirm_token_store import ConfirmTokenStore, get_confirm_store
@@ -23,7 +24,6 @@ from core.services.risk_service import RiskService
 from core.services.session_service import SessionService
 from core.services.symbol_catalog_service import SymbolCatalogService
 from core.services.trades_service import TradesService, get_trades_service
-from core.cmp import CMPManager
 from core.session_manager import SessionManager
 from db.database import SessionLocal, get_db
 
@@ -37,6 +37,7 @@ JOB_TRADES_SYNC = "trades_sync"
 JOB_SYMBOL_CATALOG_IMPORT = "symbol_catalog_import"
 JOB_OHLCV_REFRESH = "ohlcv_refresh"
 JOB_OHLCV_REFRESH_SYMBOLS = "ohlcv_refresh_symbols"
+JOB_CANDIDATE_GENERATE = "candidate_generate"
 
 
 _session_manager = SessionManager()
@@ -75,9 +76,7 @@ def _sync_upstox_trades_job(payload: dict) -> dict:
     if not connection:
         return {"error": "Connection not found"}
 
-    token_bundle = _session_manager.get_token_bundle(
-        "upstox", connection_id=connection_id
-    )
+    token_bundle = _session_manager.get_token_bundle("upstox", connection_id=connection_id)
     if not token_bundle:
         return {"error": "Upstox not connected"}
 
@@ -89,9 +88,7 @@ def _sync_upstox_trades_job(payload: dict) -> dict:
         api_secret="",
         redirect_uri="",
     )
-    broker.set_session_context(
-        session_manager=_session_manager, connection_id=connection_id
-    )
+    broker.set_session_context(session_manager=_session_manager, connection_id=connection_id)
 
     try:
         result = _trades_service.sync_upstox_trades(user_id, broker, days)
@@ -175,6 +172,39 @@ def _register_jobs() -> None:
             force_refresh=payload.get("force_refresh", False),
         ),
     )
+    _job_runner.register_handler(
+        JOB_CANDIDATE_GENERATE,
+        lambda payload: _generate_candidate_job(payload),
+    )
+
+
+def _generate_candidate_job(payload: dict) -> dict:
+    session_id = payload["session_id"]
+
+    context = _session_registry.get_session(session_id)
+    if context is None:
+        return {"error": "Session not found"}
+
+    session_cache = context.session_cache
+    session_cache.refresh_entry_levels()
+
+    from core.candidate_service import EntryCandidateService
+
+    cmp_manager = session_cache.get_cmp_manager()
+    holdings = session_cache.get_holdings()
+    entry_levels = session_cache.get_entry_levels()
+    gtt_cache = session_cache.get_gtt_cache()
+
+    service = EntryCandidateService(
+        broker=context.broker,
+        cmp_manager=cmp_manager,
+        holdings=holdings,
+        entry_levels=entry_levels,
+        gtt_cache=gtt_cache,
+    )
+
+    result = service.generate()
+    return EntryCandidateService.result_to_dict(result)
 
 
 _register_jobs()
@@ -281,9 +311,7 @@ def get_current_user(
 
 def require_admin(user: UserContext = Depends(get_current_user)) -> UserContext:
     if not user.is_admin():
-        raise ServiceError(
-            "Admin privileges required", error_code="forbidden", http_status=403
-        )
+        raise ServiceError("Admin privileges required", error_code="forbidden", http_status=403)
     return user
 
 
@@ -293,5 +321,15 @@ def require_trading_enabled(user: UserContext) -> None:
         raise ServiceError(
             "Read-only mode. Trading is disabled. Contact admin to enable trading.",
             error_code="trading_disabled",
+            http_status=403,
+        )
+
+
+def require_premium(user: UserContext) -> None:
+    """Require that the user is premium."""
+    if not user.is_premium:
+        raise ServiceError(
+            "Premium feature. Upgrade to premium to place orders.",
+            error_code="premium_required",
             http_status=403,
         )

@@ -22,6 +22,7 @@ from api.routes import ai as ai_routes
 from api.routes import auth as auth_routes
 from api.routes import broker_connections as broker_connection_routes
 from api.routes import brokers as brokers_routes
+from api.routes import candidates as candidates_routes
 from api.routes import entry_strategy as entry_strategy_routes
 from api.routes import gtt as gtt_routes
 from api.routes import holdings as holdings_routes
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs_routes.router)
     app.include_router(ai_routes.router)
     app.include_router(entry_strategy_routes.router)
+    app.include_router(candidates_routes.router)
 
     @app.on_event("startup")
     async def startup_event():
@@ -128,11 +130,7 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=503, detail="database_unavailable") from exc
 
-        if (
-            config.IS_PROD
-            and not config.TOKEN_ENCRYPTION_KEY
-            and not config.ALLOW_INSECURE_TOKENS
-        ):
+        if config.IS_PROD and not config.TOKEN_ENCRYPTION_KEY and not config.ALLOW_INSECURE_TOKENS:
             raise HTTPException(status_code=503, detail="token_encryption_key_missing")
         return {"status": "ready"}
 

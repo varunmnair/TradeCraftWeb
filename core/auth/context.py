@@ -9,6 +9,7 @@ class UserContext:
     is_dev: bool = False
     active_broker_connection_id: int | None = None
     trading_enabled: bool = False
+    is_premium: bool = False
 
     def is_admin(self) -> bool:
         return self.role.lower() == "admin"

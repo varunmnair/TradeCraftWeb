@@ -1,14 +1,27 @@
-version: "3.9"
-
 services:
-  backend:
+  app:
     build:
       context: .
-      dockerfile: Dockerfile.backend
+      dockerfile: Dockerfile
     command: sh -c "python -m alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8000"
     environment:
       - APP_MODE=prod
+      - JWT_SECRET=dev-secret-change-in-production
+      - ALLOW_INSECURE_TOKENS=1
+      - COOKIE_SECURE=0
       - DATABASE_URL=sqlite:////app/data/tradecraftx.db
+      - CORS_ALLOWED_ORIGINS=http://localhost:8000
+      - BOOTSTRAP_ADMIN_EMAIL=admin@tradecraft.com
+      - UPSTOX_API_KEY=${UPSTOX_API_KEY}
+      - UPSTOX_API_SECRET=${UPSTOX_API_SECRET}
+      - UPSTOX_REDIRECT_URI=http://localhost:8000/brokers/upstox/callback
+      - KITE_API_KEY=${KITE_API_KEY}
+      - KITE_API_SECRET=${KITE_API_SECRET}
+      - KITE_REDIRECT_URI=http://localhost:8000/brokers/zerodha/callback
+      - UPSTOX_ANALYTICS_TOKEN=${UPSTOX_ANALYTICS_TOKEN}
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
     volumes:
       - app_data:/app/data
     ports:

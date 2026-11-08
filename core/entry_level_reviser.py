@@ -45,10 +45,12 @@ class EntryLevelReviser:
 
             # Fetch more data to ensure indicators are stable
             try:
+                from core.market_data.ohlcv_store import ensure_ohlcv
+                ensure_ohlcv([self.symbol], days=200)
                 self.historical_data = get_ohlcv(self.symbol, days=200)
             except OhlcvStoreError as e:
                 raise ValueError(
-                    f"OHLCV data not available. Admin may need to run OHLCV refresh. Error: {e}"
+                    f"OHLCV data not available. Error: {e}"
                 )
 
             if not self.historical_data or len(self.historical_data) < 50:

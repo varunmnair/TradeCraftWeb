@@ -20,6 +20,7 @@ class SessionCache:
         ttl: int = 300,
         user_id: int = None,
         session_id: str = None,
+        connection_broker_user_id: str = None,
     ):
         self.ttl = ttl
         self.last_refreshed = 0
@@ -33,6 +34,7 @@ class SessionCache:
         self.gtt_cache = []
         self.user_id = user_id
         self.session_id = session_id
+        self.connection_broker_user_id = connection_broker_user_id
         
         # Order history management (session-scoped)
         self._order_history: Dict[str, List[Dict]] = {}  # symbol -> list of trades
@@ -211,23 +213,10 @@ class SessionCache:
             if sym:
                 symbols.add(str(sym).strip().upper())
 
-        if not symbols:
-            return
-
-        from api.dependencies import get_job_runner, JOB_OHLCV_REFRESH_SYMBOLS
-
-        session_id = self.session_id or f"holdings-{self.user_id or 'unknown'}"
-
-        try:
-            job_runner = get_job_runner()
-            job_runner.start_job(
-                session_id=session_id,
-                job_type=JOB_OHLCV_REFRESH_SYMBOLS,
-                payload={"symbols": list(symbols)},
-            )
-            logging.info(f"Triggered OHLCV refresh for {len(symbols)} symbols")
-        except Exception as e:
-            logging.warning(f"Failed to trigger OHLCV refresh: {e}")
+        if symbols:
+            from core.market_data.ohlcv_store import ensure_ohlcv
+            ensure_ohlcv(list(symbols))
+            logging.info(f"Ensured OHLCV data for {len(symbols)} symbols")
 
     def refresh_entry_levels(self):
         logging.info(f"refresh_entry_levels: user_id={self.user_id}")
@@ -253,10 +242,46 @@ class SessionCache:
         broker_name = getattr(self.broker, "broker_name", None) or getattr(
             self.broker, "broker", None
         )
-        broker_user_id = getattr(self.broker, "broker_user_id", None)
+        # Priority 1: connection_broker_user_id passed from create_session (new sessions)
+        broker_user_id = None
+        connection_broker_user_id = None
+        if hasattr(self, 'connection_broker_user_id') and self.connection_broker_user_id:
+            connection_broker_user_id = self.connection_broker_user_id
+            broker_user_id = self.connection_broker_user_id
+
+        # Priority 2: Look up BrokerConnection table directly (works for all sessions)
+        if not broker_user_id and self.user_id and broker_name:
+            try:
+                from db.database import SessionLocal
+                from db.models import BrokerConnection
+
+                lookup_db = SessionLocal()
+                try:
+                    conn = (
+                        lookup_db.query(BrokerConnection)
+                        .filter(
+                            BrokerConnection.user_id == self.user_id,
+                            BrokerConnection.broker_name == broker_name,
+                        )
+                        .first()
+                    )
+                    if conn and conn.broker_user_id:
+                        connection_broker_user_id = conn.broker_user_id
+                        broker_user_id = conn.broker_user_id
+                        logging.info(
+                            f"_load_from_db: resolved connection.broker_user_id={broker_user_id} from BrokerConnection table"
+                        )
+                finally:
+                    lookup_db.close()
+            except Exception as e:
+                logging.warning(f"_load_from_db: BrokerConnection lookup failed: {e}")
+
+        # Priority 3: Fall back to the broker object's resolved broker_user_id
+        if not broker_user_id:
+            broker_user_id = getattr(self.broker, "broker_user_id", None)
 
         logging.info(
-            f"_load_from_db: broker_name={broker_name}, broker_user_id={broker_user_id}, user_id={self.user_id}"
+            f"_load_from_db: broker_name={broker_name}, broker_user_id={broker_user_id}, connection_broker_user_id={connection_broker_user_id}, user_id={self.user_id}"
         )
 
         if broker_user_id is None:
@@ -275,7 +300,10 @@ class SessionCache:
 
             service = get_entry_strategy_service()
             levels = service.get_entry_levels_for_user(
-                self.user_id, broker=broker_name, broker_user_id=broker_user_id
+                self.user_id,
+                broker=broker_name,
+                broker_user_id=broker_user_id,
+                connection_broker_user_id=connection_broker_user_id,
             )
             logging.info(
                 f"DB returned {len(levels)} entry levels for user={self.user_id}, broker={broker_name}, broker_user_id={broker_user_id}"
@@ -309,6 +337,9 @@ class SessionCache:
                     )
                     logging.info(
                         f"DEBUG: First strategy broker_user_id: {strategies[0].broker_user_id if strategies else 'none'}"
+                    )
+                    logging.info(
+                        f"DEBUG: broker_user_id used for query: {broker_user_id}, connection_broker_user_id: {connection_broker_user_id}"
                     )
             finally:
                 db.close()

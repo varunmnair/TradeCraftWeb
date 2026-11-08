@@ -10,6 +10,7 @@ from api.dependencies import (
     get_gtt_service,
     get_job_runner,
     get_session_registry,
+    require_premium,
     require_trading_enabled,
 )
 from api.errors import ServiceError
@@ -84,6 +85,7 @@ def confirm_gtt(
     current_user: UserContext = Depends(get_current_user),
 ):
     require_trading_enabled(current_user)
+    require_premium(current_user)
     registry.require_access(payload.session_id, current_user)
 
     log_audit(
@@ -110,6 +112,7 @@ def apply_gtt(
     current_user: UserContext = Depends(get_current_user),
 ):
     require_trading_enabled(current_user)
+    require_premium(current_user)
     registry.require_access(payload.session_id, current_user)
 
     try:

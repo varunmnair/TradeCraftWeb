@@ -1,6 +1,6 @@
 import logging
 from collections import Counter
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 
 class GTTManager:
@@ -35,10 +35,26 @@ class GTTManager:
 
         return details
 
+    def _build_thesis_break_map(self) -> Dict[str, float]:
+        """Build {symbol: thesis_break_price} from session entry levels."""
+        tb_map: Dict[str, float] = {}
+        try:
+            levels = self.session.get_entry_levels()
+            for entry in levels or []:
+                sym = entry.get("symbol", "").upper()
+                price = entry.get("thesis_break_price")
+                if sym and price is not None:
+                    tb_map[sym] = price
+        except Exception as e:
+            logging.warning(f"Failed to build thesis break map: {e}")
+        return tb_map
+
     def place_orders(self, gtt_plan: List[Dict], dry_run: bool = False) -> List[Dict]:
         """
         Places GTT orders based on the generated plan.
+        Skips symbols where thesis break has been triggered.
         """
+        thesis_break_map = self._build_thesis_break_map()
         results = []
         for order in gtt_plan:
             if order.get("skip_reason"):
@@ -48,6 +64,20 @@ class GTTManager:
                 continue
 
             symbol = order["symbol"]
+            symbol_upper = symbol.replace("-BE", "").replace("#", "").upper()
+
+            # Thesis break check
+            tb_price = thesis_break_map.get(symbol_upper)
+            ltp = order.get("ltp")
+            if tb_price is not None and ltp and ltp <= tb_price:
+                results.append(
+                    {
+                        **order,
+                        "status": "Skipped",
+                        "remarks": f"Thesis break at ₹{tb_price} — automated GTT blocked",
+                    }
+                )
+                continue
             result = {
                 "symbol": symbol,
                 "price": order["price"],
@@ -228,7 +258,7 @@ class GTTManager:
         for order in orders:
             variance = order.get("Variance (%)")
             ltp = order.get("LTP")
-            
+
             if not order.get("cmp_available", ltp is not None):
                 failed.append({
                     "Symbol": order["Symbol"],
@@ -236,7 +266,7 @@ class GTTManager:
                     "reason": "CMP not available"
                 })
                 continue
-                
+
             if variance is not None and variance < target_variance:
                 try:
                     new_trigger = round(ltp / (1 + target_variance / 100), 2)

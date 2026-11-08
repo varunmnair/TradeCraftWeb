@@ -305,4 +305,9 @@ def close_session(
         )
     
     registry.evict(session_id)
+
+    from core.auth.active_connection_store import get_active_connection_store
+    active_store = get_active_connection_store()
+    active_store.clear_active_connection(current_user.user_id)
+
     return {"session_id": session_id, "closed": True}

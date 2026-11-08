@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import pytest
-import io
-import csv
 import json
-from unittest.mock import MagicMock, patch
 
+import pytest
+from fastapi import HTTPException
+
+from api.routes.entry_strategy import _parse_entry_strategies_csv
 from api.schemas.entry_strategy import EntryStrategyCSVRow
 
 
@@ -101,90 +101,120 @@ class TestEntryStrategyCSVValidation:
 
 
 class TestCSVValidation:
-    """Tests for CSV content validation."""
+    """Tests for entry-strategy CSV parsing (Symbol, Allocated, Entry1..3)."""
 
     def test_parse_csv_with_required_columns(self):
+        csv_content = """Symbol,Allocated,Entry1,Entry2,Entry3
+RELIANCE,30000,2500,2450,2400
+TCS,20000,3500,3400,"""
+
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
+
+        assert errors == []
+        assert set(strategies.keys()) == {"RELIANCE", "TCS"}
+        assert strategies["RELIANCE"]["allocated"] == 30000.0
+        assert strategies["RELIANCE"]["levels"] == {1: 2500.0, 2: 2450.0, 3: 2400.0}
+        assert strategies["TCS"]["levels"] == {1: 3500.0, 2: 3400.0}
+        assert strategies["RELIANCE"]["quality"] is None
+        assert strategies["RELIANCE"]["exchange"] == "NSE"
+
+    def test_header_variants_tolerated(self):
+        csv_content = """Symbol, Allocated, entry 1, Entry_2, ENTRY3
+BEL,30000,386.5,375,369"""
+
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
+
+        assert errors == []
+        assert strategies["BEL"]["levels"] == {1: 386.5, 2: 375.0, 3: 369.0}
+
+    def test_lowercase_symbol_uppercased(self):
+        csv_content = """Symbol,Allocated,Entry1,Entry2,Entry3
+bdl,30000,1235,1200,1185"""
+
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
+
+        assert errors == []
+        assert "BDL" in strategies
+        assert strategies["BDL"]["levels"][1] == 1235.0
+
+    def test_exchange_prefix_stripped(self):
+        csv_content = """Symbol,Allocated,Entry1,Entry2,Entry3
+NSE:bdl,30000,1235,1200,1185
+BSE:ACE,20000,972,945,"""
+
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
+
+        assert errors == []
+        assert set(strategies.keys()) == {"BDL", "ACE"}
+        assert strategies["BDL"]["levels"][1] == 1235.0
+        assert strategies["ACE"]["levels"][2] == 945.0
+
+    def test_missing_required_column_raises(self):
+        csv_content = """Symbol,Allocated
+RELIANCE,30000"""
+
+        with pytest.raises(HTTPException) as exc_info:
+            _parse_entry_strategies_csv(csv_content)
+
+        assert exc_info.value.status_code == 400
+        assert "Entry1" in exc_info.value.detail
+
+    def test_level_no_price_format_rejected(self):
         csv_content = """symbol,level_no,price
-RELIANCE,1,2500
-RELIANCE,2,2450
-TCS,1,3500"""
+RELIANCE,1,2500"""
 
-        reader = csv.DictReader(io.StringIO(csv_content))
-        rows = list(reader)
+        with pytest.raises(HTTPException) as exc_info:
+            _parse_entry_strategies_csv(csv_content)
 
-        assert len(rows) == 3
-        assert rows[0]["symbol"] == "RELIANCE"
-        assert rows[0]["level_no"] == "1"
-        assert rows[0]["price"] == "2500"
+        assert exc_info.value.status_code == 400
+        assert "Symbol, Allocated, Entry1" in exc_info.value.detail
 
-    def test_missing_required_column(self):
-        csv_content = """symbol,level_no
-RELIANCE,1"""
+    def test_row_with_no_entries_reported(self):
+        csv_content = """Symbol,Allocated,Entry1,Entry2,Entry3
+RELIANCE,30000,,,
+TCS,20000,3500,,"""
 
-        reader = csv.DictReader(io.StringIO(csv_content))
-        field_names = reader.fieldnames or []
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
 
-        assert "price" not in field_names
+        assert set(strategies.keys()) == {"TCS"}
+        assert errors[0]["row"] == 2
+        assert "no valid entry prices" in errors[0]["error"]
 
-    def test_duplicate_symbol_level_no(self):
-        csv_content = """symbol,level_no,price
-RELIANCE,1,2500
-RELIANCE,1,2450"""
+    def test_invalid_price_reported(self):
+        csv_content = """Symbol,Allocated,Entry1,Entry2,Entry3
+RELIANCE,30000,abc,2450,"""
 
-        reader = csv.DictReader(io.StringIO(csv_content))
-        seen_keys = set()
-        duplicates = []
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
 
-        for row in reader:
-            key = (row["symbol"].strip().upper(), int(row["level_no"]))
-            if key in seen_keys:
-                duplicates.append(key)
-            seen_keys.add(key)
+        assert strategies == {}
+        assert "not a valid number" in errors[0]["error"]
 
-        assert len(duplicates) == 1
-        assert duplicates[0] == ("RELIANCE", 1)
+    def test_non_positive_price_reported(self):
+        csv_content = """Symbol,Allocated,Entry1,Entry2,Entry3
+RELIANCE,30000,-5,2450,"""
 
-    def test_empty_symbol_rejected(self):
-        csv_content = """symbol,level_no,price
-,1,2500"""
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
 
-        reader = csv.DictReader(io.StringIO(csv_content))
-        row = next(reader)
+        assert strategies == {}
+        assert "must be greater than 0" in errors[0]["error"]
 
-        assert row["symbol"].strip() == ""
+    def test_invalid_allocated_reported(self):
+        csv_content = """Symbol,Allocated,Entry1,Entry2,Entry3
+RELIANCE,abc,2500,2450,"""
 
-    def test_invalid_level_no_type(self):
-        csv_content = """symbol,level_no,price
-RELIANCE,abc,2500"""
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
 
-        reader = csv.DictReader(io.StringIO(csv_content))
-        row = next(reader)
+        assert strategies == {}
+        assert "allocated" in errors[0]["error"]
 
-        with pytest.raises(ValueError):
-            int(row["level_no"])
+    def test_entries_auto_sorted_descending(self):
+        csv_content = """Symbol,Allocated,Entry1,Entry2,Entry3
+RELIANCE,30000,2400,2500,2450"""
 
-    def test_invalid_price_type(self):
-        csv_content = """symbol,level_no,price
-RELIANCE,1,abc"""
+        strategies, errors = _parse_entry_strategies_csv(csv_content)
 
-        reader = csv.DictReader(io.StringIO(csv_content))
-        row = next(reader)
-
-        with pytest.raises(ValueError):
-            float(row["price"])
-
-    def test_dynamic_averaging_parsing(self):
-        csv_content = """symbol,level_no,price,dynamic_averaging_enabled
-RELIANCE,1,2500,Y
-TCS,1,3500,N
-INFY,1,1800,Yes"""
-
-        reader = csv.DictReader(io.StringIO(csv_content))
-        rows = list(reader)
-
-        assert rows[0]["dynamic_averaging_enabled"].strip().lower() in ("y", "yes", "true", "1")
-        assert rows[1]["dynamic_averaging_enabled"].strip().lower() in ("n", "no", "false", "0")
-        assert rows[2]["dynamic_averaging_enabled"].strip().lower() in ("y", "yes", "true", "1")
+        assert errors == []
+        assert strategies["RELIANCE"]["levels"] == {1: 2500.0, 2: 2450.0, 3: 2400.0}
 
 
 class TestUpsertLogic:
@@ -319,8 +349,9 @@ class TestVersioning:
     def test_version_list_returns_correct_structure(self):
         """Test that version list response has correct structure."""
         # This tests the VersionItem schema
-        from api.schemas.entry_strategy import VersionItem, EntryLevelSchema
         from datetime import datetime
+
+        from api.schemas.entry_strategy import EntryLevelSchema, VersionItem
         
         version = VersionItem(
             id=1,
@@ -339,8 +370,9 @@ class TestVersioning:
 
     def test_upload_history_schema(self):
         """Test upload history schema."""
-        from api.schemas.entry_strategy import UploadHistoryItem, UploadHistoryResponse
         from datetime import datetime
+
+        from api.schemas.entry_strategy import UploadHistoryItem, UploadHistoryResponse
         
         items = [
             UploadHistoryItem(
@@ -356,8 +388,9 @@ class TestVersioning:
 
     def test_restore_version_schema(self):
         """Test restore version response schema."""
-        from api.schemas.entry_strategy import RestoreVersionResponse
         from datetime import datetime
+
+        from api.schemas.entry_strategy import RestoreVersionResponse
         
         response = RestoreVersionResponse(
             symbol="RELIANCE",
@@ -377,24 +410,35 @@ class TestBulkRevisionSchemas:
         
         req = BulkSuggestRevisionRequest(
             symbols=["RELIANCE", "TCS"],
-            method="align_to_cmp",
-            pct_adjustment=5.0,
+            style="balanced",
         )
         assert len(req.symbols) == 2
-        assert req.method == "align_to_cmp"
-        assert req.pct_adjustment == 5.0
+        assert req.style == "balanced"
 
     def test_bulk_suggest_revision_request_defaults(self):
         """Test bulk suggest revision request with default values."""
         from api.schemas.entry_strategy import BulkSuggestRevisionRequest
         
         req = BulkSuggestRevisionRequest(symbols=["RELIANCE"])
-        assert req.method == "align_to_cmp"
-        assert req.pct_adjustment == 5.0
+        assert req.style == "balanced"
+
+    def test_bulk_suggest_revision_request_with_style(self):
+        """Test bulk suggest revision request with explicit style."""
+        from api.schemas.entry_strategy import BulkSuggestRevisionRequest
+        
+        req = BulkSuggestRevisionRequest(
+            symbols=["RELIANCE"],
+            style="conservative",
+        )
+        assert req.style == "conservative"
 
     def test_bulk_apply_revision_request(self):
         """Test bulk apply revision request schema."""
-        from api.schemas.entry_strategy import BulkApplyRevisionRequest, BulkApplyRevisionItem, ApplyRevisionItem
+        from api.schemas.entry_strategy import (
+            ApplyRevisionItem,
+            BulkApplyRevisionItem,
+            BulkApplyRevisionRequest,
+        )
         
         req = BulkApplyRevisionRequest(
             updates=[
@@ -410,8 +454,9 @@ class TestBulkRevisionSchemas:
 
     def test_bulk_apply_revision_result(self):
         """Test bulk apply revision result schema."""
-        from api.schemas.entry_strategy import BulkApplyRevisionResult
         from datetime import datetime
+
+        from api.schemas.entry_strategy import BulkApplyRevisionResult
         
         result = BulkApplyRevisionResult(
             symbol="RELIANCE",

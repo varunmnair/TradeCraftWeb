@@ -152,7 +152,7 @@ def main_menu():
         print("3. Analyze Holdings")
         print("4. Ask AI Analyst")
         print("5. Analyze ROI Trend")
-        print("6. Revise Entry Levels")
+        print("6. Revise Entries")
         print("7. Exit")
 
         choice = input("Enter your choice: ").strip()

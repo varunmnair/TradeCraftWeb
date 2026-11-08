@@ -443,14 +443,7 @@ class UpstoxBroker(BaseBroker):
         logging.info(f"Getting trades from Upstox historical-trades API (days={days})")
         
         try:
-            # Get access token
-            access_token = None
-            if hasattr(self, 'session_manager') and self.session_manager:
-                access_token = self.session_manager.get_access_token("upstox")
-            
-            if not access_token:
-                logging.error("No access token available for Upstox trades API")
-                return []
+            access_token = self._get_access_token()
             
             # Calculate date range based on requested days
             end_date = datetime.now().strftime("%Y-%m-%d")
@@ -464,7 +457,7 @@ class UpstoxBroker(BaseBroker):
             }
             
             # Log curl command for debugging (first page only)
-            curl_cmd = f'curl -H "Authorization: Bearer {access_token}" "{url}?segment=EQ&start_date={start_date}&end_date={end_date}&page_number=1&page_size=100"'
+            curl_cmd = f'curl -H "Authorization: Bearer {access_token}" "{url}?start_date={start_date}&end_date={end_date}&page_number=1&page_size=100"'
             logging.info(f"CURL for debugging: {curl_cmd}")
             
             # Paginate through all results
@@ -475,7 +468,6 @@ class UpstoxBroker(BaseBroker):
             
             while page <= max_pages:
                 params = {
-                    "segment": "EQ",
                     "start_date": start_date,
                     "end_date": end_date,
                     "page_number": page,

@@ -30,6 +30,7 @@ import {
   Help as HelpIcon,
   PowerSettingsNew as PowerIcon,
   AdminPanelSettings as AdminIcon,
+  Checklist as CandidatesIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../context/AuthContext';
 import { useSession } from '../context/SessionContext';
@@ -50,6 +51,7 @@ const navItems = [
   { text: 'Holdings', icon: <HoldingsIcon />, path: '/holdings' },
   { text: 'Entry Plans', icon: <BuyIcon />, path: '/entries' },
   { text: 'Entry Strategies', icon: <PlanIcon />, path: '/entry-strategies' },
+  { text: 'Entry Candidates', icon: <CandidatesIcon />, path: '/entry-candidates' },
   { text: 'Buy Orders', icon: <GttIcon />, path: '/gtt' },
   { text: 'Jobs', icon: <JobsIcon />, path: '/jobs' },
   { text: 'Administration', icon: <AdminIcon />, path: '/admin', adminOnly: true },

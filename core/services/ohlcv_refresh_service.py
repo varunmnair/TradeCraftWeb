@@ -167,6 +167,7 @@ class OhlcvRefreshService:
                     days=days,
                     today=today,
                     window_start=window_start,
+                    force_refresh=force_refresh,
                 )
 
                 if result["status"] == "skipped":
@@ -197,7 +198,7 @@ class OhlcvRefreshService:
     def _should_refresh_symbol(
         self, db: Session, symbol: str, force_refresh: bool
     ) -> bool:
-        from db.models import OhlcvMetadata, OhlcvDaily
+        from db.models import OhlcvDaily, OhlcvMetadata
 
         if force_refresh:
             return True
@@ -243,7 +244,7 @@ class OhlcvRefreshService:
         if max_date is None:
             return window_start, today
 
-        if max_date >= today - timedelta(days=1):
+        if max_date >= today:
             return None, None
 
         return max_date + timedelta(days=1), today
@@ -256,14 +257,16 @@ class OhlcvRefreshService:
         days: int,
         today: date,
         window_start: date,
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
-        from datetime import datetime, timezone
         from db.database import SessionLocal
-        from db.models import OhlcvDaily, OhlcvMetadata
 
         db = SessionLocal()
         try:
-            from_date, to_date = self._get_fetch_range(db, symbol, today, window_start)
+            if force_refresh:
+                from_date, to_date = window_start, today
+            else:
+                from_date, to_date = self._get_fetch_range(db, symbol, today, window_start)
 
             if from_date is None and to_date is None:
                 return {"status": "skipped", "reason": "Already up to date"}
@@ -306,8 +309,9 @@ class OhlcvRefreshService:
 
         from db.models import OhlcvDaily
 
+        encoded_key = requests.utils.quote(instrument_key)
         url = (
-            f"https://api.upstox.com/v2/historical-candle/{instrument_key}/day/"
+            f"https://api.upstox.com/v2/historical-candle/{encoded_key}/day/"
             f"{to_date.strftime('%Y-%m-%d')}/{from_date.strftime('%Y-%m-%d')}"
         )
 
@@ -327,6 +331,10 @@ class OhlcvRefreshService:
                     return {"success": False, "error": f"API error: {data.get('status')}"}
 
                 candles_raw = data.get("data", {}).get("candles", [])
+                LOGGER.info(
+                    f"[{symbol}] Retrieved {len(candles_raw)} candles "
+                    f"from {from_date} to {to_date}"
+                )
                 if not candles_raw:
                     return {"success": False, "error": "No candles in response"}
 
@@ -366,7 +374,7 @@ class OhlcvRefreshService:
                                 existing.high = float(c[2]) if c[2] else None
                                 existing.low = float(c[3]) if c[3] else None
                                 existing.close = float(c[4]) if c[4] else None
-                                existing.volume = int(c[5]) if len(c) > 5 and c[5] else None
+                                existing.volume = int(c[5]) if len(c) > 5 and c[5] is not None else None
                         else:
                             db.add(
                                 OhlcvDaily(
@@ -376,7 +384,7 @@ class OhlcvRefreshService:
                                     high=float(c[2]) if c[2] else None,
                                     low=float(c[3]) if c[3] else None,
                                     close=float(c[4]) if c[4] else None,
-                                    volume=int(c[5]) if len(c) > 5 and c[5] else None,
+                                    volume=int(c[5]) if len(c) > 5 and c[5] is not None else None,
                                 )
                             )
                             existing_dates.add(trade_date)
@@ -496,7 +504,7 @@ class OhlcvRefreshService:
 
     def get_existing_symbols(self) -> List[str]:
         from db.database import SessionLocal
-        from db.models import OhlcvMetadata, OhlcvDaily
+        from db.models import OhlcvDaily, OhlcvMetadata
 
         db = SessionLocal()
         try:
@@ -504,10 +512,10 @@ class OhlcvRefreshService:
             symbols_with_candles = set(
                 r[0] for r in db.query(OhlcvDaily.symbol).distinct().all()
             )
-            
+
             # Also include symbols from metadata that might have failed before
             all_metadata = [s[0] for s in db.query(OhlcvMetadata.symbol).all()]
-            
+
             # Combine both - prefer symbols with actual candle data
             result = list(symbols_with_candles.union(set(all_metadata)))
             return result
@@ -515,9 +523,10 @@ class OhlcvRefreshService:
             db.close()
 
     def inspect_symbol(self, symbol: str, days: int = 100) -> Dict[str, Any]:
+        from datetime import timedelta
+
         from db.database import SessionLocal
         from db.models import OhlcvDaily
-        from datetime import timedelta
 
         sym_upper = symbol.upper()
         db = SessionLocal()
