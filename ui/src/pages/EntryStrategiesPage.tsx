@@ -27,6 +27,8 @@ import {
   DialogActions,
   Switch,
   FormControlLabel,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import {
   CloudUpload as UploadIcon,
@@ -39,10 +41,33 @@ import {
   Clear as ClearIcon,
 } from '@mui/icons-material';
 import { api } from '../api/client';
+import { useNavigate } from 'react-router-dom';
 import { EntryStrategySummary, EvaluateStrategyResponse, CellStatus } from '../types';
 import { useSession } from '../context/SessionContext';
 import { BulkRevisionModal } from '../components/BulkRevisionModal';
 import { InlineEditCell } from '../components/InlineEditCell';
+import { ResponsiveToolbar } from '../components/ResponsiveToolbar';
+import { ResponsiveDialog } from '../components/ResponsiveDialog';
+import { MobileEntryStrategyCard } from '../components/entry-strategies/MobileEntryStrategyCard';
+import {
+  EntryStrategiesMobileControls,
+  INITIAL_ENTRY_STRATEGY_FILTERS,
+  type EntryStrategyFilters,
+} from '../components/entry-strategies/EntryStrategiesMobileControls';
+import { MobileStrategyEditDialog } from '../components/entry-strategies/MobileStrategyEditDialog';
+import { MobileVersionHistory } from '../components/entry-strategies/MobileVersionHistory';
+import {
+  formatAllocation,
+  formatDate,
+  formatPrice,
+  getDeltaColor,
+  getReviewStatusColor,
+  getReviewStatusLabel,
+  parseNumericInput,
+  sortEntryValues,
+  type StrategyFormValues,
+} from '../components/entry-strategies/strategyDisplay';
+import type { VersionItem } from '../types';
 
 type CellStatusMap = Record<string, CellStatus>;
 
@@ -71,6 +96,22 @@ export default function EntryStrategiesPage() {
   const [moreAnchor, setMoreAnchor] = useState<null | HTMLElement>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [includeHoldings, setIncludeHoldings] = useState(false);
+  const [mobileSearch, setMobileSearch] = useState('');
+  const [mobileFilters, setMobileFilters] = useState<EntryStrategyFilters>(
+    INITIAL_ENTRY_STRATEGY_FILTERS,
+  );
+  const [editingStrategy, setEditingStrategy] = useState<EntryStrategySummary | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState('');
+  const [historyDialogOpen, setHistoryDialogOpen] = useState(false);
+  const [historySymbol, setHistorySymbol] = useState('');
+  const [historyVersions, setHistoryVersions] = useState<VersionItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+
+  const navigate = useNavigate();
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
   const getDelta = useCallback((symbol: string, entry1: number | null): number | null => {
     const cmp = cmpData[symbol];
@@ -83,11 +124,46 @@ export default function EntryStrategiesPage() {
     return strategies.filter((s) => !holdingsSymbols.has(normalizeSymbol(s.symbol)));
   }, [strategies, includeHoldings, holdingsSymbols]);
 
+  const searchedStrategies = useMemo(() => {
+    let list = filteredStrategies;
+    const query = mobileSearch.trim().toUpperCase();
+    if (query) {
+      list = list.filter((strategy) => strategy.symbol.toUpperCase().includes(query));
+    }
+    if (mobileFilters.reviewStatus !== 'ALL') {
+      list = list.filter((strategy) =>
+        mobileFilters.reviewStatus === 'NONE'
+          ? !strategy.review_status
+          : strategy.review_status === mobileFilters.reviewStatus,
+      );
+    }
+    if (mobileFilters.swingEligibility !== 'ALL') {
+      list = list.filter((strategy) => {
+        if (mobileFilters.swingEligibility === 'YES') return strategy.swing_eligible === true;
+        if (mobileFilters.swingEligibility === 'NO') return strategy.swing_eligible === false;
+        return strategy.swing_eligible == null;
+      });
+    }
+    if (mobileFilters.reviewDue !== 'ALL') {
+      list = list.filter((strategy) =>
+        mobileFilters.reviewDue === 'YES'
+          ? strategy.review_status === 'REVIEW_REQUIRED'
+          : strategy.review_status !== 'REVIEW_REQUIRED',
+      );
+    }
+    return list;
+  }, [filteredStrategies, mobileSearch, mobileFilters]);
+
   const sortedStrategies = useMemo(() => {
-    const base = filteredStrategies;
+    const base = searchedStrategies;
     if (!sortBy) return base;
     const sorted = [...base];
     sorted.sort((a, b) => {
+      if (sortBy.field === 'symbol') {
+        return sortBy.direction === 'asc'
+          ? a.symbol.localeCompare(b.symbol)
+          : b.symbol.localeCompare(a.symbol);
+      }
       let aVal: number | null = 0;
       let bVal: number | null = 0;
       if (sortBy.field === 'delta') {
@@ -96,13 +172,19 @@ export default function EntryStrategiesPage() {
       } else if (sortBy.field === 'updated') {
         aVal = new Date(a.updated_at).getTime();
         bVal = new Date(b.updated_at).getTime();
+      } else if (sortBy.field === 'allocated') {
+        aVal = a.allocated;
+        bVal = b.allocated;
+      } else if (sortBy.field === 'cmp') {
+        aVal = cmpData[a.symbol] ?? null;
+        bVal = cmpData[b.symbol] ?? null;
       }
       const aNum = aVal ?? -999999;
       const bNum = bVal ?? -999999;
       return sortBy.direction === 'asc' ? aNum - bNum : bNum - aNum;
     });
     return sorted;
-  }, [filteredStrategies, sortBy, getDelta]);
+  }, [searchedStrategies, sortBy, getDelta, cmpData]);
 
   const handleSort = (field: string) => {
     setSortBy(prev => {
@@ -311,15 +393,9 @@ export default function EntryStrategiesPage() {
       setStrategies(prev => prev.map(s => {
         if (s.symbol !== symbol) return s;
         const updated = { ...s, [field]: newValue };
-        // Auto-sort entry prices descending: Entry 1 (highest) > Entry 2 > Entry 3 (lowest)
-        const entries = [updated.entry1, updated.entry2, updated.entry3]
-          .filter((v): v is number => v != null)
-          .sort((a, b) => b - a);
         return {
           ...updated,
-          entry1: entries[0] ?? updated.entry1,
-          entry2: entries[1] ?? updated.entry2,
-          entry3: entries[2] ?? updated.entry3,
+          ...sortEntryValues(updated.entry1, updated.entry2, updated.entry3),
         };
       }));
       setCellStatus(prev => ({ ...prev, [key]: 'saved' }));
@@ -338,12 +414,77 @@ export default function EntryStrategiesPage() {
     }
   }, []);
 
-  const formatCurrency = (v: number) => `₹${v.toLocaleString()}`;
-  const formatPrice = (v: number) => `₹${v.toFixed(2)}`;
-  const parseNumber = (s: string) => {
-    const cleaned = s.replace(/[₹,\s]/g, '');
-    const num = parseFloat(cleaned);
-    return isNaN(num) ? null : num;
+  const handleOpenEdit = (strategy: EntryStrategySummary) => {
+    setEditingStrategy(strategy);
+    setEditError('');
+  };
+
+  const handleCloseEdit = () => {
+    if (editSaving) return;
+    setEditingStrategy(null);
+    setEditError('');
+  };
+
+  const handleMobileSave = async (values: StrategyFormValues) => {
+    if (!editingStrategy) return;
+    const symbol = editingStrategy.symbol;
+    setEditSaving(true);
+    setEditError('');
+    try {
+      const result = await api.updateEntryStrategyField(symbol, values);
+      setStrategies((previous) =>
+        previous.map((strategy) =>
+          strategy.symbol === symbol
+            ? {
+                ...strategy,
+                allocated: values.allocated ?? strategy.allocated,
+                ...sortEntryValues(values.entry1, values.entry2, values.entry3),
+                updated_at: result.updated_at,
+              }
+            : strategy,
+        ),
+      );
+      setSuccess(`Updated ${symbol}`);
+      setEditingStrategy(null);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Failed to save strategy');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const handleClearMobileFilters = () => {
+    setMobileSearch('');
+    setMobileFilters(INITIAL_ENTRY_STRATEGY_FILTERS);
+  };
+
+  const handleViewHistory = async (strategy: EntryStrategySummary) => {
+    setHistorySymbol(strategy.symbol);
+    setHistoryDialogOpen(true);
+    setHistoryVersions([]);
+    setHistoryError('');
+    setHistoryLoading(true);
+    try {
+      const data = await api.getVersionHistory(strategy.symbol);
+      setHistoryVersions(data.versions);
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : 'Failed to load version history');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const handleCloseHistory = () => {
+    setHistoryDialogOpen(false);
+    setHistorySymbol('');
+    setHistoryVersions([]);
+    setHistoryError('');
+  };
+
+  const handleOpenFullDetailFromHistory = () => {
+    const symbol = historySymbol;
+    handleCloseHistory();
+    navigate(`/entry-strategies/${encodeURIComponent(symbol)}`);
   };
 
   const isAllSelected = sortedStrategies.length > 0 && selected.length === sortedStrategies.length;
@@ -368,31 +509,40 @@ export default function EntryStrategiesPage() {
       )}
 
       <Paper sx={{ p: 2, mb: 2 }}>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
-          <Button
-            variant="contained"
-            component="label"
-            startIcon={uploading ? <CircularProgress size={20} color="inherit" /> : <UploadIcon />}
-            disabled={uploading}
+        <ResponsiveToolbar sx={{ flexWrap: 'wrap' }}>
+          <Box
+            sx={{
+              display: { xs: 'none', sm: 'flex' },
+              gap: 1,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
           >
-            {uploading ? 'Uploading...' : 'Upload CSV'}
-            <input
-              key={fileInputKey}
-              type="file"
-              accept=".csv"
-              hidden
-              onChange={handleFileChange}
+            <Button
+              variant="contained"
+              component="label"
+              startIcon={uploading ? <CircularProgress size={20} color="inherit" /> : <UploadIcon />}
               disabled={uploading}
-            />
-          </Button>
+            >
+              {uploading ? 'Uploading...' : 'Upload CSV'}
+              <input
+                key={fileInputKey}
+                type="file"
+                accept=".csv"
+                hidden
+                onChange={handleFileChange}
+                disabled={uploading}
+              />
+            </Button>
 
-          <Button
-            variant="outlined"
-            startIcon={<DownloadIcon />}
-            onClick={handleDownloadStrategies}
-          >
-            Download CSV
-          </Button>
+            <Button
+              variant="outlined"
+              startIcon={<DownloadIcon />}
+              onClick={handleDownloadStrategies}
+            >
+              Download CSV
+            </Button>
+          </Box>
 
           <FormControlLabel
             control={
@@ -406,7 +556,7 @@ export default function EntryStrategiesPage() {
           />
 
           {selected.length > 0 && (
-            <>
+            <Box sx={{ display: { xs: 'none', sm: 'flex' }, gap: 1, alignItems: 'center' }}>
               <Box sx={{ width: 1, height: 0 }} />
               <Chip
                 label={`${selected.length} Selected`}
@@ -438,7 +588,7 @@ export default function EntryStrategiesPage() {
               >
                 Clear
               </Button>
-            </>
+            </Box>
           )}
 
           <Box sx={{ flexGrow: 1 }} />
@@ -460,10 +610,12 @@ export default function EntryStrategiesPage() {
               </ListItemIcon>
               <ListItemText>{evaluating ? 'Evaluating...' : 'Evaluate All'}</ListItemText>
             </MenuItem>
-            <MenuItem onClick={handleDownloadTemplate}>
-              <ListItemIcon><DownloadIcon /></ListItemIcon>
-              <ListItemText>Download Template</ListItemText>
-            </MenuItem>
+            {!isMobile && (
+              <MenuItem onClick={handleDownloadTemplate}>
+                <ListItemIcon><DownloadIcon /></ListItemIcon>
+                <ListItemText>Download Template</ListItemText>
+              </MenuItem>
+            )}
           </Menu>
 
           <Tooltip title="Refresh strategies">
@@ -471,7 +623,7 @@ export default function EntryStrategiesPage() {
               {loading ? <CircularProgress size={20} /> : <RefreshIcon />}
             </IconButton>
           </Tooltip>
-        </Box>
+        </ResponsiveToolbar>
       </Paper>
 
       {loading || holdingsLoading ? (
@@ -498,6 +650,39 @@ export default function EntryStrategiesPage() {
               : 'All entry strategy symbols are currently in holdings. Toggle "Include Holding Symbols" to show them.'}
           </Typography>
         </Paper>
+      ) : isMobile ? (
+        <Box>
+          <EntryStrategiesMobileControls
+            search={mobileSearch}
+            onSearchChange={setMobileSearch}
+            sortBy={sortBy}
+            onSort={handleSort}
+            filters={mobileFilters}
+            onFiltersChange={setMobileFilters}
+            onClearFilters={handleClearMobileFilters}
+          />
+          {sortedStrategies.length === 0 ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography variant="body1" color="text.secondary">
+                No strategies match the current search or filters.
+              </Typography>
+            </Paper>
+          ) : (
+            sortedStrategies.map((strategy) => (
+              <MobileEntryStrategyCard
+                key={strategy.symbol}
+                strategy={strategy}
+                cmp={cmpData[strategy.symbol] ?? null}
+                delta={getDelta(strategy.symbol, strategy.entry1)}
+                onEdit={handleOpenEdit}
+                onOpenDetail={(symbol) =>
+                  navigate(`/entry-strategies/${encodeURIComponent(symbol)}`)
+                }
+                onViewHistory={handleViewHistory}
+              />
+            ))
+          )}
+        </Box>
       ) : (
         <Paper>
           <TableContainer>
@@ -571,8 +756,8 @@ export default function EntryStrategiesPage() {
                     <TableCell>
                       <InlineEditCell
                         value={strategy.allocated}
-                        format={formatCurrency}
-                        parse={parseNumber}
+                        format={formatAllocation}
+                        parse={parseNumericInput}
                         onSave={(v) => handleCellSave(strategy.symbol, 'allocated', v)}
                         status={cellStatus[`${strategy.symbol}:allocated`] || 'idle'}
                       />
@@ -581,7 +766,7 @@ export default function EntryStrategiesPage() {
                       <InlineEditCell
                         value={strategy.entry1}
                         format={formatPrice}
-                        parse={parseNumber}
+                        parse={parseNumericInput}
                         onSave={(v) => handleCellSave(strategy.symbol, 'entry1', v)}
                         status={cellStatus[`${strategy.symbol}:entry1`] || 'idle'}
                       />
@@ -590,7 +775,7 @@ export default function EntryStrategiesPage() {
                       <InlineEditCell
                         value={strategy.entry2}
                         format={formatPrice}
-                        parse={parseNumber}
+                        parse={parseNumericInput}
                         onSave={(v) => handleCellSave(strategy.symbol, 'entry2', v)}
                         status={cellStatus[`${strategy.symbol}:entry2`] || 'idle'}
                       />
@@ -599,7 +784,7 @@ export default function EntryStrategiesPage() {
                       <InlineEditCell
                         value={strategy.entry3}
                         format={formatPrice}
-                        parse={parseNumber}
+                        parse={parseNumericInput}
                         onSave={(v) => handleCellSave(strategy.symbol, 'entry3', v)}
                         status={cellStatus[`${strategy.symbol}:entry3`] || 'idle'}
                       />
@@ -710,6 +895,38 @@ export default function EntryStrategiesPage() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <MobileStrategyEditDialog
+        open={editingStrategy !== null}
+        strategy={editingStrategy}
+        saving={editSaving}
+        errorMessage={editError}
+        onClose={handleCloseEdit}
+        onSave={handleMobileSave}
+      />
+
+      <ResponsiveDialog
+        open={historyDialogOpen}
+        onClose={handleCloseHistory}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Version History — {historySymbol}</DialogTitle>
+        <DialogContent dividers>
+          <MobileVersionHistory
+            versions={historyVersions}
+            currentAllocation={
+              strategies.find((strategy) => strategy.symbol === historySymbol)?.allocated ?? null
+            }
+            loading={historyLoading}
+            error={historyError}
+            onOpenFullDetail={handleOpenFullDetailFromHistory}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseHistory}>Close</Button>
+        </DialogActions>
+      </ResponsiveDialog>
     </Box>
   );
 }

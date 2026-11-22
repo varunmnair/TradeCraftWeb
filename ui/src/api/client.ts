@@ -8,6 +8,8 @@ import {
   SessionResponse,
   SessionStartRequest,
   SessionCreate,
+  BrokerSessionBootstrapRequest,
+  BrokerSessionBootstrapResponse,
   JobStatusResponse,
   JobListResponse,
   JobQueuedResponse,
@@ -51,6 +53,8 @@ import {
   CandidateGenerateResponse,
   CandidatePlaceResponse,
 } from '../types';
+import { getDeviceId } from '../utils/deviceId';
+import { SESSION_EXPIRED_EVENT } from '../utils/sessionEvents';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -92,6 +96,7 @@ class ApiClient {
   ): Promise<T> {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
+      'X-Device-Id': getDeviceId(),
       ...options.headers,
     };
 
@@ -151,7 +156,19 @@ class ApiClient {
         context: {},
         retryable: false,
       }));
-      throw new Error(error.message || 'Request failed');
+      const message = error.message || 'Request failed';
+      const code = String(error.error_code || '').toLowerCase();
+      if (
+        code === 'session_not_found'
+        || code === 'session_expired'
+        || code === 'invalid_session'
+        || /session (not found|expired)/i.test(message)
+      ) {
+        window.dispatchEvent(
+          new CustomEvent(SESSION_EXPIRED_EVENT, { detail: { message } }),
+        );
+      }
+      throw new Error(message);
     }
 
     if (response.status === 204) {
@@ -201,9 +218,10 @@ class ApiClient {
     });
   }
 
-  async connectUpstox(connectionId?: number): Promise<BrokerConnectResponse> {
-    const params = connectionId ? `?connection_id=${connectionId}` : '';
-    return this.request<BrokerConnectResponse>(`/brokers/upstox/connect${params}`);
+  async connectUpstox(connectionId?: number, flow: 'popup' | 'mobile' = 'popup'): Promise<BrokerConnectResponse> {
+    const params = new URLSearchParams({ flow });
+    if (connectionId) params.set('connection_id', String(connectionId));
+    return this.request<BrokerConnectResponse>(`/brokers/upstox/connect?${params.toString()}`);
   }
 
   async getUpstoxStatus(connectionId?: number): Promise<BrokerStatusResponse> {
@@ -211,9 +229,10 @@ class ApiClient {
     return this.request<BrokerStatusResponse>(`/brokers/upstox/status${params}`);
   }
 
-  async connectZerodha(connectionId?: number): Promise<ZerodhaConnectResponse> {
-    const params = connectionId ? `?connection_id=${connectionId}` : '';
-    return this.request<ZerodhaConnectResponse>(`/brokers/zerodha/connect${params}`);
+  async connectZerodha(connectionId?: number, flow: 'popup' | 'mobile' = 'popup'): Promise<ZerodhaConnectResponse> {
+    const params = new URLSearchParams({ flow });
+    if (connectionId) params.set('connection_id', String(connectionId));
+    return this.request<ZerodhaConnectResponse>(`/brokers/zerodha/connect?${params.toString()}`);
   }
 
   async getZerodhaStatus(connectionId?: number): Promise<ZerodhaStatusResponse> {
@@ -242,6 +261,15 @@ class ApiClient {
 
   async startSession(data: SessionStartRequest): Promise<SessionResponse> {
     return this.request<SessionResponse>('/session/start', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bootstrapSession(
+    data: BrokerSessionBootstrapRequest = {},
+  ): Promise<BrokerSessionBootstrapResponse> {
+    return this.request<BrokerSessionBootstrapResponse>('/session/orchestrate', {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -511,10 +539,15 @@ class ApiClient {
     });
   }
 
-  async adjustGTTOrders(sessionId: string, orderIds: string[], targetVariance: number): Promise<{ adjusted: Array<{ GTT_ID: string; Symbol: string; old_trigger: number; new_trigger: number; old_variance: number; new_variance: number; status: string; reason?: string }>; failed: Array<{ GTT_ID: string; Symbol: string; status: string; reason: string }>; count: number }> {
-    return this.request<{ adjusted: any[]; failed: any[]; count: number }>('/gtt/adjust', {
+  async adjustGTTOrders(sessionId: string, orderIds: string[], targetVariance: number, idempotencyKey?: string): Promise<{ adjusted: Array<{ GTT_ID: string; Symbol: string; old_trigger: number; new_trigger: number; old_variance: number; new_variance: number; status: string; reason?: string }>; failed: Array<{ GTT_ID: string; Symbol: string; status: string; reason: string }>; count: number; replayed?: boolean }> {
+    return this.request<{ adjusted: any[]; failed: any[]; count: number; replayed?: boolean }>('/gtt/adjust', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sessionId, order_ids: orderIds, target_variance: targetVariance }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        order_ids: orderIds,
+        target_variance: targetVariance,
+        idempotency_key: idempotencyKey,
+      }),
     });
   }
 
@@ -952,10 +985,10 @@ class ApiClient {
     return this.request<CandidateGenerateResponse>(`/candidates/${sessionId}/latest`);
   }
 
-  async placeCandidates(sessionId: string, symbols: string[]): Promise<CandidatePlaceResponse> {
+  async placeCandidates(sessionId: string, symbols: string[], idempotencyKey?: string): Promise<CandidatePlaceResponse> {
     return this.request<CandidatePlaceResponse>(`/candidates/${sessionId}/place`, {
       method: 'POST',
-      body: JSON.stringify({ symbols }),
+      body: JSON.stringify({ symbols, idempotency_key: idempotencyKey }),
     });
   }
 }

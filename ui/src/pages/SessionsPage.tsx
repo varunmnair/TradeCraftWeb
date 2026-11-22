@@ -17,13 +17,18 @@ import {
   TextField,
   Checkbox,
   FormControlLabel,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import { PlayArrow as StartIcon, Refresh as RefreshIcon, Check as CheckIcon, Warning as WarningIcon } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
 import { BrokerConnectionResponse, SessionResponse, UpstoxConnectionStatus, ZerodhaConnectionStatus, ActiveConnectionResponse } from '../types';
+import { ResponsiveDialog } from '../components/ResponsiveDialog';
+import { ResponsivePageHeader } from '../components/ResponsivePageHeader';
 
 const SESSION_STORAGE_KEY = 'tradecraftx_session_id';
+const SESSION_STARTED_KEY = 'tradecraftx_session_started_at';
 
 interface BrokerStatus {
   connected: boolean;
@@ -44,6 +49,11 @@ export default function SessionsPage() {
   const [error, setError] = useState('');
   const [starting, setStarting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   
   // Form state
   const [selectedBrokerName, setSelectedBrokerName] = useState<string>('');
@@ -57,6 +67,8 @@ export default function SessionsPage() {
     const storedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
     if (storedSessionId) {
       setSessionId(storedSessionId);
+      const startedAt = window.sessionStorage.getItem(`${SESSION_STARTED_KEY}:${storedSessionId}`);
+      setSessionStartedAt(startedAt);
     }
   }, [setSessionId]);
 
@@ -76,6 +88,8 @@ export default function SessionsPage() {
       // Session invalid - clear it
       setCurrentSession(null);
       localStorage.removeItem(SESSION_STORAGE_KEY);
+      window.sessionStorage.removeItem(`${SESSION_STARTED_KEY}:${sid}`);
+      setSessionStartedAt(null);
       setSessionId(null);
       setSessionInfo(null);
     }
@@ -183,7 +197,10 @@ export default function SessionsPage() {
         tenant_id: session.tenant_id,
       });
       localStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
-      
+      const startedAt = new Date().toISOString();
+      window.sessionStorage.setItem(`${SESSION_STARTED_KEY}:${session.session_id}`, startedAt);
+      setSessionStartedAt(startedAt);
+
       // Set active broker connection for all trading data endpoints
       await api.setActiveConnection(selectedTradingConnectionId as number);
     } catch (err) {
@@ -212,17 +229,20 @@ export default function SessionsPage() {
     }
   };
 
-  const handleClearSession = async () => {
+  const confirmClearSession = async () => {
     if (sessionId) {
       try {
         await api.closeSession(sessionId);
       } catch (err) {
         console.error('Failed to close session:', err);
       }
+      window.sessionStorage.removeItem(`${SESSION_STARTED_KEY}:${sessionId}`);
     }
     setCurrentSession(null);
+    setSessionStartedAt(null);
     localStorage.removeItem(SESSION_STORAGE_KEY);
     setSessionId(null);
+    setConfirmClear(false);
   };
 
   if (loading) {
@@ -236,11 +256,18 @@ export default function SessionsPage() {
   const upstoxConnections = getAvailableConnections('upstox');
   const zerodhaConnections = getAvailableConnections('zerodha');
 
+  const formatStartedAt = (value: string | null) => {
+    if (!value) return 'Not available';
+    try {
+      return new Date(value).toLocaleString();
+    } catch {
+      return value;
+    }
+  };
+
   return (
     <Box>
-      <Typography variant="h4" gutterBottom>
-        Sessions
-      </Typography>
+      <ResponsivePageHeader title="Sessions" description="Manage this device's trading session" />
 
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
@@ -248,6 +275,137 @@ export default function SessionsPage() {
         </Alert>
       )}
 
+      {isMobile && (
+        <>
+          {currentSession && (
+            <Card sx={{ mb: 2, bgcolor: '#e8f5e9' }}>
+              <CardContent sx={{ p: 1.75, '&:last-child': { pb: 1.75 } }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+                  <Typography variant="subtitle1" fontWeight={800} sx={{ minWidth: 0 }}>
+                    Active Trading Session
+                  </Typography>
+                  <Box sx={{ flex: 1 }} />
+                  <Chip
+                    icon={<CheckIcon />}
+                    label="Connected"
+                    color="success"
+                    size="small"
+                  />
+                </Box>
+                <Box sx={{ display: 'grid', gap: 0.5, mt: 1.5 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    Broker:{' '}
+                    <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                      {currentSession.broker}
+                    </Box>
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Connection:{' '}
+                    <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                      #{activeConnection?.broker_connection_id ?? 'this device'}
+                    </Box>
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Started:{' '}
+                    <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                      {formatStartedAt(sessionStartedAt)}
+                    </Box>
+                  </Typography>
+                  {currentSession.expires_at && (
+                    <Typography variant="body2" color="text.secondary">
+                      Expires:{' '}
+                      <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                        {formatStartedAt(currentSession.expires_at)}
+                      </Box>
+                    </Typography>
+                  )}
+                </Box>
+                <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
+                  <Button
+                    variant="outlined"
+                    startIcon={<RefreshIcon />}
+                    onClick={handleRefreshSession}
+                    disabled={refreshing}
+                    fullWidth
+                    sx={{ minHeight: 44 }}
+                  >
+                    {refreshing ? 'Refreshing...' : 'Refresh Session'}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="error"
+                    onClick={() => setConfirmClear(true)}
+                    fullWidth
+                    sx={{ minHeight: 44 }}
+                  >
+                    Clear
+                  </Button>
+                </Box>
+              </CardContent>
+            </Card>
+          )}
+
+          <Card sx={{ mb: 2 }}>
+            <CardContent sx={{ p: 1.75, '&:last-child': { pb: 1.75 } }}>
+              <Typography variant="subtitle1" fontWeight={800} gutterBottom>
+                {currentSession ? 'Restart Trading Session' : 'Start Trading Session'}
+              </Typography>
+              <FormControl fullWidth sx={{ mt: 1 }}>
+                <InputLabel id="mobile-session-broker-label">Trading Broker</InputLabel>
+                <Select
+                  labelId="mobile-session-broker-label"
+                  value={selectedTradingConnectionId}
+                  label="Trading Broker"
+                  onChange={(e) => handleBrokerConnectionChange(e.target.value as number)}
+                  disabled={starting}
+                >
+                  <MenuItem value="">Select a valid broker connection</MenuItem>
+                  {upstoxConnections.concat(zerodhaConnections).map((conn) => {
+                    const statusMap = conn.broker_name === 'upstox'
+                      ? connectionStatuses.upstox
+                      : connectionStatuses.zerodha;
+                    const status = statusMap.get(conn.id);
+                    return (
+                      <MenuItem key={conn.id} value={conn.id}>
+                        {conn.broker_name === 'upstox' ? 'Upstox' : 'Zerodha'} (ID: {conn.id}) -{' '}
+                        {status?.broker_user_id || 'Connected'}
+                      </MenuItem>
+                    );
+                  })}
+                </Select>
+              </FormControl>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={warmStart}
+                    onChange={(e) => setWarmStart(e.target.checked)}
+                  />
+                }
+                label="Warm start (load data)"
+                sx={{ mt: 1 }}
+              />
+              <Button
+                variant="contained"
+                startIcon={<StartIcon />}
+                onClick={handleStartSession}
+                disabled={!selectedTradingConnectionId || starting}
+                fullWidth
+                sx={{ minHeight: 44, mt: 1.5 }}
+              >
+                {starting ? 'Starting...' : currentSession ? 'Restart Session' : 'Start Session'}
+              </Button>
+              {upstoxConnections.length === 0 && zerodhaConnections.length === 0 && (
+                <Alert severity="warning" sx={{ mt: 2 }} icon={<WarningIcon />}>
+                  No valid broker connections found. Connect a broker with valid tokens first.
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {!isMobile && (
+      <>
       {/* Current Session Card */}
       {currentSession && (
         <Card sx={{ mb: 3, bgcolor: '#e8f5e9' }}>
@@ -290,7 +448,7 @@ export default function SessionsPage() {
                   variant="outlined" 
                   color="error" 
                   size="small"
-                  onClick={handleClearSession}
+                  onClick={() => setConfirmClear(true)}
                 >
                   Clear
                 </Button>
@@ -378,6 +536,30 @@ export default function SessionsPage() {
           </Typography>
         </Paper>
       )}
+      </>
+      )}
+
+      <ResponsiveDialog
+        open={confirmClear}
+        onClose={() => setConfirmClear(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <CardContent>
+          <Typography variant="subtitle1" fontWeight={700} gutterBottom>
+            Clear this trading session?
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            This removes the session from this device only. Other devices are not affected.
+          </Typography>
+        </CardContent>
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, px: 2, pb: 2 }}>
+          <Button onClick={() => setConfirmClear(false)}>Cancel</Button>
+          <Button onClick={confirmClearSession} color="error" variant="contained">
+            Clear Session
+          </Button>
+        </Box>
+      </ResponsiveDialog>
     </Box>
   );
 }

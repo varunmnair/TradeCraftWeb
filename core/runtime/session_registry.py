@@ -37,6 +37,7 @@ class SessionContext:
     user_record_id: Optional[int] = None
     trading_broker_connection_id: Optional[int] = None
     market_data_connection_id: Optional[int] = None
+    device_id: Optional[str] = None
 
     def refresh_all(self) -> None:
         self.session_cache.refresh_all_caches()
@@ -71,6 +72,7 @@ class SessionRegistry:
         broker_connection_id: Optional[int] = None,
         market_data_connection_id: Optional[int] = None,
         ttl_minutes: int = 60,
+        device_id: Optional[str] = None,
     ) -> SessionContext:
         user_record_id = None
         connection_broker_user_id = None
@@ -131,6 +133,7 @@ class SessionRegistry:
             user_record_id=user_record_id,
             trading_broker_connection_id=broker_connection_id,
             market_data_connection_id=market_data_connection_id,
+            device_id=device_id,
         )
         with self._lock:
             self._records[record_id] = context
@@ -223,6 +226,12 @@ class SessionRegistry:
             and user.user_id != context.user_record_id
         ):
             raise ValueError("Session owned by another user")
+        if (
+            user.device_id
+            and context.device_id
+            and user.device_id != context.device_id
+        ):
+            raise ValueError("Session belongs to another device")
         return context
 
     def get_session(self, session_id: str) -> Optional[SessionContext]:
@@ -287,6 +296,16 @@ class SessionRegistry:
             context.refresh_all()
         return context
 
+    def is_session_data_stale(self, session_id: str) -> bool:
+        """Return True when a live session needs its cached broker data refreshed."""
+        context = self.get_session(session_id)
+        if not context:
+            return True
+        cache = getattr(context, "session_cache", None)
+        if not cache or not hasattr(cache, "is_stale"):
+            return True
+        return bool(cache.is_stale())
+
     def evict(self, session_id: str) -> None:
         """Evict a session and clear all session-scoped data."""
         context = self._records.get(session_id)
@@ -305,6 +324,36 @@ class SessionRegistry:
                 for sid, ctx in self._records.items()
                 if ctx.trading_broker_connection_id == broker_connection_id
                 or ctx.market_data_connection_id == broker_connection_id
+            ]
+            for sid in to_evict:
+                ctx = self._records.get(sid)
+                if ctx:
+                    self._clear_session_data(ctx)
+                del self._records[sid]
+            return len(to_evict)
+
+    def evict_by_device(self, user_id: int, device_id: str) -> int:
+        """Evict only the trading sessions created by one device."""
+        with self._lock:
+            to_evict = [
+                sid
+                for sid, ctx in self._records.items()
+                if ctx.user_record_id == user_id and ctx.device_id == device_id
+            ]
+            for sid in to_evict:
+                ctx = self._records.get(sid)
+                if ctx:
+                    self._clear_session_data(ctx)
+                del self._records[sid]
+            return len(to_evict)
+
+    def evict_all_for_user(self, user_id: int) -> int:
+        """Evict every trading session for a user (logout-all only)."""
+        with self._lock:
+            to_evict = [
+                sid
+                for sid, ctx in self._records.items()
+                if ctx.user_record_id == user_id
             ]
             for sid in to_evict:
                 ctx = self._records.get(sid)
@@ -374,13 +423,36 @@ class SessionRegistry:
         with self._lock:
             return len(self._records)
 
-    def find_session_for_user(self, user_id: int) -> Optional[SessionContext]:
-        """Find an active (non-expired) session for the given user_id."""
+    def find_session_for_user(
+        self, user_id: int, device_id: Optional[str] = None
+    ) -> Optional[SessionContext]:
+        """Find an active session, preferring one owned by the given device."""
         now = datetime.now(timezone.utc)
         with self._lock:
-            for context in self._records.values():
-                if context.user_record_id == user_id:
-                    if context.expires_at and context.expires_at < now:
-                        continue
-                    return context
-        return None
+            matches = [
+                context
+                for context in self._records.values()
+                if context.user_record_id == user_id
+                and not (context.expires_at and context.expires_at < now)
+            ]
+            if device_id:
+                for context in matches:
+                    if context.device_id == device_id:
+                        return context
+            return matches[0] if matches else None
+
+    def find_session_for_connection(
+        self,
+        user_id: int,
+        device_id: Optional[str],
+        broker_connection_id: int,
+    ) -> Optional[SessionContext]:
+        """Find a live session for one broker connection on one device only."""
+        session = self.find_session_for_user(user_id, device_id)
+        if not session:
+            return None
+        if session.trading_broker_connection_id != broker_connection_id:
+            return None
+        if device_id and session.device_id != device_id:
+            return None
+        return session

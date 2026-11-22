@@ -1,15 +1,15 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
+import { ThemeProvider, CssBaseline } from '@mui/material';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SessionProvider } from './context/SessionContext';
+import { BrokerSessionOrchestratorProvider } from './context/BrokerSessionContext';
 import { JobsProvider } from './context/JobsContext';
 import Layout from './components/Layout';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
-import BrokerConnectionsPage from './pages/BrokerConnectionsPage';
-import SessionsPage from './pages/SessionsPage';
+import BrokerAccountsPage from './pages/BrokerAccountsPage';
 import HoldingsPage from './pages/HoldingsPage';
 import BuyEntriesPage from './pages/BuyEntriesPage';
 import EntryStrategiesPage from './pages/EntryStrategiesPage';
@@ -19,12 +19,7 @@ import PlanPage from './pages/PlanPage';
 import GTTPage from './pages/GTTPage';
 import JobsPage from './pages/JobsPage';
 import AdminPage from './pages/AdminPage';
-
-const theme = createTheme({
-  palette: {
-    mode: 'light',
-  },
-});
+import { theme } from './theme';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -53,8 +48,9 @@ export default function App() {
       <BrowserRouter>
         <AuthProvider>
           <SessionProvider>
-            <JobsProvider>
-              <Routes>
+            <BrokerSessionOrchestratorProvider>
+              <JobsProvider>
+                <Routes>
                 <Route
                   path="/login"
                   element={
@@ -86,20 +82,14 @@ export default function App() {
                   element={
                     <PrivateRoute>
                       <Layout>
-                        <BrokerConnectionsPage />
+                        <BrokerAccountsPage />
                       </Layout>
                     </PrivateRoute>
                   }
                 />
                 <Route
                   path="/sessions"
-                  element={
-                    <PrivateRoute>
-                      <Layout>
-                        <SessionsPage />
-                      </Layout>
-                    </PrivateRoute>
-                  }
+                  element={<Navigate to="/broker-connections" replace />}
                 />
                 <Route
                   path="/holdings"
@@ -192,8 +182,9 @@ export default function App() {
                   }
                 />
                 <Route path="/" element={<Navigate to="/dashboard" />} />
-              </Routes>
-            </JobsProvider>
+                </Routes>
+              </JobsProvider>
+            </BrokerSessionOrchestratorProvider>
           </SessionProvider>
         </AuthProvider>
       </BrowserRouter>

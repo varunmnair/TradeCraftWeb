@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import html
+import json
 import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 import requests
-from fastapi import APIRouter, Depends, File, Query, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from api import config
@@ -26,6 +28,16 @@ from core.services.broker_connection_service import BrokerConnectionService
 from core.session_manager import SessionManager
 
 LOGGER = logging.getLogger("tradecraftx.brokers")
+
+OAUTH_FLOW_COOKIE = "tradecraftx_oauth_flow"
+OAUTH_ORIGIN_COOKIE = "tradecraftx_oauth_origin"
+PUBLIC_OAUTH_ERRORS = {
+    "invalid_state": "Authorization failed. Please try again.",
+    "token_exchange_failed": "Broker connection could not be completed. Please try again.",
+    "store_failed": "Broker connection could not be saved. Please try again.",
+    "missing_token": "Broker connection could not be completed. Please try again.",
+    "cancelled": "Broker authorization was cancelled. Please try again.",
+}
 
 # --- Upstox Broker Connection ---
 
@@ -90,9 +102,120 @@ def _get_upstox_env() -> tuple[str, str, str]:
     return client_id, client_secret, redirect_uri
 
 
+def _oauth_allowlist() -> tuple[str, ...]:
+    origins = tuple(
+        origin.rstrip("/")
+        for origin in config.OAUTH_FRONTEND_ORIGINS
+        if origin and origin.strip()
+    )
+    return origins or ("http://localhost:5173", "http://localhost:3000")
+
+
+def _normalize_origin(value: str | None) -> str:
+    if not value:
+        return ""
+    # Cookie values are URL-encoded to avoid Starlette's quoting of ':' and '/'.
+    value = urllib.parse.unquote(str(value).strip().strip('"'))
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except ValueError:
+        return ""
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    return ""
+
+
+def _origin_from_request(request: Request) -> str:
+    """Find an allowlisted UI origin from the OAuth-initiating request."""
+    allowlist = _oauth_allowlist()
+    for candidate in (
+        _normalize_origin(request.headers.get("origin")),
+        _normalize_origin(str(request.base_url)),
+    ):
+        if candidate in allowlist:
+            return candidate
+    return ""
+
+
+def _allowed_oauth_origin(request: Request | None = None) -> str:
+    """Resolve the return origin only from trusted, server-known values."""
+    allowlist = _oauth_allowlist()
+    parsed_return = urllib.parse.urlparse(config.OAUTH_RETURN_URL)
+    candidates = [
+        _normalize_origin(request.cookies.get(OAUTH_ORIGIN_COOKIE))
+        if request
+        else "",
+        _origin_from_request(request) if request else "",
+        (
+            f"{parsed_return.scheme}://{parsed_return.netloc}".rstrip("/")
+            if parsed_return.scheme and parsed_return.netloc
+            else ""
+        ),
+        (config.OAUTH_FRONTEND_ORIGIN or "").rstrip("/"),
+    ]
+    for candidate in candidates:
+        if candidate in allowlist:
+            return candidate
+    return allowlist[0]
+
+
+def _set_oauth_context_cookies(
+    response: Response, request: Request, flow: str
+) -> None:
+    """Remember only non-sensitive navigation context for the callback."""
+    origin = _origin_from_request(request) or _allowed_oauth_origin()
+    for name, value in (
+        (OAUTH_FLOW_COOKIE, flow),
+        (OAUTH_ORIGIN_COOKIE, urllib.parse.quote(origin, safe="")),
+    ):
+        response.set_cookie(
+            name,
+            value,
+            max_age=600,
+            httponly=True,
+            samesite="lax",
+            secure=config.COOKIE_SECURE,
+        )
+
+
+def _oauth_return_url(
+    *, flow: str, broker: str, success: bool, reason: str = "success", request: Request | None = None
+) -> str:
+    """Build a callback URL without ever accepting a client-supplied redirect."""
+    query = urllib.parse.urlencode(
+        {
+            "oauth": "success" if success else "error",
+            "broker": broker,
+            "reason": reason if not success else "success",
+        }
+    )
+    return f"{_allowed_oauth_origin(request)}{config.OAUTH_RETURN_PATH}?{query}"
+
+
+def _flow_from_state(state_token: str) -> str:
+    return "mobile" if str(state_token).startswith("mobile-") else "popup"
+
+
+def _resolve_flow(
+    *, request: Request, state_flow: str | None, query_flow: str | None
+) -> str:
+    if state_flow in {"mobile", "popup"}:
+        return state_flow
+    if query_flow in {"mobile", "popup"}:
+        return query_flow
+    cookie_flow = request.cookies.get(OAUTH_FLOW_COOKIE)
+    return cookie_flow if cookie_flow in {"mobile", "popup"} else "popup"
+
+
+def _public_oauth_message(reason: str) -> str:
+    return PUBLIC_OAUTH_ERRORS.get(reason, "Broker connection could not be completed. Please try again.")
+
+
 @router.get("/connect", response_model=BrokerConnectResponse)
 def connect_upstox(
+    request: Request,
     connection_id: Optional[int] = Query(default=None),
+    flow: Literal["popup", "mobile"] = Query(default="popup"),
     current_user: UserContext = Depends(get_current_user),
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     state_service: BrokerAuthStateService = Depends(get_broker_auth_state_service),
@@ -112,6 +235,7 @@ def connect_upstox(
         user_id=current_user.user_id,
         connection_id=connection.id,
         broker_name="upstox",
+        flow=flow,
     )
     params = urllib.parse.urlencode(
         {
@@ -122,21 +246,86 @@ def connect_upstox(
         }
     )
     authorize_url = f"{UPSTOX_AUTH_URL}?{params}"
-    return {
-        "authorize_url": authorize_url,
-        "state": state,
-        "connection_id": connection.id,
-    }
+    response = JSONResponse(
+        content={
+            "authorize_url": authorize_url,
+            "state": state,
+            "connection_id": connection.id,
+        }
+    )
+    _set_oauth_context_cookies(response, request, flow)
+    return response
 
 
-def _render_html(message: str, success: bool) -> HTMLResponse:
+def _render_html(
+    message: str,
+    success: bool,
+    *,
+    flow: str = "popup",
+    broker: str = "broker",
+    reason: str = "success",
+    request: Request | None = None,
+) -> HTMLResponse:
+    """Render a callback page for desktop popups and mobile same-tab redirects."""
     color = "#0f9d58" if success else "#d93025"
+    safe_message = html.escape(message)
+    return_url = _oauth_return_url(
+        flow=flow,
+        broker=broker,
+        success=success,
+        reason=reason if not success else "success",
+        request=request,
+    )
+    safe_return_url = json.dumps(return_url).replace("<", "\\u003c")
+    safe_origin = json.dumps(_allowed_oauth_origin(request)).replace("<", "\\u003c")
+    safe_broker = json.dumps(broker).replace("<", "\\u003c")
+    safe_reason = json.dumps(reason).replace("<", "\\u003c")
+    is_mobile = flow == "mobile"
+    helper_text = (
+        "Returning to TradeCraftX..."
+        if is_mobile
+        else "You may close this tab."
+    )
+    # A meta refresh is a second navigation path for mobile browsers that block
+    # scripted redirects from cross-origin OAuth responses.
+    refresh_tag = (
+        f'<meta http-equiv="refresh" content="0;url={html.escape(return_url, quote=True)}">'
+        if is_mobile
+        else ""
+    )
     body = f"""
     <html>
-      <head><title>Upstox Connection</title></head>
-      <body style='font-family: sans-serif; padding: 2rem;'>
-        <h2 style='color:{color};'>{message}</h2>
-        <p>You may close this tab.</p>
+      <head>
+        <title>Broker Connection</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        {refresh_tag}
+      </head>
+      <body style='font-family: sans-serif; padding: 2rem; max-width: 40rem; margin: 0 auto;'>
+        <h2 style='color:{color};'>{safe_message}</h2>
+        <p>{helper_text}</p>
+        <p><a href={safe_return_url}>Return to TradeCraftX</a></p>
+        <script>
+        (function () {{
+          var ok = {str(success).lower()};
+          var mobile = {str(is_mobile).lower()};
+          var topLevel = !window.opener;
+          var returnUrl = {safe_return_url};
+          var openerOrigin = {safe_origin};
+          if (!mobile && !topLevel) {{
+            try {{
+              window.opener.postMessage({{
+                type: 'tradecraftx-oauth-complete',
+                success: ok,
+                broker: {safe_broker},
+                reason: {safe_reason}
+              }}, openerOrigin);
+            }} catch (e) {{}}
+            window.close();
+          }} else if (mobile || topLevel) {{
+            window.location.replace(returnUrl);
+          }}
+        }})();
+        </script>
       </body>
     </html>
     """
@@ -147,6 +336,8 @@ def _render_html(message: str, success: bool) -> HTMLResponse:
 def upstox_callback(
     code: str,
     state: str,
+    request: Request,
+    flow: Literal["popup", "mobile"] | None = Query(default=None),
     state_service: BrokerAuthStateService = Depends(get_broker_auth_state_service),
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     session_manager: SessionManager = Depends(get_session_manager),
@@ -156,7 +347,30 @@ def upstox_callback(
         state_info = state_service.consume_state(state)
     except ValueError as exc:
         LOGGER.warning("Upstox callback: invalid state token: %s", exc)
-        return _render_html(f"Authorization failed: {exc}", success=False)
+        return _render_html(
+            _public_oauth_message("invalid_state"),
+            success=False,
+            flow=_resolve_flow(request=request, state_flow=None, query_flow=flow),
+            broker="upstox",
+            reason="invalid_state",
+            request=request,
+        )
+
+    resolved_flow = _resolve_flow(
+        request=request,
+        state_flow=_flow_from_state(state_info.state_token),
+        query_flow=flow,
+    )
+
+    def render(message: str, success: bool, reason: str = "success") -> HTMLResponse:
+        return _render_html(
+            message,
+            success,
+            flow=resolved_flow,
+            broker="upstox",
+            reason=reason,
+            request=request,
+        )
 
     connection = broker_service.ensure_connection(
         user_id=state_info.user_id,
@@ -175,9 +389,7 @@ def upstox_callback(
             connection.id,
             state_info.user_id,
         )
-        return _render_html(
-            "Upstox already connected. You may close this tab.", success=True
-        )
+        return render("Upstox already connected. You may close this tab.", True)
 
     client_id, client_secret, redirect_uri = _get_upstox_env()
     token_payload = {
@@ -194,7 +406,11 @@ def upstox_callback(
         response = requests.post(UPSTOX_TOKEN_URL, data=token_payload, timeout=30)
     except requests.RequestException as exc:
         LOGGER.error("Upstox callback: token exchange request failed: %s", exc)
-        return _render_html(f"Token exchange failed: {exc}", success=False)
+        return render(
+            _public_oauth_message("token_exchange_failed"),
+            False,
+            "token_exchange_failed",
+        )
 
     response_text = response.text
     print(
@@ -229,7 +445,11 @@ def upstox_callback(
         except Exception:
             error_message = f"upstream error (status {response.status_code})"
             print("Upstox callback DEBUG: failed to parse error JSON")
-        return _render_html(f"Token exchange failed: {error_message}", success=False)
+        return render(
+            _public_oauth_message("token_exchange_failed"),
+            False,
+            "token_exchange_failed",
+        )
     token_data = response.json()
     expires_value = token_data.get("expires_in")
     expires_iso = None
@@ -275,8 +495,8 @@ def upstox_callback(
         "raw_profile": token_data.get("profile"),
     }
     if not bundle_payload["access_token"]:
-        return _render_html(
-            "Token exchange failed: missing access token", success=False
+        return render(
+            _public_oauth_message("missing_token"), False, "missing_token"
         )
     session_manager.store_tokens(
         "upstox",
@@ -297,9 +517,7 @@ def upstox_callback(
         finally:
             db.close()
     
-    return _render_html(
-        "✅ Upstox connected successfully. You may close this tab.", success=True
-    )
+    return render("✅ Upstox connected successfully. You may close this tab.", True)
 
 
 @router.get("/status", response_model=BrokerStatusResponse)
@@ -436,7 +654,9 @@ def _get_kite_env() -> tuple[str, str, str]:
     },
 )
 def connect_zerodha(
+    request: Request,
     connection_id: Optional[int] = Query(default=None),
+    flow: Literal["popup", "mobile"] = Query(default="popup"),
     current_user: UserContext = Depends(get_current_user),
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     state_service: BrokerAuthStateService = Depends(get_broker_auth_state_service),
@@ -461,6 +681,7 @@ def connect_zerodha(
         user_id=current_user.user_id,
         connection_id=connection.id,
         broker_name="zerodha",
+        flow=flow,
     )
     # Use redirect_params to include state in callback URL
     params = urllib.parse.urlencode(
@@ -471,17 +692,23 @@ def connect_zerodha(
         }
     )
     authorize_url = f"{KITE_AUTH_URL}?{params}"
-    return {
-        "authorize_url": authorize_url,
-        "state": state,
-        "connection_id": connection.id,
-    }
+    response = JSONResponse(
+        content={
+            "authorize_url": authorize_url,
+            "state": state,
+            "connection_id": connection.id,
+        }
+    )
+    _set_oauth_context_cookies(response, request, flow)
+    return response
 
 
 @zerodha_router.get("/callback")
 def zerodha_callback(
     request_token: str,
     state: str,
+    request: Request,
+    flow: Literal["popup", "mobile"] | None = Query(default=None),
     state_service: BrokerAuthStateService = Depends(get_broker_auth_state_service),
     broker_service: BrokerConnectionService = Depends(get_broker_connection_service),
     session_manager: SessionManager = Depends(get_session_manager),
@@ -490,7 +717,30 @@ def zerodha_callback(
         state_info = state_service.consume_state(state)
     except ValueError as exc:
         LOGGER.warning("Zerodha callback: invalid state token: %s", exc)
-        return _render_html(f"Authorization failed: {exc}", success=False)
+        return _render_html(
+            _public_oauth_message("invalid_state"),
+            success=False,
+            flow=_resolve_flow(request=request, state_flow=None, query_flow=flow),
+            broker="zerodha",
+            reason="invalid_state",
+            request=request,
+        )
+
+    resolved_flow = _resolve_flow(
+        request=request,
+        state_flow=_flow_from_state(state_info.state_token),
+        query_flow=flow,
+    )
+
+    def render(message: str, success: bool, reason: str = "success") -> HTMLResponse:
+        return _render_html(
+            message,
+            success,
+            flow=resolved_flow,
+            broker="zerodha",
+            reason=reason,
+            request=request,
+        )
 
     connection = broker_service.ensure_connection(
         user_id=state_info.user_id,
@@ -509,9 +759,7 @@ def zerodha_callback(
             connection.id,
             state_info.user_id,
         )
-        return _render_html(
-            "Zerodha already connected. You may close this tab.", success=True
-        )
+        return render("Zerodha already connected. You may close this tab.", True)
 
     api_key, api_secret, redirect_uri = _get_kite_env()
     checksum = hashlib.sha256(
@@ -527,9 +775,19 @@ def zerodha_callback(
         response.raise_for_status()
         token_data = response.json()
     except requests.RequestException as exc:
-        return _render_html(f"Token exchange failed: {exc}", success=False)
-    except (ValueError, requests.HTTPError):
-        return _render_html("Token exchange failed: upstream error", success=False)
+        LOGGER.error("Zerodha callback: token exchange request failed: %s", exc)
+        return render(
+            _public_oauth_message("token_exchange_failed"),
+            False,
+            "token_exchange_failed",
+        )
+    except (ValueError, requests.HTTPError) as exc:
+        LOGGER.error("Zerodha callback: invalid token response: %s", exc)
+        return render(
+            _public_oauth_message("token_exchange_failed"),
+            False,
+            "token_exchange_failed",
+        )
 
     # Debug: log what we got
     import logging
@@ -543,9 +801,9 @@ def zerodha_callback(
         else None
     )
     if not access_token:
-        return _render_html(
-            f"Token exchange failed: missing access token. Response: {token_data}",
-            success=False,
+        LOGGER.error("Zerodha callback: token response did not contain an access token")
+        return render(
+            _public_oauth_message("missing_token"), False, "missing_token"
         )
 
     bundle_payload = {
@@ -619,7 +877,9 @@ def zerodha_callback(
         LOGGER.error(
             "Failed to store zerodha tokens for connection_id=%d: %s", connection.id, e
         )
-        return _render_html(f"Failed to store tokens: {e}", success=False)
+        return render(
+            _public_oauth_message("store_failed"), False, "store_failed"
+        )
 
     broker_user_id_from_oauth = token_data.get("data", {}).get("user_id")
     if broker_user_id_from_oauth:
@@ -634,9 +894,7 @@ def zerodha_callback(
         finally:
             db.close()
 
-    return _render_html(
-        "✅ Zerodha connected successfully. You may close this tab.", success=True
-    )
+    return render("✅ Zerodha connected successfully. You may close this tab.", True)
 
 
 @zerodha_router.get("/status", response_model=ZerodhaStatusResponse)

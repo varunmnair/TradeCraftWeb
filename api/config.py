@@ -76,6 +76,39 @@ COOKIE_SAMESITE = (
     "lax" if not _get_env("COOKIE_SAMESITE") else _get_env("COOKIE_SAMESITE")
 )
 
+# Browser page to return to after a broker OAuth callback. Popup windows still
+# close automatically; full-page mobile redirects land back on this route.
+# Only origins in this explicit allowlist may receive a callback redirect.
+OAUTH_RETURN_PATH = "/broker-connections"
+_default_oauth_origin = "http://localhost:5173" if IS_DEV else ""
+OAUTH_FRONTEND_ORIGIN = (_get_env("OAUTH_FRONTEND_ORIGIN", _default_oauth_origin) or "").rstrip("/")
+
+# CORS origins are also explicitly trusted UI origins. This keeps the built UI
+# served from the API origin working without requiring a second env variable.
+_cors_origin_values = [
+    origin.strip().rstrip("/")
+    for origin in (_get_env("CORS_ALLOWED_ORIGINS") or "").split(",")
+    if origin.strip() and origin.strip() != "*"
+]
+_explicit_oauth_origins = [
+    origin.strip().rstrip("/")
+    for origin in (_get_env("OAUTH_FRONTEND_ORIGINS") or "").split(",")
+    if origin.strip()
+]
+if OAUTH_FRONTEND_ORIGIN:
+    _explicit_oauth_origins.insert(0, OAUTH_FRONTEND_ORIGIN)
+
+OAUTH_FRONTEND_ORIGINS = tuple(
+    dict.fromkeys(_explicit_oauth_origins + _cors_origin_values)
+) or ("http://localhost:5173", "http://localhost:3000")
+if not OAUTH_FRONTEND_ORIGIN:
+    OAUTH_FRONTEND_ORIGIN = OAUTH_FRONTEND_ORIGINS[0]
+
+OAUTH_RETURN_URL = _get_env(
+    "OAUTH_RETURN_URL",
+    f"{OAUTH_FRONTEND_ORIGIN}{OAUTH_RETURN_PATH}",
+)
+
 # Token encryption - required in prod
 TOKEN_ENCRYPTION_KEY = _get_env("TOKEN_ENCRYPTION_KEY")
 ALLOW_INSECURE_TOKENS = _get_bool_env("ALLOW_INSECURE_TOKENS", IS_DEV)

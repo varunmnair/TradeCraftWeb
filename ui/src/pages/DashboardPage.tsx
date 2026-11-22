@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { Box, Typography, Grid, Paper, Card, CardContent, CardActionArea } from '@mui/material';
 import {
   AccountBalance as BrokerIcon,
-  PlayCircle as SessionIcon,
   Assessment as HoldingsIcon,
   Assignment as PlanIcon,
   Notifications as GttIcon,
@@ -12,8 +11,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 const quickLinks = [
-  { text: 'Broker Connections', icon: <BrokerIcon sx={{ fontSize: 40 }} />, path: '/broker-connections', color: '#1976d2' },
-  { text: 'Sessions', icon: <SessionIcon sx={{ fontSize: 40 }} />, path: '/sessions', color: '#388e3c' },
+  { text: 'Broker Accounts', icon: <BrokerIcon sx={{ fontSize: 40 }} />, path: '/broker-connections', color: '#1976d2' },
   { text: 'Holdings', icon: <HoldingsIcon sx={{ fontSize: 40 }} />, path: '/holdings', color: '#d32f2f' },
   { text: 'Plan', icon: <PlanIcon sx={{ fontSize: 40 }} />, path: '/plan', color: '#7b1fa2' },
   { text: 'GTT Orders', icon: <GttIcon sx={{ fontSize: 40 }} />, path: '/gtt', color: '#f57c00' },
@@ -55,17 +53,26 @@ export default function DashboardPage() {
       <Typography variant="h6" gutterBottom>
         Quick Links
       </Typography>
-      <Grid container spacing={3}>
+      <Grid container spacing={{ xs: 2, sm: 3 }}>
         {quickLinks.map((item) => (
-          <Grid item xs={12} sm={6} md={4} key={item.text}>
-            <Card>
+          <Grid item xs={12} sm={6} md={4} key={item.text} sx={{ minWidth: 0 }}>
+            <Card sx={{ width: '100%' }}>
               <CardActionArea
                 onClick={() => navigate(item.path)}
-                sx={{ p: 2, textAlign: 'center' }}
+                sx={{
+                  p: { xs: 2.5, sm: 2 },
+                  minHeight: { xs: 96, sm: 'auto' },
+                  textAlign: 'center',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'center',
+                }}
               >
                 <Box sx={{ color: item.color, mb: 1 }}>{item.icon}</Box>
-                <CardContent>
-                  <Typography variant="h6">{item.text}</Typography>
+                <CardContent sx={{ p: { xs: 1, sm: 2 } }}>
+                  <Typography variant="h6" sx={{ fontSize: { xs: '1.1rem', sm: '1.25rem' } }}>
+                    {item.text}
+                  </Typography>
                 </CardContent>
               </CardActionArea>
             </Card>

@@ -9,10 +9,11 @@ import {
   Chip,
   TextField,
   InputAdornment,
-  Dialog,
   DialogTitle,
   DialogContent,
   DialogActions,
+  useMediaQuery,
+  useTheme,
   Table,
   TableBody,
   TableCell,
@@ -29,19 +30,14 @@ import {
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
-
-interface GTTOrder {
-  id?: string | number;
-  'GTT ID': string;
-  Symbol: string;
-  Exchange: string;
-  'Trigger Price': number;
-  LTP: number | null;
-  'Variance (%)': number | null;
-  Qty: number;
-  'Buy Amount': number | null;
-  cmp_available?: boolean;
-}
+import { ResponsiveDialog } from '../components/ResponsiveDialog';
+import { ResponsivePageHeader } from '../components/ResponsivePageHeader';
+import { GTTMobileActionBar } from '../components/gtt/GTTMobileActionBar';
+import { GTTMobileControls } from '../components/gtt/GTTMobileControls';
+import { MobileGTTOrderCard } from '../components/gtt/MobileGTTOrderCard';
+import type { GTTOrder, GttSideFilter, GttStatusFilter } from '../components/gtt/gttDisplay';
+import { orderSide, orderStatus } from '../components/gtt/gttDisplay';
+import { newPlacementKey } from '../utils/placementIdempotency';
 
 const WARNING_TEXT = 'DELETE';
 
@@ -58,7 +54,12 @@ export default function GTTPage() {
   const [searchText, setSearchText] = useState('');
   const [varianceThreshold, setVarianceThreshold] = useState<number | ''>('');
   const [varianceFilterType, setVarianceFilterType] = useState<'gt' | 'lt'>('gt');
+  const [sideFilter, setSideFilter] = useState<GttSideFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<GttStatusFilter>('all');
   const [selectedRows, setSelectedRows] = useState<GridRowSelectionModel>([]);
+
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   
   // Delete dialog
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -222,9 +223,20 @@ export default function GTTPage() {
     // Search filter
     if (searchText) {
       const search = searchText.toLowerCase();
-      result = result.filter(o => 
+      result = result.filter(o =>
         o.Symbol?.toLowerCase().includes(search)
       );
+    }
+
+    if (sideFilter !== 'all') {
+      result = result.filter((order) => orderSide(order) === sideFilter);
+    }
+
+    if (statusFilter !== 'all') {
+      result = result.filter((order) => {
+        const status = orderStatus(order);
+        return statusFilter === 'active' ? status === 'active' : status !== 'active';
+      });
     }
     
     // Variance filter
@@ -244,7 +256,7 @@ export default function GTTPage() {
     // but we keep the checkbox for UI clarity
     
     return result;
-  }, [orders, searchText, varianceThreshold, varianceFilterType]);
+  }, [orders, searchText, varianceThreshold, varianceFilterType, sideFilter, statusFilter]);
 
   // Total amount and duplicates
   const totalAmount = useMemo(() => {
@@ -263,14 +275,18 @@ export default function GTTPage() {
     fetchOrders();
   };
 
-  const handleDeleteClick = () => {
-    if (selectedRows.length === 0) return;
+  const handleDeleteClick = (rowId?: string | number) => {
+    if (rowId !== undefined) {
+      setSelectedRows([rowId]);
+    }
+    if (selectedRows.length === 0 && rowId === undefined) return;
+    setError('');
     setDeleteDialogOpen(true);
     setDeleteConfirmText('');
   };
 
   const handleDeleteConfirm = async () => {
-    if (deleteConfirmText !== WARNING_TEXT || !sessionId) return;
+    if (deleteConfirmText !== WARNING_TEXT || !sessionId || deleting) return;
     
     setDeleting(true);
     setError('');
@@ -293,15 +309,19 @@ export default function GTTPage() {
     }
   };
 
-  const handleNormalizeClick = () => {
-    if (selectedRows.length === 0) return;
+  const handleNormalizeClick = (rowId?: string | number) => {
+    if (rowId !== undefined) {
+      setSelectedRows([rowId]);
+    }
+    if (selectedRows.length === 0 && rowId === undefined) return;
+    setError('');
     setNormalizeDialogOpen(true);
     setNormalizeConfirmText('');
     setNormalizeResult(null);
   };
 
   const handleNormalizeConfirm = async () => {
-    if (normalizeConfirmText !== 'ADJUST' || !sessionId) return;
+    if (normalizeConfirmText !== 'ADJUST' || !sessionId || normalizing) return;
     
     setNormalizing(true);
     setError('');
@@ -311,15 +331,18 @@ export default function GTTPage() {
       const selectedOrders = orders.filter(o => o.id !== undefined && selectedRows.includes(o.id));
       const orderIds = selectedOrders.map(o => String(o['GTT ID'] || o.Symbol));
       
-      const result = await api.adjustGTTOrders(sessionId, orderIds, targetVariance);
+      const result = await api.adjustGTTOrders(
+        sessionId,
+        orderIds,
+        targetVariance,
+        newPlacementKey('gtt-adjust'),
+      );
       
       setNormalizeResult(result);
       setSuccessMsg(`Normalized variance: ${result.adjusted.length} adjusted, ${result.failed.length} failed`);
       
-      // Refresh after a short delay to show results
-      setTimeout(() => {
-        fetchOrders();
-      }, 1500);
+      // Refresh after completion so the browser and broker state stay aligned.
+      fetchOrders();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to normalize variance');
     } finally {
@@ -336,9 +359,7 @@ export default function GTTPage() {
   if (!sessionId) {
     return (
       <Box>
-        <Typography variant="h4" gutterBottom>
-          Buy Orders
-        </Typography>
+        <ResponsivePageHeader title="Buy Orders" />
         <Alert severity="warning">
           No active session. Please start a session from the Sessions page first.
         </Alert>
@@ -347,10 +368,11 @@ export default function GTTPage() {
   }
 
   return (
-    <Box>
-      <Typography variant="h4" gutterBottom>
-        Buy Orders
-      </Typography>
+    <Box sx={{ pb: isMobile ? '88px' : 0 }}>
+      <ResponsivePageHeader
+        title="Buy Orders"
+        description="Active GTT buy orders for this session"
+      />
 
       {/* Total Amount Display */}
       {orders.length > 0 && (
@@ -389,6 +411,53 @@ export default function GTTPage() {
         </Alert>
       )}
 
+      {isMobile ? (
+        <>
+          <GTTMobileControls
+            searchText={searchText}
+            sideFilter={sideFilter}
+            statusFilter={statusFilter}
+            varianceThreshold={varianceThreshold}
+            varianceFilterType={varianceFilterType}
+            loading={loading}
+            onSearch={setSearchText}
+            onSideFilter={setSideFilter}
+            onStatusFilter={setStatusFilter}
+            onVarianceThreshold={setVarianceThreshold}
+            onVarianceFilterType={setVarianceFilterType}
+            onRefresh={handleRefresh}
+          />
+
+          {loading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : filteredOrders.length === 0 ? (
+            <Alert severity="info">
+              {orders.length === 0 ? 'No GTT orders found' : 'No orders match filters'}
+            </Alert>
+          ) : (
+            filteredOrders.map((order) => (
+              <MobileGTTOrderCard
+                key={String(order.id ?? order['GTT ID'])}
+                order={order}
+                selected={selectedRows.includes(order.id as string | number)}
+                duplicate={duplicateSymbols.has(order.Symbol)}
+                onToggleSelect={() =>
+                  setSelectedRows((current) =>
+                    current.includes(order.id as string | number)
+                      ? current.filter((id) => id !== order.id)
+                      : [...current, order.id as string | number],
+                  )
+                }
+                onDelete={() => handleDeleteClick(order.id)}
+                onNormalize={() => handleNormalizeClick(order.id)}
+              />
+            ))
+          )}
+        </>
+      ) : (
+        <>
       {/* Toolbar */}
       <Paper sx={{ p: 2, mb: 2, overflowX: 'auto' }}>
         <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'nowrap', minWidth: 'max-content' }}>
@@ -453,7 +522,7 @@ export default function GTTPage() {
             variant="contained"
             color="error"
             startIcon={<DeleteIcon />}
-            onClick={handleDeleteClick}
+            onClick={() => handleDeleteClick()}
             disabled={selectedRows.length === 0}
           >
             Delete Selected
@@ -463,7 +532,7 @@ export default function GTTPage() {
             variant="contained"
             color="info"
             startIcon={<NormalizeIcon />}
-            onClick={handleNormalizeClick}
+            onClick={() => handleNormalizeClick()}
             disabled={selectedRows.length === 0}
           >
             Normalize Variance
@@ -515,9 +584,19 @@ export default function GTTPage() {
           <Chip label={`Selected: ${selectedRows.length}`} size="small" color="secondary" />
         </Box>
       </Paper>
+      </>
+      )}
+
+      <GTTMobileActionBar
+        count={selectedRows.length}
+        disabled={deleting || normalizing}
+        onDelete={() => handleDeleteClick()}
+        onNormalize={() => handleNormalizeClick()}
+        onClear={() => setSelectedRows([])}
+      />
 
       {/* Delete Confirmation Dialog */}
-      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)} maxWidth="sm" fullWidth>
+      <ResponsiveDialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>
           Confirm Delete GTT Orders
         </DialogTitle>
@@ -532,7 +611,9 @@ export default function GTTPage() {
                 <TableRow>
                   <TableCell>GTT ID</TableCell>
                   <TableCell>Symbol</TableCell>
+                  <TableCell>Qty</TableCell>
                   <TableCell>Trigger</TableCell>
+                  <TableCell>Order Price</TableCell>
                   <TableCell>CMP</TableCell>
                 </TableRow>
               </TableHead>
@@ -544,14 +625,16 @@ export default function GTTPage() {
                     <TableRow key={order['GTT ID'] || order.Symbol || id}>
                       <TableCell>{order['GTT ID'] || '-'}</TableCell>
                       <TableCell>{order.Symbol}</TableCell>
+                      <TableCell>{order.Qty}</TableCell>
                       <TableCell>{order['Trigger Price']}</TableCell>
+                      <TableCell>{order['Order Price'] ?? order['Trigger Price']}</TableCell>
                       <TableCell>{order.LTP !== null && order.LTP !== undefined ? order.LTP.toFixed(2) : 'N/A'}</TableCell>
                     </TableRow>
                   );
                 })}
                 {selectedRows.length > 10 && (
                   <TableRow>
-                    <TableCell colSpan={4}>...and {selectedRows.length - 10} more</TableCell>
+                    <TableCell colSpan={6}>...and {selectedRows.length - 10} more</TableCell>
                   </TableRow>
                 )}
               </TableBody>
@@ -581,10 +664,10 @@ export default function GTTPage() {
             {deleting ? 'Deleting...' : `Delete ${selectedRows.length} Orders`}
           </Button>
         </DialogActions>
-      </Dialog>
+      </ResponsiveDialog>
 
       {/* Normalize Variance Dialog */}
-      <Dialog open={normalizeDialogOpen} onClose={handleCloseNormalizeDialog} maxWidth="sm" fullWidth>
+      <ResponsiveDialog open={normalizeDialogOpen} onClose={handleCloseNormalizeDialog} maxWidth="sm" fullWidth>
         <DialogTitle>
           Normalize Variance for Selected Orders
         </DialogTitle>
@@ -678,7 +761,9 @@ export default function GTTPage() {
                     <TableRow>
                       <TableCell>GTT ID</TableCell>
                       <TableCell>Symbol</TableCell>
+                      <TableCell>Qty</TableCell>
                       <TableCell>Current Trigger</TableCell>
+                      <TableCell>Order Price</TableCell>
                       <TableCell>CMP</TableCell>
                       <TableCell>Current Var %</TableCell>
                     </TableRow>
@@ -694,7 +779,9 @@ export default function GTTPage() {
                         <TableRow key={order['GTT ID'] || order.Symbol || id}>
                           <TableCell>{order['GTT ID'] || '-'}</TableCell>
                           <TableCell>{order.Symbol}</TableCell>
+                          <TableCell>{order.Qty}</TableCell>
                           <TableCell>{order['Trigger Price']}</TableCell>
+                          <TableCell>{order['Order Price'] ?? order['Trigger Price']}</TableCell>
                           <TableCell>{hasCmp && ltp !== null ? ltp.toFixed(2) : 'N/A'}</TableCell>
                           <TableCell>{variance !== null && variance !== undefined ? `${variance.toFixed(2)}%` : 'N/A'}</TableCell>
                         </TableRow>
@@ -702,7 +789,7 @@ export default function GTTPage() {
                     })}
                     {selectedRows.length > 10 && (
                       <TableRow>
-                        <TableCell colSpan={5}>...and {selectedRows.length - 10} more</TableCell>
+                        <TableCell colSpan={7}>...and {selectedRows.length - 10} more</TableCell>
                       </TableRow>
                     )}
                   </TableBody>
@@ -742,7 +829,7 @@ export default function GTTPage() {
             </>
           )}
         </DialogActions>
-      </Dialog>
+      </ResponsiveDialog>
     </Box>
   );
 }

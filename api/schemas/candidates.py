@@ -70,6 +70,10 @@ class CandidateGenerateResponse(BaseModel):
 class CandidatePlaceRequest(BaseModel):
     symbols: list[str] = Field(default_factory=list, description="Symbols to place orders for")
     apply_risk_management: bool = False
+    idempotency_key: str | None = Field(
+        default=None,
+        description="Client-generated key that makes a placement retry safe",
+    )
 
 
 class PlaceOrderResult(BaseModel):
@@ -81,6 +85,9 @@ class PlaceOrderResult(BaseModel):
     amount: float
     status: str
     remarks: str = ""
+    order_id: str | None = None
+    broker: str | None = None
+    broker_connection_id: int | None = None
 
 
 class CandidatePlaceResponse(BaseModel):
@@ -88,6 +95,9 @@ class CandidatePlaceResponse(BaseModel):
     skipped: int = 0
     errors: list[str] = Field(default_factory=list)
     results: list[PlaceOrderResult] = Field(default_factory=list)
+    uncertain: int = 0
+    idempotency_key: str | None = None
+    replayed: bool = False
 
 
 class CandidateLatestResponse(BaseModel):

@@ -7,6 +7,7 @@ class UserContext:
     email: str
     role: str
     is_dev: bool = False
+    device_id: str | None = None
     active_broker_connection_id: int | None = None
     trading_enabled: bool = False
     is_premium: bool = False

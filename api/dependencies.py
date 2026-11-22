@@ -16,10 +16,12 @@ from core.services.ai_service import AIService
 from core.services.auth_service import AuthService
 from core.services.broker_auth_service import BrokerAuthStateService
 from core.services.broker_connection_service import BrokerConnectionService
+from core.services.broker_session_orchestrator import BrokerSessionOrchestrator
 from core.services.entry_plan_service import EntryPlanService
 from core.services.gtt_service import GTTService
 from core.services.holdings_service import HoldingsService
 from core.services.ohlcv_refresh_service import OhlcvRefreshService
+from core.services.placement_guard import PlacementGuardService
 from core.services.risk_service import RiskService
 from core.services.session_service import SessionService
 from core.services.symbol_catalog_service import SymbolCatalogService
@@ -50,8 +52,15 @@ _gtt_service = GTTService(_session_registry)
 _ai_service = AIService(_session_registry)
 _broker_connection_service = BrokerConnectionService()
 _broker_auth_state_service = BrokerAuthStateService()
+_broker_session_orchestrator = BrokerSessionOrchestrator(
+    connection_service=_broker_connection_service,
+    session_service=_session_service,
+    session_registry=_session_registry,
+    session_manager=_session_manager,
+)
 _auth_service = AuthService()
 _confirm_store = get_confirm_store()
+_placement_guard = PlacementGuardService(SessionLocal)
 _job_runner = JobRunner(SessionLocal, session_registry=_session_registry)
 _trades_service = get_trades_service()
 _symbol_catalog_service = SymbolCatalogService()
@@ -97,6 +106,45 @@ def _sync_upstox_trades_job(payload: dict) -> dict:
         return {"error": str(e)}
 
 
+def _gtt_apply_job(payload: dict) -> dict:
+    """Apply GTT orders and persist the final per-order placement outcome."""
+    key = payload.get("idempotency_key")
+    user_id = payload.get("user_id")
+    try:
+        result = _gtt_service.place_orders(
+            payload["session_id"],
+            payload.get("plan", []),
+            dry_run=False,
+        )
+        if key and user_id:
+            statuses = [
+                str(item.get("status", "")).lower()
+                for item in result.get("results", [])
+            ]
+            if "uncertain" in statuses:
+                status = "uncertain"
+            elif any(s in {"fail", "failed"} for s in statuses):
+                status = "failed"
+            else:
+                status = "completed"
+            _placement_guard.complete(
+                user_id=int(user_id),
+                idempotency_key=key,
+                status=status,
+                result=result,
+            )
+        return result
+    except Exception as exc:
+        if key and user_id:
+            _placement_guard.complete(
+                user_id=int(user_id),
+                idempotency_key=key,
+                status="failed",
+                error=str(exc),
+            )
+        raise
+
+
 def _register_jobs() -> None:
     _job_runner.register_handler(
         JOB_HOLDINGS_ANALYZE,
@@ -137,14 +185,7 @@ def _register_jobs() -> None:
             dry_run=True,
         ),
     )
-    _job_runner.register_handler(
-        JOB_GTT_APPLY,
-        lambda payload: _gtt_service.place_orders(
-            payload["session_id"],
-            payload.get("plan", []),
-            dry_run=False,
-        ),
-    )
+    _job_runner.register_handler(JOB_GTT_APPLY, _gtt_apply_job)
     _job_runner.register_handler(
         JOB_TRADES_SYNC,
         lambda payload: _sync_upstox_trades_job(payload),
@@ -218,6 +259,10 @@ def get_session_service() -> SessionService:
     return _session_service
 
 
+def get_broker_session_orchestrator() -> BrokerSessionOrchestrator:
+    return _broker_session_orchestrator
+
+
 def get_session_manager() -> SessionManager:
     return _session_manager
 
@@ -236,6 +281,10 @@ def get_risk_service() -> RiskService:
 
 def get_gtt_service() -> GTTService:
     return _gtt_service
+
+
+def get_placement_guard() -> PlacementGuardService:
+    return _placement_guard
 
 
 def get_ai_service() -> AIService:
@@ -282,12 +331,19 @@ def get_current_user(
     request: Request,
     auth_service: AuthService = Depends(get_auth_service),
 ) -> UserContext:
-    from core.auth.active_connection_store import get_active_connection_store
+    from core.auth.active_connection_store import (
+        DEFAULT_DEVICE_ID,
+        get_active_connection_store,
+    )
+
+    device_id = request.headers.get("X-Device-Id") or DEFAULT_DEVICE_ID
 
     auth_header = request.headers.get("Authorization")
     if not auth_header:
         if config.IS_DEV:
-            return auth_service.ensure_dev_user()
+            dev_user = auth_service.ensure_dev_user()
+            dev_user.device_id = device_id
+            return dev_user
         raise ServiceError(
             "Missing Authorization header", error_code="unauthorized", http_status=401
         )
@@ -299,8 +355,11 @@ def get_current_user(
         )
     try:
         user_context = auth_service.decode_token(token)
+        user_context.device_id = device_id
         active_store = get_active_connection_store()
-        active_connection_id = active_store.get_active_connection(user_context.user_id)
+        active_connection_id = active_store.get_active_connection(
+            user_context.user_id, device_id
+        )
         user_context.active_broker_connection_id = active_connection_id
         return user_context
     except TokenError as exc:

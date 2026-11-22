@@ -15,9 +15,18 @@ class BrokerAuthStateService:
         self._ttl = ttl_seconds
 
     def create_state(
-        self, *, user_id: int, connection_id: int, broker_name: str
+        self,
+        *,
+        user_id: int,
+        connection_id: int,
+        broker_name: str,
+        flow: str = "popup",
     ) -> str:
-        token = secrets.token_urlsafe(24)
+        # The flow marker is part of the opaque, DB-validated state token. A
+        # callback cannot choose navigation mode; it can only echo the token
+        # that this service issued. Older tokens without a prefix stay popups.
+        safe_flow = "mobile" if flow == "mobile" else "popup"
+        token = f"{safe_flow}-{secrets.token_urlsafe(24)}"
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._ttl)
         with self._session_factory() as session:
             state = models.BrokerAuthState(

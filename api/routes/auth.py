@@ -213,7 +213,8 @@ def logout(
 ):
     import logging
 
-    from api.dependencies import get_session_manager, get_session_registry
+    from api.dependencies import get_session_registry
+    from core.auth.active_connection_store import get_active_connection_store
 
     logger = logging.getLogger("tradecraftx")
 
@@ -223,27 +224,70 @@ def logout(
         auth_service.logout(refresh_token)
 
     if current_user.user_id:
-        session_manager = get_session_manager()
-        session_registry = get_session_registry()
-
-        from api.dependencies import get_broker_connection_service
-
-        broker_service = get_broker_connection_service()
-        connections = broker_service.list_connections(
-            user_id=current_user.user_id,
+        # Only this device's trading context is closed. Broker connection rows
+        # remain reusable account-level resources for other logged-in devices.
+        get_active_connection_store().clear_active_connection(
+            current_user.user_id, current_user.device_id
         )
-
-        session_manager.disconnect("upstox", user_id=current_user.user_id)
-        session_manager.disconnect("zerodha", user_id=current_user.user_id)
-
-        for conn in connections:
-            evicted = session_registry.evict_by_connection(conn.id)
-            if evicted > 0:
-                logger.info(
-                    f"Evicted {evicted} sessions after logout disconnect for connection {conn.id}"
-                )
+        evicted = get_session_registry().evict_by_device(
+            current_user.user_id, current_user.device_id or "default-device"
+        )
+        if evicted:
+            logger.info(
+                "Evicted %s trading sessions for user=%s device=%s on logout",
+                evicted,
+                current_user.user_id,
+                current_user.device_id,
+            )
 
     response = JSONResponse(content={"success": True})
+    response.set_cookie(**_clear_refresh_cookie())
+    return response
+
+
+@router.post("/logout-all")
+def logout_all(
+    request: Request,
+    current_user: UserContext = Depends(get_current_user),
+):
+    """Revoke every refresh token and trading session for the user.
+
+    This is intentionally a separate endpoint; normal logout is per-device.
+    """
+    import logging
+
+    from api.dependencies import get_session_registry
+    from core.auth.active_connection_store import get_active_connection_store
+
+    logger = logging.getLogger("tradecraftx")
+    if not current_user.user_id:
+        raise ServiceError(
+            "User context missing", error_code="unauthorized", http_status=401
+        )
+
+    auth_service = get_auth_service()
+    auth_service.revoke_all_user_tokens(current_user.user_id)
+    cleared_devices = get_active_connection_store().clear_all_for_user(
+        current_user.user_id
+    )
+    evicted_sessions = get_session_registry().evict_all_for_user(current_user.user_id)
+    log_audit(
+        "logout_all",
+        current_user,
+        "auth",
+        metadata={
+            "cleared_devices": cleared_devices,
+            "evicted_sessions": evicted_sessions,
+        },
+    )
+    logger.info(
+        "Logout-all for user=%s cleared %s device selections and %s sessions",
+        current_user.user_id,
+        cleared_devices,
+        evicted_sessions,
+    )
+
+    response = JSONResponse(content={"success": True, "all_devices": True})
     response.set_cookie(**_clear_refresh_cookie())
     return response
 

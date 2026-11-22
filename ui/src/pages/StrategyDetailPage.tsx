@@ -25,12 +25,13 @@ import {
   Radio,
   RadioGroup,
   Checkbox,
-  Tabs,
   Tab,
   TextField,
   Accordion,
   AccordionSummary,
   AccordionDetails,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import {
   ArrowBack as BackIcon,
@@ -40,6 +41,10 @@ import {
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { EntryStrategyFull, SuggestRevisionResponse, VersionItem, EvaluateStrategyResponse } from '../types';
+import { ResponsiveDialog } from '../components/ResponsiveDialog';
+import { ResponsiveTabs } from '../components/ResponsiveTabs';
+import { ResponsiveToolbar } from '../components/ResponsiveToolbar';
+import { MobileVersionHistory } from '../components/entry-strategies/MobileVersionHistory';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -63,6 +68,9 @@ export default function StrategyDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [tabValue, setTabValue] = useState(0);
+
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
   // Version history state
   const [versions, setVersions] = useState<VersionItem[]>([]);
@@ -300,11 +308,11 @@ export default function StrategyDetailPage() {
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
+      <ResponsiveToolbar sx={{ alignItems: 'center', mb: 3 }}>
         <Button startIcon={<BackIcon />} onClick={handleBack} variant="outlined">
           Back
         </Button>
-        <Box sx={{ flexGrow: 1 }} />
+        <Box sx={{ flexGrow: 1, display: { xs: 'none', sm: 'block' } }} />
         <Button startIcon={<ReviseIcon />} onClick={handleOpenRevision} variant="outlined">
           Revise Entries
         </Button>
@@ -320,7 +328,7 @@ export default function StrategyDetailPage() {
         <Button startIcon={<RefreshIcon />} onClick={handleRefresh} variant="outlined">
           Refresh
         </Button>
-      </Box>
+      </ResponsiveToolbar>
 
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
@@ -346,7 +354,7 @@ export default function StrategyDetailPage() {
         <Typography variant="h6" gutterBottom>
           Strategy Health
         </Typography>
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 2 }}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(auto-fill, minmax(200px, 1fr))' }, gap: 2 }}>
           <Box>
             <Typography variant="body2" color="text.secondary">Review Status</Typography>
             <Chip
@@ -411,7 +419,7 @@ export default function StrategyDetailPage() {
             sx={{ ml: 1 }}
           />
         </Typography>
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 2, mb: 2 }}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(auto-fill, minmax(200px, 1fr))' }, gap: 2, mb: 2 }}>
           <Box>
             <Typography variant="body2" color="text.secondary">DA Status</Typography>
             <Chip
@@ -466,10 +474,15 @@ export default function StrategyDetailPage() {
 
       {/* Tabs */}
       <Paper sx={{ mb: 3 }}>
-        <Tabs value={tabValue} onChange={(_, v) => setTabValue(v)}>
+        <ResponsiveTabs
+          value={tabValue}
+          onChange={(_, v) => setTabValue(v)}
+          variant={isMobile ? 'scrollable' : 'standard'}
+          scrollButtons={isMobile ? 'auto' : false}
+        >
           <Tab label="Entry Levels" />
           <Tab label="Version History" />
-        </Tabs>
+        </ResponsiveTabs>
 
         <TabPanel value={tabValue} index={0}>
           {/* Entry Levels */}
@@ -477,7 +490,7 @@ export default function StrategyDetailPage() {
             <Typography variant="h6" gutterBottom>
               Entry Levels
             </Typography>
-            <TableContainer>
+            <TableContainer sx={{ maxWidth: '100%', overflowX: 'auto' }}>
               <Table>
                 <TableHead>
                   <TableRow>
@@ -517,8 +530,16 @@ export default function StrategyDetailPage() {
               <Alert severity="error">{versionsError}</Alert>
             ) : versions.length === 0 ? (
               <Alert severity="info">No version history available</Alert>
+            ) : isMobile ? (
+              <MobileVersionHistory
+                versions={versions}
+                currentAllocation={strategy.allocated}
+                loading={versionsLoading}
+                error={versionsError}
+                onRestore={handleRestoreClick}
+              />
             ) : (
-              <TableContainer>
+              <TableContainer sx={{ maxWidth: '100%', overflowX: 'auto' }}>
                 <Table>
                   <TableHead>
                     <TableRow>
@@ -565,7 +586,7 @@ export default function StrategyDetailPage() {
         <Typography variant="h6" gutterBottom>
           Metadata
         </Typography>
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 2 }}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)' }, gap: 2 }}>
           <Box>
             <Typography variant="body2" color="text.secondary">
               Created At
@@ -586,7 +607,7 @@ export default function StrategyDetailPage() {
       </Paper>
 
       {/* Revision Modal */}
-      <Dialog open={revisionModalOpen} onClose={handleCloseRevision} maxWidth="md" fullWidth>
+      <ResponsiveDialog open={revisionModalOpen} onClose={handleCloseRevision} maxWidth="md" fullWidth>
         <DialogTitle>
           Revise Entries - {strategy.symbol}
         </DialogTitle>
@@ -602,10 +623,9 @@ export default function StrategyDetailPage() {
               <Box sx={{ mb: 3 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>Revision Style</Typography>
                 <RadioGroup
-                  row
                   value={revisionStyle}
                   onChange={(e) => handleStyleChange(e.target.value)}
-                  sx={{ mb: 2 }}
+                  sx={{ flexDirection: { xs: 'column', sm: 'row' }, mb: 2 }}
                 >
                   <FormControlLabel value="conservative" control={<Radio size="small" />} label="Conservative" />
                   <FormControlLabel value="balanced" control={<Radio size="small" />} label="Balanced" />
@@ -624,7 +644,7 @@ export default function StrategyDetailPage() {
                         value={advancedOverrides.atrPeriod}
                         onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, atrPeriod: Number(e.target.value) })}
                         size="small"
-                        sx={{ width: 120 }}
+                        sx={{ width: 120, maxWidth: '100%' }}
                         inputProps={{ min: 5, max: 50 }}
                       />
                       <TextField
@@ -633,7 +653,7 @@ export default function StrategyDetailPage() {
                         value={advancedOverrides.emaFast}
                         onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, emaFast: Number(e.target.value) })}
                         size="small"
-                        sx={{ width: 120 }}
+                        sx={{ width: 120, maxWidth: '100%' }}
                         inputProps={{ min: 5, max: 50 }}
                       />
                       <TextField
@@ -642,7 +662,7 @@ export default function StrategyDetailPage() {
                         value={advancedOverrides.emaSlow}
                         onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, emaSlow: Number(e.target.value) })}
                         size="small"
-                        sx={{ width: 120 }}
+                        sx={{ width: 120, maxWidth: '100%' }}
                         inputProps={{ min: 20, max: 200 }}
                       />
                       <TextField
@@ -651,7 +671,7 @@ export default function StrategyDetailPage() {
                         value={advancedOverrides.lookback}
                         onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, lookback: Number(e.target.value) })}
                         size="small"
-                        sx={{ width: 140 }}
+                        sx={{ width: 140, maxWidth: '100%' }}
                         inputProps={{ min: 20, max: 200 }}
                       />
                       <TextField
@@ -660,7 +680,7 @@ export default function StrategyDetailPage() {
                         value={advancedOverrides.atrMultiplier}
                         onChange={(e) => setAdvancedOverrides({ ...advancedOverrides, atrMultiplier: Number(e.target.value) })}
                         size="small"
-                        sx={{ width: 180 }}
+                        sx={{ width: 180, maxWidth: '100%' }}
                         inputProps={{ min: 0.1, max: 5.0, step: 0.05 }}
                       />
                     </Box>
@@ -677,7 +697,7 @@ export default function StrategyDetailPage() {
                 )}
               </Box>
 
-              <TableContainer>
+              <TableContainer sx={{ maxWidth: '100%', overflowX: 'auto' }}>
                 <Table>
                   <TableHead>
                     <TableRow>
@@ -745,10 +765,10 @@ export default function StrategyDetailPage() {
             {applyLoading ? 'Applying...' : `Apply Selected (${selectedLevels.size})`}
           </Button>
         </DialogActions>
-      </Dialog>
+      </ResponsiveDialog>
 
       {/* Restore Version Dialog */}
-      <Dialog open={restoreDialogOpen} onClose={() => setRestoreDialogOpen(false)}>
+      <ResponsiveDialog open={restoreDialogOpen} onClose={() => setRestoreDialogOpen(false)}>
         <DialogTitle>Restore Version</DialogTitle>
         <DialogContent>
           {restoreSuccess ? (
@@ -776,7 +796,7 @@ export default function StrategyDetailPage() {
             {restoreLoading ? 'Restoring...' : 'Restore'}
           </Button>
         </DialogActions>
-      </Dialog>
+      </ResponsiveDialog>
     </Box>
   );
 }

@@ -1,15 +1,10 @@
 import React from 'react';
-import { Box, Paper, Typography, Chip, LinearProgress, IconButton, Collapse, List, ListItem, ListItemText, ListItemSecondaryAction } from '@mui/material';
+import { Box, Paper, Typography, LinearProgress, IconButton, Collapse, List, ListItem, ListItemText, ListItemSecondaryAction } from '@mui/material';
 import { ExpandMore as ExpandMoreIcon, ExpandLess as ExpandLessIcon, Close as CloseIcon, ContentCopy as CopyIcon } from '@mui/icons-material';
 import { useJobs } from '../context/JobsContext';
 import { JobStatus } from '../types';
-
-const statusColors: Record<string, 'default' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning'> = {
-  pending: 'warning',
-  running: 'info',
-  completed: 'success',
-  failed: 'error',
-};
+import { StatusChip } from './StatusChip';
+import { appColors, mobileBottomSpacing, overlayZIndex } from '../theme';
 
 interface JobMonitorProps {
   onJobClick?: (job: JobStatus) => void;
@@ -32,12 +27,12 @@ export function JobMonitor({ onJobClick }: JobMonitorProps) {
   return (
     <Paper 
       sx={{ 
-        position: 'fixed', 
-        bottom: 0, 
-        left: 0, 
+        position: 'fixed',
+        bottom: { xs: mobileBottomSpacing.nav, sm: 0 },
+        left: 0,
         right: 0,
-        zIndex: 9999,
-        maxHeight: expanded ? 400 : 60,
+        zIndex: overlayZIndex.jobMonitor,
+        maxHeight: expanded ? { xs: '45vh', sm: 400 } : 60,
         overflow: 'hidden',
         borderRadius: 0,
         boxShadow: 3,
@@ -48,27 +43,27 @@ export function JobMonitor({ onJobClick }: JobMonitorProps) {
         sx={{ 
           p: 1, 
           px: 2, 
-          display: 'flex', 
-          alignItems: 'center', 
+          display: 'flex',
+          alignItems: 'center',
           justifyContent: 'space-between',
-          bgcolor: runningJobs.length > 0 ? '#e3f2fd' : '#f5f5f5',
+          flexWrap: { xs: 'wrap', sm: 'nowrap' },
+          bgcolor: runningJobs.length > 0 ? appColors.jobRunning : appColors.jobIdle,
           cursor: 'pointer',
         }}
         onClick={() => setExpanded(!expanded)}
       >
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: { xs: 'wrap', sm: 'nowrap' }, minWidth: 0 }}>
           <Typography variant="subtitle2">
-            {runningJobs.length > 0 
-              ? `Running Jobs (${runningJobs.length})` 
+            {runningJobs.length > 0
+              ? `Running Jobs (${runningJobs.length})`
               : `Jobs (${doneJobs.length} completed/failed)`
             }
           </Typography>
           {runningJobs.map(job => (
-            <Chip 
+            <StatusChip
               key={job.id}
+              status={job.status}
               label={`#${job.id}: ${job.job_type}`}
-              size="small"
-              color={statusColors[job.status]}
             />
           ))}
         </Box>
@@ -77,24 +72,24 @@ export function JobMonitor({ onJobClick }: JobMonitorProps) {
 
       {/* Job List */}
       <Collapse in={expanded}>
-        <List dense sx={{ maxHeight: 300, overflow: 'auto', p: 0 }}>
+        <List dense sx={{ maxHeight: { xs: '30vh', sm: 300 }, overflow: 'auto', p: 0 }}>
           {jobs.map((job) => (
             <ListItem 
               key={job.id}
               sx={{ 
                 borderBottom: '1px solid #eee',
-                bgcolor: job.status === 'failed' ? '#ffebee' : (job.status === 'completed' || job.status === 'succeeded') ? '#e8f5e9' : 'transparent'
+                bgcolor: job.status === 'failed'
+                  ? appColors.jobFailed
+                  : (job.status === 'completed' || job.status === 'succeeded')
+                    ? appColors.jobSuccess
+                    : 'transparent'
               }}
               onClick={() => onJobClick?.(job)}
             >
               <ListItemText
                 primary={
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Chip 
-                      label={job.status} 
-                      color={statusColors[job.status]} 
-                      size="small" 
-                    />
+                    <StatusChip status={job.status} />
                     <Typography variant="body2">
                       {job.job_type} (#{job.id})
                     </Typography>

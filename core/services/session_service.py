@@ -22,6 +22,7 @@ class SessionService:
         broker_connection_id: Optional[int] = None,
         market_data_connection_id: Optional[int] = None,
         warm_start: bool = False,
+        device_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         context = self._registry.create_session(
             broker_user_id=broker_user_id,
@@ -29,6 +30,7 @@ class SessionService:
             broker_config=broker_config,
             broker_connection_id=broker_connection_id,
             market_data_connection_id=market_data_connection_id,
+            device_id=device_id,
         )
         if warm_start:
             try:

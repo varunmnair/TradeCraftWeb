@@ -2,6 +2,30 @@ import logging
 from collections import Counter
 from typing import Callable, Dict, List, Optional
 
+from core.services.placement_guard import classify_broker_error
+
+
+def _extract_broker_order_id(response) -> Optional[str]:
+    """Best-effort extraction of a broker id without changing broker calls."""
+    if response is None:
+        return None
+    if isinstance(response, dict):
+        for key in ("order_id", "gtt_order_id", "id"):
+            value = response.get(key)
+            if value:
+                return str(value)
+        data = response.get("data")
+        if isinstance(data, dict):
+            for key in ("order_id", "gtt_order_id", "id"):
+                value = data.get(key)
+                if value:
+                    return str(value)
+    for attr in ("order_id", "gtt_order_id"):
+        value = getattr(response, attr, None)
+        if value:
+            return str(value)
+    return None
+
 
 class GTTManager:
     def __init__(self, broker, cmp_manager, session):
@@ -88,7 +112,7 @@ class GTTManager:
 
             if not dry_run:
                 try:
-                    self.broker.place_gtt(
+                    broker_response = self.broker.place_gtt(
                         trigger_type=self.broker.GTT_TYPE_SINGLE,
                         tradingsymbol=symbol,
                         exchange=order["exchange"],
@@ -104,11 +128,22 @@ class GTTManager:
                             }
                         ],
                     )
+                    order_id = _extract_broker_order_id(broker_response)
+                    if order_id:
+                        result["order_id"] = order_id
                 except Exception as e:
-                    result["status"] = "Fail"
+                    # A timeout/connection failure may mean the broker accepted
+                    # the order. Report it as Uncertain and never auto-retry it.
+                    result["status"] = classify_broker_error(e)
                     result["remarks"] = str(e)
-                    logging.error(f"[ERROR] ❌ Failed to place GTT for {symbol}: {e}")
+                    logging.error(
+                        "[ERROR] ❌ %s GTT result for %s: %s",
+                        result["status"],
+                        symbol,
+                        e,
+                    )
 
+            result.setdefault("order_id", None)
             results.append(result)
 
         self.session.refresh_gtt_cache()
@@ -171,6 +206,11 @@ class GTTManager:
                         "Qty": details.get("qty"),
                         "Buy Amount": buy_amount,
                         "cmp_available": cmp_available,
+                        # Additive fields used by the mobile cards; no extra broker calls.
+                        "Side": details.get("transaction_type") or self.broker.TRANSACTION_TYPE_BUY,
+                        "Order Status": details.get("status") or "active",
+                        "Order Price": details.get("price"),
+                        "Broker": getattr(self.broker, "broker_name", "unknown"),
                     }
                 )
 

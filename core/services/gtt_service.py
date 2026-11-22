@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from core.gtt_manage import GTTManager
 from core.runtime.session_registry import SessionRegistry
+from core.services.placement_guard import classify_broker_error
 from core.utils import sanitize_for_json
 
 
@@ -149,7 +150,7 @@ class GTTService:
                     {
                         "GTT ID": order["GTT ID"],
                         "Symbol": order["Symbol"],
-                        "status": "failed",
+                        "status": classify_broker_error(e).lower(),
                         "reason": str(e),
                     }
                 )

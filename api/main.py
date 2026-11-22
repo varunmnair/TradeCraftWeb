@@ -93,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(holdings_routes.router)
     app.include_router(holdings_v2_routes.router)
     app.include_router(plan_routes.router)
+    app.include_router(plan_routes.plan_router)
     app.include_router(plan_routes.dynamic_avg_router)
     app.include_router(risk_routes.router)
     app.include_router(gtt_routes.router)

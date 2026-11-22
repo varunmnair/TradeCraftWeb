@@ -164,27 +164,32 @@ class DbTokenStore(BaseTokenStore):
                         "user_id required when creating new broker connection"
                     )
 
-                existing_connections = (
+                new_broker_user_id = payload.get("broker_user_id")
+                # Reuse an existing connection for the same broker identity instead
+                # of deleting records that another device may be using.
+                connection = (
                     session.query(models.BrokerConnection)
                     .filter(
                         models.BrokerConnection.user_id == user_id,
                         models.BrokerConnection.broker_name == broker_name,
+                        models.BrokerConnection.broker_user_id == new_broker_user_id,
                     )
-                    .all()
+                    .order_by(models.BrokerConnection.id.desc())
+                    .first()
                 )
-                for old_conn in existing_connections:
-                    session.delete(old_conn)
-
-                new_broker_user_id = payload.get("broker_user_id")
-                connection = models.BrokerConnection(
-                    user_id=user_id,
-                    broker_name=broker_name,
-                    encrypted_tokens=encrypted,
-                    metadata_json=json.dumps({}),
-                    broker_user_id=new_broker_user_id,
-                    token_updated_at=datetime.now(timezone.utc),
-                )
-                session.add(connection)
+                if connection is None:
+                    connection = models.BrokerConnection(
+                        user_id=user_id,
+                        broker_name=broker_name,
+                        encrypted_tokens=encrypted,
+                        metadata_json=json.dumps({}),
+                        broker_user_id=new_broker_user_id,
+                        token_updated_at=datetime.now(timezone.utc),
+                    )
+                    session.add(connection)
+                else:
+                    connection.encrypted_tokens = encrypted
+                    connection.token_updated_at = datetime.now(timezone.utc)
                 session.commit()
                 session.refresh(connection)
                 return

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 
 from api.dependencies import (
     JOB_CANDIDATE_GENERATE,
     get_current_user,
     get_gtt_service,
     get_job_runner,
+    get_placement_guard,
     get_session_registry,
     require_trading_enabled,
 )
@@ -26,6 +28,14 @@ from core.auth.context import UserContext
 from core.runtime.job_runner import JobRunner
 from core.runtime.session_registry import SessionRegistry
 from core.services.gtt_service import GTTService
+from core.services.placement_guard import (
+    PlacementConflictError,
+    PlacementContextError,
+    PlacementGuardService,
+    placement_error_code,
+    resolve_idempotency_key,
+    validate_placement_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,18 +103,48 @@ def place_candidates(
     registry: SessionRegistry = Depends(get_session_registry),
     job_runner: JobRunner = Depends(get_job_runner),
     gtt_service: GTTService = Depends(get_gtt_service),
+    placement_guard: PlacementGuardService = Depends(get_placement_guard),
     current_user: UserContext = Depends(get_current_user),
+    idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    """Place GTT orders for selected candidate symbols."""
+    """Place GTT orders for selected candidate symbols with placement safety."""
     require_trading_enabled(current_user)
-    registry.require_access(session_id, current_user)
+    if not current_user.user_id:
+        raise ServiceError("User context missing", error_code="unauthorized", http_status=401)
+
+    try:
+        context = validate_placement_context(
+            registry=registry,
+            session_id=session_id,
+            user=current_user,
+        )
+    except PlacementContextError as exc:
+        raise ServiceError(
+            str(exc),
+            error_code=placement_error_code(exc),
+            http_status=exc.http_status,
+            context={"reason": exc.reason},
+        ) from exc
+
+    explicit_key = payload.idempotency_key or idempotency_header
+    idempotency_key, fingerprint = resolve_idempotency_key(
+        user_id=current_user.user_id,
+        session_id=session_id,
+        device_id=current_user.device_id,
+        payload={"symbols": sorted(payload.symbols), "plan_scope": "candidate"},
+        explicit_key=explicit_key,
+    )
 
     log_audit(
         action="candidate_place_orders",
         user=current_user,
         resource_type="candidates",
         resource_id=session_id,
-        metadata={"symbols": payload.symbols},
+        metadata={
+            "symbols": payload.symbols,
+            "idempotency_key": idempotency_key,
+            "broker_connection_id": context["broker_connection_id"],
+        },
     )
 
     # Load latest candidate generation result
@@ -162,12 +202,60 @@ def place_candidates(
             placed=0,
             skipped=skipped_count,
             errors=errors,
+            idempotency_key=idempotency_key,
+        )
+
+    # Re-resolve with the concrete plan so a replay with a different plan is
+    # rejected even when the client reuses a key.
+    idempotency_key, fingerprint = resolve_idempotency_key(
+        user_id=current_user.user_id,
+        session_id=session_id,
+        device_id=current_user.device_id,
+        payload={
+            "scope": "candidate",
+            "symbols": sorted(payload.symbols),
+            "plan": plan,
+            "broker_connection_id": context["broker_connection_id"],
+        },
+        explicit_key=explicit_key,
+    )
+    try:
+        claim = placement_guard.claim(
+            user_id=current_user.user_id,
+            idempotency_key=idempotency_key,
+            request_hash_value=fingerprint,
+            context=context,
+        )
+    except PlacementConflictError as exc:
+        raise ServiceError(
+            str(exc), error_code="duplicate_placement", http_status=exc.http_status
+        ) from exc
+
+    if not claim["claimed"]:
+        stored = json.loads(claim["record"].get("result_json") or "{}")
+        replayed = stored.get("response")
+        if replayed:
+            response = CandidatePlaceResponse(**replayed)
+            response.replayed = True
+            return response
+        return CandidatePlaceResponse(
+            idempotency_key=idempotency_key,
+            replayed=True,
+            results=[
+                PlaceOrderResult(**item) for item in stored.get("results", [])
+            ],
         )
 
     # Place orders via GTT service
     try:
         result = gtt_service.place_orders(session_id, plan, dry_run=False)
     except Exception as exc:
+        placement_guard.complete(
+            user_id=current_user.user_id,
+            idempotency_key=idempotency_key,
+            status="failed",
+            error=str(exc),
+        )
         raise ServiceError(str(exc), error_code="place_failed", http_status=500) from exc
 
     # Build per-order results enriched with strategy info
@@ -175,6 +263,7 @@ def place_candidates(
     results: list[PlaceOrderResult] = []
     placed = 0
     failed_skipped = 0
+    uncertain_count = 0
 
     for r in broker_results:
         sym = r.get("symbol", "").upper()
@@ -184,6 +273,8 @@ def place_candidates(
             placed += 1
         elif status == "Skipped":
             failed_skipped += 1
+        elif status == "Uncertain":
+            uncertain_count += 1
 
         order = next((o for o in plan if o["symbol"].upper() == sym), {})
         results.append(
@@ -196,16 +287,44 @@ def place_candidates(
                 amount=info.get("amount", 0),
                 status=status,
                 remarks=r.get("remarks", ""),
+                order_id=r.get("order_id"),
+                broker=context["broker_name"],
+                broker_connection_id=context["broker_connection_id"],
             )
         )
 
     for r in broker_results:
-        if r.get("status") == "Fail":
-            errors.append(f"{r.get('symbol', '?')}: {r.get('remarks', 'Unknown error')}")
+        status = r.get("status")
+        if status in {"Fail", "Uncertain"}:
+            prefix = (
+                "VERIFY IN BROKER APP - " if status == "Uncertain" else ""
+            )
+            errors.append(
+                f"{r.get('symbol', '?')}: {prefix}{r.get('remarks', 'Unknown error')}"
+            )
 
-    return CandidatePlaceResponse(
+    response = CandidatePlaceResponse(
         placed=placed,
         skipped=skipped_count + failed_skipped,
         errors=errors,
         results=results,
+        uncertain=uncertain_count,
+        idempotency_key=idempotency_key,
     )
+    statuses = [r.status.lower() for r in results]
+    if uncertain_count:
+        placement_status = "uncertain"
+    elif any(s in {"fail", "failed"} for s in statuses):
+        placement_status = "failed"
+    else:
+        placement_status = "completed"
+    placement_guard.complete(
+        user_id=current_user.user_id,
+        idempotency_key=idempotency_key,
+        status=placement_status,
+        result={
+            "results": result.get("results", []),
+            "response": response.model_dump(),
+        },
+    )
+    return response

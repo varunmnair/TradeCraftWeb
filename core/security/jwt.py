@@ -42,7 +42,14 @@ def create_refresh_token(data: Dict[str, Any]) -> str:
     expire = datetime.now(timezone.utc) + timedelta(
         seconds=config.REFRESH_TOKEN_EXPIRES_SECONDS
     )
-    to_encode = {**data, "exp": expire, "type": "refresh"}
+    # A random id makes every rotated refresh token unique even when issued in
+    # the same second, so revoked-token detection stays reliable.
+    to_encode = {
+        **data,
+        "exp": expire,
+        "type": "refresh",
+        "jti": secrets.token_urlsafe(16),
+    }
     return jwt.encode(to_encode, config.JWT_SECRET, algorithm=config.JWT_ALGORITHM)
 
 

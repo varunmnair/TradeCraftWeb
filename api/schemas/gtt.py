@@ -14,6 +14,7 @@ class GTTPreviewRequest(BaseModel):
 
 class GTTApplyRequest(GTTPreviewRequest):
     confirmation_token: str = Field(..., min_length=4)
+    idempotency_key: str | None = None
 
 
 class GTTOrdersResponse(BaseModel):
@@ -31,6 +32,7 @@ GTTApplyResponse = JobQueuedResponse
 class GTTConfirmRequest(BaseModel):
     session_id: str
     plan: List[Dict[str, Any]]
+    idempotency_key: str | None = None
 
 
 class GTTConfirmResponse(BaseModel):
@@ -52,9 +54,11 @@ class GTTAdjustRequest(BaseModel):
     session_id: str
     order_ids: List[str] = Field(..., min_length=1)
     target_variance: float = Field(..., ge=-50, le=50)
+    idempotency_key: str | None = None
 
 
 class GTTAdjustResponse(BaseModel):
     adjusted: List[Dict[str, Any]]
     failed: List[Dict[str, Any]]
     count: int
+    replayed: bool = False

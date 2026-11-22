@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from api import config
 from api.dependencies import (
     get_broker_connection_service,
+    get_broker_session_orchestrator,
     get_current_user,
     get_session_manager,
     get_session_registry,
@@ -14,14 +15,37 @@ from api.dependencies import (
 )
 from api.errors import ServiceError
 from api.schemas.common import ErrorResponse
-from api.schemas.session import SessionResponse, SessionStartRequest
+from api.schemas.session import (
+    BrokerSessionBootstrapRequest,
+    BrokerSessionBootstrapResponse,
+    SessionResponse,
+    SessionStartRequest,
+)
 from core.auth.context import UserContext
 from core.runtime.session_registry import SessionRegistry
 from core.services.broker_connection_service import BrokerConnectionService
+from core.services.broker_session_orchestrator import BrokerSessionOrchestrator
 from core.services.session_service import SessionService
 from core.session_manager import SessionManager
 
 router = APIRouter(prefix="/session", tags=["session"])
+
+
+@router.post("/orchestrate", response_model=BrokerSessionBootstrapResponse)
+def orchestrate_session(
+    payload: BrokerSessionBootstrapRequest,
+    orchestrator: BrokerSessionOrchestrator = Depends(get_broker_session_orchestrator),
+    current_user: UserContext = Depends(get_current_user),
+):
+    """Resolve, reuse or initialize a session for the current device."""
+    result = orchestrator.orchestrate(
+        current_user,
+        broker_name=payload.broker_name,
+        broker_connection_id=payload.broker_connection_id,
+        warm_start=payload.warm_start,
+        refresh_data=payload.refresh_data,
+    )
+    return BrokerSessionBootstrapResponse.model_validate(result)
 
 
 @router.post(
@@ -116,6 +140,7 @@ def start_session(
                 broker_connection_id=payload.broker_connection_id,
                 market_data_connection_id=market_data_connection_id,
                 warm_start=payload.warm_start,
+                device_id=payload.device_id or current_user.device_id,
             )
             return session
         except TokenException as e:
@@ -143,6 +168,7 @@ def start_session(
             broker_name=payload.broker_name,
             broker_config=payload.broker_config,
             warm_start=payload.warm_start,
+            device_id=payload.device_id or current_user.device_id,
         )
         return session
     except TokenException as e:
@@ -193,7 +219,7 @@ def set_active_connection(
 
     active_store = get_active_connection_store()
     active_store.set_active_connection(
-        current_user.user_id, payload.broker_connection_id
+        current_user.user_id, payload.broker_connection_id, current_user.device_id
     )
 
     return ActiveConnectionResponse(
@@ -219,7 +245,9 @@ def get_active_connection(
         )
 
     active_store = get_active_connection_store()
-    connection_id = active_store.get_active_connection(current_user.user_id)
+    connection_id = active_store.get_active_connection(
+        current_user.user_id, current_user.device_id
+    )
 
     if connection_id is None:
         return ActiveConnectionResponse(
@@ -228,7 +256,7 @@ def get_active_connection(
 
     connection = connection_service.get_connection(connection_id)
     if not connection:
-        active_store.clear_active_connection(current_user.user_id)
+        active_store.clear_active_connection(current_user.user_id, current_user.device_id)
         return ActiveConnectionResponse(
             broker_connection_id=None, broker_name=None, broker_user_id=None
         )
@@ -308,6 +336,6 @@ def close_session(
 
     from core.auth.active_connection_store import get_active_connection_store
     active_store = get_active_connection_store()
-    active_store.clear_active_connection(current_user.user_id)
+    active_store.clear_active_connection(current_user.user_id, current_user.device_id)
 
     return {"session_id": session_id, "closed": True}

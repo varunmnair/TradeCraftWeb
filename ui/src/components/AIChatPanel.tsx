@@ -23,6 +23,7 @@ import {
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
+import { mobileBottomSpacing, overlayZIndex } from '../theme';
 
 interface Message {
   id: string;
@@ -105,6 +106,7 @@ export function AIChatPanel({ open, onClose, pageContext }: AIChatPanelProps) {
       anchor="right"
       open={open}
       onClose={onClose}
+      sx={{ zIndex: overlayZIndex.aiDrawer }}
       PaperProps={{
         sx: { width: { xs: '100%', sm: 400 }, maxWidth: '100vw' }
       }}
@@ -252,7 +254,7 @@ export function AIFloatingButton({ onClick }: AIFloatingButtonProps) {
       onClick={onClick}
       sx={{
         position: 'fixed',
-        bottom: 24,
+        bottom: { xs: mobileBottomSpacing.fab, sm: 24 },
         right: 24,
         width: 56,
         height: 56,
@@ -269,7 +271,7 @@ export function AIFloatingButton({ onClick }: AIFloatingButtonProps) {
           transform: 'scale(1.1)',
           boxShadow: 8,
         },
-        zIndex: 9999,
+        zIndex: overlayZIndex.aiFab,
       }}
     >
       <BotIcon />

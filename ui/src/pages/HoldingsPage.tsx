@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -11,27 +11,31 @@ import {
   TextField,
   IconButton,
   Tooltip,
+  Menu,
+  MenuItem,
+  ListItemIcon,
+  ListItemText,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import { DataGrid, GridColDef, GridSortModel, GridRenderCellParams } from '@mui/x-data-grid';
-import { 
+import {
   Refresh as RefreshIcon,
   CloudSync as SyncIcon,
   Upload as UploadIcon,
   InfoOutlined,
+  MoreVert as MoreVertIcon,
 } from '@mui/icons-material';
 import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
-import type { HoldingsRow, OrderHistoryStatus, AgeReason, Trade, WroiScore } from '../types';
-
-const AGE_REASON_MESSAGES: Record<Exclude<AgeReason, null>, string> = {
-  order_history_not_fetched: "Order history not uploaded. Upload CSV to calculate age.",
-  no_trades_for_symbol: "No trade records found for this symbol.",
-  no_buy_trades: "Only sell trades found — no buy history to calculate age from.",
-  buy_trades_beyond_400_days: "Oldest buy is >400 days old. Age capped at 400 days.",
-  trade_qty_mismatch: "",  // Dynamic — built from age_trade_qty + age_holding_qty
-};
-
-const NOT_CALCULATED_TOOLTIP = "Click 'Calculate Trend' to compute";
+import type { HoldingsRow, OrderHistoryStatus, Trade, WroiScore } from '../types';
+import { AGE_REASON_MESSAGES, NOT_CALCULATED_TOOLTIP } from '../components/holdings/holdingDisplay';
+import { MobileHoldingCard } from '../components/holdings/MobileHoldingCard';
+import {
+  HoldingsMobileControls,
+  INITIAL_HOLDINGS_FILTERS,
+  type HoldingsMobileFilters,
+} from '../components/holdings/HoldingsMobileControls';
 
 const UnpopulatedIcon = () => (
   <Tooltip title={NOT_CALCULATED_TOOLTIP} arrow>
@@ -203,6 +207,70 @@ export default function HoldingsPage() {
   const [wroiTrends, setWroiTrends] = useState<Record<string, string> | null>(null);
   const [scores, setScores] = useState<Record<string, WroiScore> | null>(null);
   const [computingWroiTrend, setComputingWroiTrend] = useState(false);
+  const [mobileFilters, setMobileFilters] = useState<HoldingsMobileFilters>(
+    INITIAL_HOLDINGS_FILTERS,
+  );
+  const [actionMenuAnchorEl, setActionMenuAnchorEl] = useState<HTMLElement | null>(null);
+  const [orderHistoryExpanded, setOrderHistoryExpanded] = useState(false);
+
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+
+  const displayHoldings = useMemo<(HoldingsRow & { id?: string | number })[]>(
+    () =>
+      holdings.map((item) => ({
+        ...item,
+        wroi_trend: wroiTrends?.[item.symbol] ?? 'NA',
+        ...(scores?.[item.symbol] || {}),
+      })),
+    [holdings, wroiTrends, scores],
+  );
+
+  const sortedHoldings = useMemo(() => {
+    const primary = sortModel[0];
+    if (!primary?.field || !primary.sort) return displayHoldings;
+    const direction = primary.sort === 'asc' ? 1 : -1;
+    return [...displayHoldings].sort((a, b) => {
+      const left = (a as unknown as Record<string, unknown>)[primary.field];
+      const right = (b as unknown as Record<string, unknown>)[primary.field];
+      if (left == null && right == null) return 0;
+      if (left == null) return 1;
+      if (right == null) return -1;
+      if (typeof left === 'string' || typeof right === 'string') {
+        return String(left).localeCompare(String(right)) * direction;
+      }
+      return ((left as number) - (right as number)) * direction;
+    });
+  }, [displayHoldings, sortModel]);
+
+  const qualityOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          holdings
+            .map((holding) => holding.quality)
+            .filter((quality): quality is string => Boolean(quality)),
+        ),
+      ).sort(),
+    [holdings],
+  );
+
+  const mobileHoldings = useMemo(() => {
+    let list = sortedHoldings;
+    if (mobileFilters.signal !== 'ALL') {
+      list = list.filter((holding) => (holding.exit_action ?? '') === mobileFilters.signal);
+    }
+    if (mobileFilters.quality !== 'ALL') {
+      list = list.filter((holding) => (holding.quality ?? '') === mobileFilters.quality);
+    }
+    if (mobileFilters.performance === 'PROFIT') {
+      list = list.filter((holding) => (holding.profit ?? 0) > 0);
+    }
+    if (mobileFilters.performance === 'LOSS') {
+      list = list.filter((holding) => (holding.profit ?? 0) < 0);
+    }
+    return list;
+  }, [sortedHoldings, mobileFilters]);
 
   const handleSearchTrades = useCallback(async () => {
     if (!sessionId || !symbolSearch.trim()) return;
@@ -269,6 +337,19 @@ export default function HoldingsPage() {
     fetchHoldings();
   };
 
+  const handleOpenActionMenu = (event: React.MouseEvent<HTMLElement>) => {
+    setActionMenuAnchorEl(event.currentTarget);
+  };
+
+  const handleCloseActionMenu = () => {
+    setActionMenuAnchorEl(null);
+  };
+
+  const handleComputeTrendFromMenu = () => {
+    handleCloseActionMenu();
+    handleComputeWroiTrend();
+  };
+
   const handleFetchOrderHistory = async () => {
     if (!sessionId) return;
     setFetchingOrderHistory(true);
@@ -302,16 +383,6 @@ export default function HoldingsPage() {
     event.target.value = '';
   };
 
-  const formatNumber = (value: number | null, decimals: number = 2) => {
-    if (value === null || value === undefined) return '-';
-    return value.toFixed(decimals);
-  };
-
-  const formatCurrency = (value: number | null) => {
-    if (value === null || value === undefined) return '-';
-    return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  };
-
   const formatDateRange = (from: string, to: string) => {
     const fromDate = new Date(from);
     const toDate = new Date(to);
@@ -321,6 +392,96 @@ export default function HoldingsPage() {
 
   const broker = sessionInfo?.broker || 'upstox';
   const isUpstox = broker === 'upstox';
+
+  const renderOrderHistorySummary = () => (
+    <Typography variant="body2" color="text.secondary">
+      Order History:
+      {orderHistory?.available ? (
+        <>
+          {orderHistory.trade_count} trades • {orderHistory.symbol_count} symbols
+          {orderHistory.date_from && orderHistory.date_to && (
+            <> • {formatDateRange(orderHistory.date_from, orderHistory.date_to)}</>
+          )}
+        </>
+      ) : (
+        <span>Not fetched</span>
+      )}
+    </Typography>
+  );
+
+  const renderOrderHistoryMeta = () => (
+    <>
+      {orderHistory?.source && (
+        <Chip
+          label={orderHistory.source === 'upstox_api' ? 'Upstox' : 'Zerodha CSV'}
+          size="small"
+          sx={{ height: 20, fontSize: '0.7rem' }}
+        />
+      )}
+      {orderHistory?.fetched_at && (
+        <Typography variant="caption" color="text.secondary">
+          Updated on: {new Date(orderHistory.fetched_at).toLocaleDateString()}
+        </Typography>
+      )}
+    </>
+  );
+
+  const renderOrderHistoryControls = () => (
+    <>
+      <TextField
+        type="number"
+        size="small"
+        value={orderHistoryDays}
+        onChange={(e) => setOrderHistoryDays(Math.max(1, parseInt(e.target.value) || 100))}
+        sx={{ width: 70 }}
+        inputProps={{ min: 1, style: { padding: '4px 8px' } }}
+      />
+      {isUpstox ? (
+        <Button
+          variant="contained"
+          size="small"
+          startIcon={fetchingOrderHistory ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+          onClick={handleFetchOrderHistory}
+          disabled={fetchingOrderHistory}
+        >
+          {fetchingOrderHistory ? 'Fetching...' : 'Fetch'}
+        </Button>
+      ) : (
+        <Button
+          variant="contained"
+          component="label"
+          size="small"
+          startIcon={uploadingOrderHistory ? <CircularProgress size={16} color="inherit" /> : <UploadIcon />}
+          disabled={uploadingOrderHistory}
+        >
+          {uploadingOrderHistory ? 'Uploading...' : 'Upload'}
+          <input
+            type="file"
+            accept=".csv"
+            hidden
+            onChange={handleUploadOrderHistory}
+          />
+        </Button>
+      )}
+      <TextField
+        size="small"
+        placeholder="Symbol"
+        value={symbolSearch}
+        onChange={(e) => setSymbolSearch(e.target.value.toUpperCase())}
+        onKeyPress={(e) => e.key === 'Enter' && handleSearchTrades()}
+        sx={{ width: 120 }}
+        inputProps={{ style: { padding: '4px 8px' } }}
+      />
+      <Button
+        variant="outlined"
+        size="small"
+        onClick={handleSearchTrades}
+        disabled={searchingTrades || !symbolSearch.trim()}
+      >
+        {searchingTrades ? '...' : 'Search'}
+      </Button>
+    </>
+  );
 
   if (!sessionId) {
     return (
@@ -337,14 +498,23 @@ export default function HoldingsPage() {
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+      <Box
+        sx={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: { xs: 'flex-start', sm: 'center' },
+          flexDirection: { xs: 'column', sm: 'row' },
+          gap: { xs: 1, sm: 2 },
+          mb: 2,
+        }}
+      >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Typography variant="h4">
+          <Typography variant="h4" sx={{ fontSize: { xs: '1.6rem', sm: '2.125rem' } }}>
             Holdings
           </Typography>
           <Tooltip title="Refresh holdings">
-            <IconButton 
-              onClick={handleRefresh} 
+            <IconButton
+              onClick={handleRefresh}
               disabled={loading}
               size="small"
               sx={{ ml: 1 }}
@@ -352,16 +522,43 @@ export default function HoldingsPage() {
               {loading ? <CircularProgress size={20} /> : <RefreshIcon />}
             </IconButton>
           </Tooltip>
+          <Box sx={{ display: { xs: 'none', sm: 'block' } }}>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={handleComputeWroiTrend}
+              disabled={computingWroiTrend}
+            >
+              {computingWroiTrend ? 'Computing...' : 'Calculate Trend'}
+            </Button>
+          </Box>
+          <Box sx={{ display: { xs: 'block', sm: 'none' } }}>
+            <IconButton
+              aria-label="More holdings actions"
+              onClick={handleOpenActionMenu}
+              size="small"
+            >
+              <MoreVertIcon />
+            </IconButton>
+            <Menu
+              anchorEl={actionMenuAnchorEl}
+              open={Boolean(actionMenuAnchorEl)}
+              onClose={handleCloseActionMenu}
+              anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            >
+              <MenuItem onClick={handleComputeTrendFromMenu} disabled={computingWroiTrend}>
+                <ListItemIcon>
+                  <SyncIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText
+                  primary={computingWroiTrend ? 'Computing...' : 'Calculate Trend'}
+                />
+              </MenuItem>
+            </Menu>
+          </Box>
         </Box>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={handleComputeWroiTrend}
-            disabled={computingWroiTrend}
-          >
-            {computingWroiTrend ? 'Computing...' : 'Calculate Trend'}
-          </Button>
           {lastUpdated && (
             <Typography variant="body2" color="text.secondary">
               Last updated: {lastUpdated.toLocaleTimeString()}
@@ -380,94 +577,65 @@ export default function HoldingsPage() {
       <Paper sx={{ p: 1.5, mb: 2 }}>
         {/* Header row with controls */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-          <Typography variant="body2" color="text.secondary">
-            Order History:
-            {orderHistory?.available ? (
-              <>
-                {orderHistory.trade_count} trades • {orderHistory.symbol_count} symbols
-                {orderHistory.date_from && orderHistory.date_to && (
-                  <> • {formatDateRange(orderHistory.date_from, orderHistory.date_to)}</>
-                )}
-              </>
-            ) : (
-              <span>Not fetched</span>
-            )}
-          </Typography>
-
-          {orderHistory?.source && (
-            <Chip
-              label={orderHistory.source === 'upstox_api' ? 'Upstox' : 'Zerodha CSV'}
-              size="small"
-              sx={{ height: 20, fontSize: '0.7rem' }}
-            />
-          )}
-
-          {orderHistory?.fetched_at && (
-            <Typography variant="caption" color="text.secondary">
-              Updated on: {new Date(orderHistory.fetched_at).toLocaleDateString()}
-            </Typography>
-          )}
-
-          {/* Spacer */}
-          <Box sx={{ flex: 1 }} />
-
-          {/* Days input */}
-          <TextField
-            type="number"
-            size="small"
-            value={orderHistoryDays}
-            onChange={(e) => setOrderHistoryDays(Math.max(1, parseInt(e.target.value) || 100))}
-            sx={{ width: 70 }}
-            inputProps={{ min: 1, style: { padding: '4px 8px' } }}
-          />
-
-          {/* Fetch button */}
-          {isUpstox ? (
-            <Button
-              variant="contained"
-              size="small"
-              startIcon={fetchingOrderHistory ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
-              onClick={handleFetchOrderHistory}
-              disabled={fetchingOrderHistory}
-            >
-              {fetchingOrderHistory ? 'Fetching...' : 'Fetch'}
-            </Button>
-          ) : (
-            <Button
-              variant="contained"
-              component="label"
-              size="small"
-              startIcon={uploadingOrderHistory ? <CircularProgress size={16} color="inherit" /> : <UploadIcon />}
-              disabled={uploadingOrderHistory}
-            >
-              {uploadingOrderHistory ? 'Uploading...' : 'Upload'}
-              <input
-                type="file"
-                accept=".csv"
-                hidden
-                onChange={handleUploadOrderHistory}
-              />
-            </Button>
-          )}
-
-          {/* Search */}
-          <TextField
-            size="small"
-            placeholder="Symbol"
-            value={symbolSearch}
-            onChange={(e) => setSymbolSearch(e.target.value.toUpperCase())}
-            onKeyPress={(e) => e.key === 'Enter' && handleSearchTrades()}
-            sx={{ width: 120 }}
-            inputProps={{ style: { padding: '4px 8px' } }}
-          />
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={handleSearchTrades}
-            disabled={searchingTrades || !symbolSearch.trim()}
+          <Box
+            sx={{
+              display: { xs: 'flex', sm: 'none' },
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 1,
+              width: '100%',
+            }}
           >
-            {searchingTrades ? '...' : 'Search'}
-          </Button>
+            <Typography variant="body2" color="text.secondary" sx={{ minWidth: 0 }}>
+              Order History:
+              {orderHistory?.available ? ` ${orderHistory.trade_count} trades` : ' Not fetched'}
+            </Typography>
+            <Button size="small" onClick={() => setOrderHistoryExpanded((value) => !value)}>
+              {orderHistoryExpanded ? 'Hide Details' : 'View Details'}
+            </Button>
+          </Box>
+
+          <Box
+            sx={{
+              display: { xs: 'none', sm: 'flex' },
+              alignItems: 'center',
+              gap: 1,
+              flexWrap: 'wrap',
+              width: '100%',
+            }}
+          >
+            {renderOrderHistorySummary()}
+            {renderOrderHistoryMeta()}
+            <Box sx={{ flex: 1 }} />
+            {renderOrderHistoryControls()}
+          </Box>
+
+          {orderHistoryExpanded && (
+            <Box
+              sx={{
+                display: { xs: 'flex', sm: 'none' },
+                flexDirection: 'column',
+                alignItems: 'stretch',
+                gap: 1,
+                width: '100%',
+                pt: 1,
+                borderTop: '1px solid',
+                borderColor: 'divider',
+              }}
+            >
+              <Typography variant="caption" color="text.secondary">
+                {orderHistory?.available
+                  ? `${orderHistory.symbol_count} symbols${
+                      orderHistory.date_from && orderHistory.date_to
+                        ? ` • ${formatDateRange(orderHistory.date_from, orderHistory.date_to)}`
+                        : ''
+                    }`
+                  : 'No order history details available'}
+              </Typography>
+              {renderOrderHistoryMeta()}
+              {renderOrderHistoryControls()}
+            </Box>
+          )}
         </Box>
 
         {/* Loading bar */}
@@ -546,7 +714,7 @@ export default function HoldingsPage() {
         </Alert>
       )}
 
-      {/* Holdings Table */}
+      {/* Holdings presentation: cards on mobile, unchanged DataGrid on desktop */}
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
           <CircularProgress />
@@ -557,10 +725,35 @@ export default function HoldingsPage() {
             No holdings data. Click "Refresh" to fetch holdings from your broker.
           </Typography>
         </Paper>
+      ) : isMobile ? (
+        <Box>
+          <HoldingsMobileControls
+            sortModel={sortModel}
+            onSortChange={setSortModel}
+            filters={mobileFilters}
+            onFiltersChange={setMobileFilters}
+            qualityOptions={qualityOptions}
+          />
+          {mobileHoldings.length === 0 ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography variant="body1" color="text.secondary">
+                No holdings match the current filters.
+              </Typography>
+            </Paper>
+          ) : (
+            mobileHoldings.map((holding) => (
+              <MobileHoldingCard
+                key={holding.id ?? holding.symbol}
+                holding={holding}
+                trendsPopulated={wroiTrends != null}
+              />
+            ))
+          )}
+        </Box>
       ) : (
         <Paper sx={{ height: 600, width: '100%' }}>
           <DataGrid
-            rows={holdings.map(h => ({ ...h, wroi_trend: wroiTrends?.[h.symbol] ?? 'NA', ...(scores?.[h.symbol] || {}) }))}
+            rows={displayHoldings}
             columns={getHoldingsColumns(wroiTrends)}
             sortModel={sortModel}
             onSortModelChange={setSortModel}

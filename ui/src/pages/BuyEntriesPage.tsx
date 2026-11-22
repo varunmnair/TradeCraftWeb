@@ -48,6 +48,7 @@ import { GTTConfirmResponse } from '../types';
 import { SkippedItemsDialog } from '../components/SkippedItemsDialog';
 import { useJobRunner } from '../hooks/useJobRunner';
 import { DASettingsModal } from '../components/DASettingsModal';
+import { newPlacementKey } from '../utils/placementIdempotency';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -191,6 +192,7 @@ export default function BuyEntriesPage() {
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [confirmToken, setConfirmToken] = useState<GTTConfirmResponse | null>(null);
+  const [placementKey, setPlacementKey] = useState<string | null>(null);
   const [placingOrders, setPlacingOrders] = useState(false);
   const [orderSuccess, setOrderSuccess] = useState(false);
 
@@ -198,6 +200,7 @@ export default function BuyEntriesPage() {
   const [daConfirmDialogOpen, setDaConfirmDialogOpen] = useState(false);
   const [daConfirming, setDaConfirming] = useState(false);
   const [daConfirmToken, setDaConfirmToken] = useState<GTTConfirmResponse | null>(null);
+  const [daPlacementKey, setDaPlacementKey] = useState<string | null>(null);
   const [daPlacingOrders, setDaPlacingOrders] = useState(false);
   const [daOrderSuccess, setDaOrderSuccess] = useState(false);
 
@@ -785,10 +788,13 @@ export default function BuyEntriesPage() {
     try {
       const currentPlanMap = new Map(currentMlPlan.map((row) => [getRowKey(row), row]));
       const selectedItems = mlSelectedRows.map(key => currentPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
+      const key = newPlacementKey('gtt-mle');
       const response = await api.confirmGTT({
         session_id: sessionId,
         plan: selectedItems as unknown as Record<string, unknown>[],
+        idempotency_key: key,
       });
+      setPlacementKey(key);
       setConfirmToken(response);
       setConfirmDialogOpen(true);
     } catch (err) {
@@ -811,6 +817,7 @@ export default function BuyEntriesPage() {
         session_id: sessionId,
         plan: selectedItems as unknown as Record<string, unknown>[],
         confirmation_token: confirmToken.token,
+        idempotency_key: placementKey ?? undefined,
       });
       startJob(response.job_id);
       setOrderSuccess(true);
@@ -824,6 +831,7 @@ export default function BuyEntriesPage() {
   const handleCloseConfirm = () => {
     setConfirmDialogOpen(false);
     setConfirmToken(null);
+    setPlacementKey(null);
     if (orderSuccess) {
       setMlSelectedRows([]);
       setOrderSuccess(false);
@@ -839,10 +847,13 @@ export default function BuyEntriesPage() {
     try {
       const daPlanMap = new Map(daPlan.map((row) => [getRowKey(row), row]));
       const selectedItems = daSelectedRows.map(key => daPlanMap.get(key as string)).filter((item): item is PlanRow => Boolean(item));
+      const key = newPlacementKey('gtt-da');
       const response = await api.confirmGTT({
         session_id: sessionId,
         plan: selectedItems as unknown as Record<string, unknown>[],
+        idempotency_key: key,
       });
+      setDaPlacementKey(key);
       setDaConfirmToken(response);
       setDaConfirmDialogOpen(true);
     } catch (err) {
@@ -865,6 +876,7 @@ export default function BuyEntriesPage() {
         session_id: sessionId,
         plan: selectedItems as unknown as Record<string, unknown>[],
         confirmation_token: daConfirmToken.token,
+        idempotency_key: daPlacementKey ?? undefined,
       });
       startJob(response.job_id);
       setDaOrderSuccess(true);
@@ -878,6 +890,7 @@ export default function BuyEntriesPage() {
   const handleDaCloseConfirm = () => {
     setDaConfirmDialogOpen(false);
     setDaConfirmToken(null);
+    setDaPlacementKey(null);
     if (daOrderSuccess) {
       setDaSelectedRows([]);
       setDaOrderSuccess(false);

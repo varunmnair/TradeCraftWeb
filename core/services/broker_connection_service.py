@@ -57,12 +57,9 @@ class BrokerConnectionService:
                     raise ValueError("Connection broker mismatch")
                 return connection
 
-            # Delete ALL existing connections for this user+broker to ensure single active connection
-            session.query(models.BrokerConnection).filter(
-                models.BrokerConnection.user_id == user_id,
-                models.BrokerConnection.broker_name == broker_name,
-            ).delete()
-
+            # Create another account-level connection without deleting records that
+            # may be in use by another device. Explicit disconnect is the only
+            # operation that removes a connection.
             connection = models.BrokerConnection(
                 user_id=user_id,
                 broker_name=broker_name,

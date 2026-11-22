@@ -14,6 +14,8 @@ class ErrorResponse(BaseModel):
 
 class JobQueuedResponse(BaseModel):
     job_id: int
+    idempotency_key: Optional[str] = None
+    replayed: bool = False
 
 
 class JobStatus(BaseModel):

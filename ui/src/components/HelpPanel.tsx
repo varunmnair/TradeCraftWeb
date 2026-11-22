@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import {
-  Dialog,
   DialogTitle,
   DialogContent,
   IconButton,
@@ -11,6 +10,7 @@ import {
 import { Close as CloseIcon } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import { getHelpContent, HelpId } from '../help/helpRegistry';
+import { ResponsiveDialog } from './ResponsiveDialog';
 
 interface HelpPanelProps {
   open: boolean;
@@ -23,14 +23,12 @@ export function HelpPanel({ open, onClose, helpId = 'app' }: HelpPanelProps) {
   const entry = getHelpContent(helpId);
 
   return (
-    <Dialog
+    <ResponsiveDialog
       open={open}
       onClose={onClose}
       maxWidth="md"
       fullWidth
-      PaperProps={{
-        sx: { maxHeight: '80vh' },
-      }}
+      paperSx={{ maxHeight: { xs: '100vh', sm: '80vh' } }}
     >
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', pb: 1 }}>
         <Typography variant="h6" component="div">
@@ -51,6 +49,6 @@ export function HelpPanel({ open, onClose, helpId = 'app' }: HelpPanelProps) {
           </Box>
         )}
       </DialogContent>
-    </Dialog>
+    </ResponsiveDialog>
   );
 }

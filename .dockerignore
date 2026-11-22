@@ -1,53 +1,69 @@
-# Python
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Version control and CI metadata
+.git/
+.github/
+.gitignore
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Python virtual environments, build artifacts, and caches
+venv/
+.venv/
+env/
+ENV/
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-venv/
-env/
-.venv/
-
-# Git
-.git/
-.gitignore
-
-# UI node_modules (installed during build)
-ui/node_modules/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Auth and data (sensitive)
-auth/
-data/
-*.pkl
-
-# Environment files
-.env
-.env.*
-!.env.example
-
-# Logs
-*.log
-logs/
-
-# Tests
 .pytest_cache/
-.coverage
-htmlcov/
-
-# Misc
+.mypy_cache/
 *.egg-info/
 dist/
 build/
-.DS_Store
-Thumbs.db
 
-# Local development
+# Legacy auth package and local runtime data/databases
+auth/
+data/
+logs/
+storage/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.pkl
+
+# Node build artifacts and dependencies
+node_modules/
+ui/node_modules/
+ui/dist/
+
+# Tests and local reports are not needed in the runtime image
+tests/
+htmlcov/
+coverage.xml
+.coverage
+.coverage.*
+
+# Raw exports and screenshots must never enter the image
+screenshots/
+*.csv
+*.xlsx
+
+# Logs, local docs, and packaging metadata
+*.log
 *.md
 README*
 LICENSE

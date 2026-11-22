@@ -101,6 +101,40 @@ class Job(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class OrderPlacement(Base):
+    """Durable idempotency record for broker order placement requests.
+
+    A unique (user_id, idempotency_key) pair guarantees that a retried request
+    cannot submit the same broker orders twice. Status is retained after
+    completion so the original per-order outcome can be replayed to clients.
+    """
+
+    __tablename__ = "order_placements"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    idempotency_key = Column(String(255), nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    session_id = Column(String(255), nullable=False)
+    broker_name = Column(String(50), nullable=True)
+    broker_connection_id = Column(Integer, nullable=True)
+    device_id = Column(String(100), nullable=True)
+    status = Column(String(32), nullable=False, default="in_flight")
+    result_json = Column(Text, nullable=True)
+    error_json = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "idempotency_key", name="uq_order_placement_user_key"
+        ),
+        Index("ix_order_placements_session", "session_id"),
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

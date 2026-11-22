@@ -134,6 +134,7 @@ dmypy.json
 .vscode/
 
 # Project Specific
+screenshots/
 *.csv
 *.xlsx
 #*.json

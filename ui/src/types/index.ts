@@ -86,6 +86,41 @@ export interface SessionCreate {
   warm_start?: boolean;
 }
 
+export type SessionReadiness =
+  | 'CONNECTED'
+  | 'INITIALIZING'
+  | 'LOADING'
+  | 'READY'
+  | 'ERROR';
+
+export interface BrokerAccountStatus {
+  connection_id: number;
+  broker_name: string;
+  broker_user_id?: string | null;
+  token_status: string;
+  expires_at?: string | null;
+}
+
+export interface BrokerSessionBootstrapRequest {
+  broker_name?: string | null;
+  broker_connection_id?: number | null;
+  warm_start?: boolean;
+}
+
+export interface BrokerSessionBootstrapResponse {
+  status: SessionReadiness;
+  broker_connected: boolean;
+  requires_selection: boolean;
+  broker_name?: string | null;
+  connection_id?: number | null;
+  broker_user_id?: string | null;
+  session_id?: string | null;
+  session?: SessionResponse | null;
+  candidates: BrokerAccountStatus[];
+  message?: string | null;
+  data_status?: string;
+}
+
 export interface JobStatus {
   id: number;
   session_id: string;
@@ -107,6 +142,8 @@ export interface JobListResponse {
 
 export interface JobQueuedResponse {
   job_id: number;
+  idempotency_key?: string;
+  replayed?: boolean;
 }
 
 export interface HoldingsLatestResponse {
@@ -231,12 +268,14 @@ export interface GTTPreviewRequest {
 export interface GTTConfirmRequest {
   session_id: string;
   plan: Record<string, unknown>[];
+  idempotency_key?: string;
 }
 
 export interface GTTApplyRequest {
   session_id: string;
   plan: Record<string, unknown>[];
   confirmation_token: string;
+  idempotency_key?: string;
 }
 
 export interface GTTConfirmResponse {
@@ -356,10 +395,10 @@ export interface EntryStrategyListResponse {
 }
 
 export interface InlineUpdateFields {
-  allocated?: number;
-  entry1?: number;
-  entry2?: number;
-  entry3?: number;
+  allocated?: number | null;
+  entry1?: number | null;
+  entry2?: number | null;
+  entry3?: number | null;
 }
 
 export interface InlineUpdateResponse {
@@ -615,6 +654,9 @@ export interface PlaceOrderResult {
   amount: number;
   status: string;
   remarks: string;
+  order_id?: string | null;
+  broker?: string | null;
+  broker_connection_id?: number | null;
 }
 
 export interface CandidatePlaceResponse {
@@ -622,4 +664,7 @@ export interface CandidatePlaceResponse {
   skipped: number;
   errors: string[];
   results: PlaceOrderResult[];
+  uncertain?: number;
+  idempotency_key?: string | null;
+  replayed?: boolean;
 }
