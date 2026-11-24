@@ -54,7 +54,10 @@ import {
   CandidatePlaceResponse,
 } from '../types';
 import { getDeviceId } from '../utils/deviceId';
-import { SESSION_EXPIRED_EVENT } from '../utils/sessionEvents';
+import {
+  SESSION_EXPIRED_EVENT,
+  SESSION_RESTORE_REQUIRED_EVENT,
+} from '../utils/sessionEvents';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -158,17 +161,35 @@ class ApiClient {
       }));
       const message = error.message || 'Request failed';
       const code = String(error.error_code || '').toLowerCase();
-      if (
+      const sessionExpired =
         code === 'session_not_found'
         || code === 'session_expired'
         || code === 'invalid_session'
-        || /session (not found|expired)/i.test(message)
-      ) {
+        || /session (not found|expired)/i.test(message);
+      const restoreRequired =
+        sessionExpired
+        || code === 'no_active_connection'
+        || code === 'connection_not_found'
+        || code === 'session_restoration_required'
+        || /no active broker connection|active broker connection not found/i.test(message);
+
+      if (sessionExpired) {
         window.dispatchEvent(
           new CustomEvent(SESSION_EXPIRED_EVENT, { detail: { message } }),
         );
       }
-      throw new Error(message);
+      if (restoreRequired) {
+        window.dispatchEvent(
+          new CustomEvent(SESSION_RESTORE_REQUIRED_EVENT, {
+            detail: { message, code, status: response.status },
+          }),
+        );
+      }
+
+      const errorWithCode = new Error(message) as Error & { code?: string; status?: number };
+      errorWithCode.code = code;
+      errorWithCode.status = response.status;
+      throw errorWithCode;
     }
 
     if (response.status === 204) {
@@ -364,7 +385,9 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const headers: HeadersInit = {};
+    const headers: HeadersInit = {
+      'X-Device-Id': getDeviceId(),
+    };
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
@@ -373,6 +396,7 @@ class ApiClient {
       method: 'POST',
       headers,
       body: formData,
+      credentials: 'include',
     });
 
     if (!response.ok) {
@@ -415,7 +439,9 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const headers: HeadersInit = {};
+    const headers: HeadersInit = {
+      'X-Device-Id': getDeviceId(),
+    };
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
@@ -424,6 +450,7 @@ class ApiClient {
       method: 'POST',
       headers,
       body: formData,
+      credentials: 'include',
     });
 
     if (!response.ok) {
@@ -593,7 +620,9 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const headers: HeadersInit = {};
+    const headers: HeadersInit = {
+      'X-Device-Id': getDeviceId(),
+    };
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
@@ -602,6 +631,7 @@ class ApiClient {
       method: 'POST',
       headers,
       body: formData,
+      credentials: 'include',
     });
 
     if (!response.ok) {
@@ -618,7 +648,9 @@ class ApiClient {
   }
 
   async downloadStrategiesCSV(): Promise<void> {
-    const headers: HeadersInit = {};
+    const headers: HeadersInit = {
+      'X-Device-Id': getDeviceId(),
+    };
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
@@ -626,10 +658,13 @@ class ApiClient {
     const response = await fetch(`${API_BASE_URL}/entry-strategies/download.csv`, {
       method: 'GET',
       headers,
+      credentials: 'include',
     });
 
     if (!response.ok) {
-      throw new Error('Failed to download strategies');
+      const body = await response.json().catch(() => ({}));
+      const message = body.message || body.detail || 'Failed to download strategies';
+      throw new Error(message);
     }
 
     const blob = await response.blob();
@@ -814,7 +849,9 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const headers: HeadersInit = {};
+    const headers: HeadersInit = {
+      'X-Device-Id': getDeviceId(),
+    };
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
@@ -823,6 +860,7 @@ class ApiClient {
       method: 'POST',
       headers,
       body: formData,
+      credentials: 'include',
     });
 
     if (!response.ok) {

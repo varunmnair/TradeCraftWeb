@@ -10,7 +10,6 @@ from api.dependencies import (
     get_job_runner,
     get_session_registry,
 )
-from api.errors import ServiceError
 from api.schemas.common import JobQueuedResponse
 from api.schemas.plan import (
     DynamicAvgGenerateRequest,
@@ -21,9 +20,9 @@ from core.auth.context import UserContext
 from core.runtime.job_runner import JobRunner
 from core.runtime.session_registry import SessionRegistry
 from core.services.entry_plan_service import (
-    EntryPlanService,
     STRATEGY_TYPE_DYNAMIC_AVERAGING,
     STRATEGY_TYPE_MULTI_LEVEL,
+    EntryPlanService,
 )
 
 router = APIRouter(prefix="/entries", tags=["entries"])
@@ -69,8 +68,10 @@ def latest_multi_level_plan(
         job_type=JOB_PLAN_GENERATE,
     )
     if not latest:
-        raise ServiceError(
-            "No multi-level plan available", error_code="no_results", http_status=404
+        return EntriesLatestResponse(
+            strategy_type=STRATEGY_TYPE_MULTI_LEVEL,
+            plan=[],
+            skipped=[],
         )
     return EntriesLatestResponse(
         strategy_type=STRATEGY_TYPE_MULTI_LEVEL,
@@ -108,10 +109,10 @@ def latest_dynamic_averaging_plan(
         job_type=JOB_DYNAMIC_AVG_GENERATE,
     )
     if not latest:
-        raise ServiceError(
-            "No dynamic averaging plan available",
-            error_code="no_results",
-            http_status=404,
+        return EntriesLatestResponse(
+            strategy_type=STRATEGY_TYPE_DYNAMIC_AVERAGING,
+            plan=[],
+            skipped=[],
         )
     return EntriesLatestResponse(
         strategy_type=STRATEGY_TYPE_DYNAMIC_AVERAGING,
@@ -123,7 +124,9 @@ def latest_dynamic_averaging_plan(
 @router.delete("/purge")
 def purge_plans(
     session_id: str,
-    strategy_type: str = Query(None, description="Optional: filter by strategy type (multi_level or dynamic_averaging)"),
+    strategy_type: str = Query(
+        None, description="Optional: filter by strategy type (multi_level or dynamic_averaging)"
+    ),
     entry_service: EntryPlanService = Depends(get_entry_plan_service),
     registry: SessionRegistry = Depends(get_session_registry),
     current_user: UserContext = Depends(get_current_user),
@@ -165,8 +168,10 @@ def latest_plan(
         job_type=JOB_PLAN_GENERATE,
     )
     if not latest:
-        raise ServiceError(
-            "No plan available", error_code="no_results", http_status=404
+        return EntriesLatestResponse(
+            strategy_type=STRATEGY_TYPE_MULTI_LEVEL,
+            plan=[],
+            skipped=[],
         )
     return EntriesLatestResponse(
         strategy_type=STRATEGY_TYPE_MULTI_LEVEL,
@@ -207,10 +212,10 @@ def latest_dynamic_avg_plan(
         job_type=JOB_DYNAMIC_AVG_GENERATE,
     )
     if not latest:
-        raise ServiceError(
-            "No dynamic averaging plan available",
-            error_code="no_results",
-            http_status=404,
+        return EntriesLatestResponse(
+            strategy_type=STRATEGY_TYPE_DYNAMIC_AVERAGING,
+            plan=[],
+            skipped=[],
         )
     return EntriesLatestResponse(
         strategy_type=STRATEGY_TYPE_DYNAMIC_AVERAGING,

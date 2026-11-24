@@ -44,6 +44,7 @@ import { api } from '../api/client';
 import { useNavigate } from 'react-router-dom';
 import { EntryStrategySummary, EvaluateStrategyResponse, CellStatus } from '../types';
 import { useSession } from '../context/SessionContext';
+import { useBrokerSessionOrchestrator } from '../context/BrokerSessionContext';
 import { BulkRevisionModal } from '../components/BulkRevisionModal';
 import { InlineEditCell } from '../components/InlineEditCell';
 import { ResponsiveToolbar } from '../components/ResponsiveToolbar';
@@ -78,6 +79,13 @@ const normalizeSymbol = (symbol: string): string =>
 
 export default function EntryStrategiesPage() {
   const { sessionId } = useSession();
+  const {
+    status: sessionReadiness,
+    message: sessionMessage,
+    retry: retrySession,
+    bootstrap: bootstrapSession,
+  } = useBrokerSessionOrchestrator();
+  const sessionReady = Boolean(sessionId) && sessionReadiness === 'READY';
   const [strategies, setStrategies] = useState<EntryStrategySummary[]>([]);
   const [holdingsSymbols, setHoldingsSymbols] = useState<Set<string>>(new Set());
   const [cmpData, setCmpData] = useState<Record<string, number>>({});
@@ -206,7 +214,7 @@ export default function EntryStrategiesPage() {
   }, []);
 
   const fetchHoldings = useCallback(async () => {
-    if (!sessionId) {
+    if (!sessionReady || !sessionId) {
       setHoldingsSymbols(new Set());
       setHoldingsLoading(false);
       return;
@@ -226,9 +234,14 @@ export default function EntryStrategiesPage() {
     } finally {
       setHoldingsLoading(false);
     }
-  }, [sessionId]);
+  }, [sessionReady, sessionId]);
 
   const fetchStrategies = useCallback(async () => {
+    if (!sessionReady) {
+      setStrategies([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const data = await api.listEntryStrategies();
@@ -245,7 +258,7 @@ export default function EntryStrategiesPage() {
     } finally {
       setLoading(false);
     }
-  }, [fetchCmp]);
+  }, [fetchCmp, sessionReady]);
 
   useEffect(() => {
     fetchStrategies();
@@ -336,7 +349,20 @@ export default function EntryStrategiesPage() {
     setSuccess('');
 
     try {
-      const result = await api.uploadEntryStrategyCSV(file);
+      const result = await (async () => {
+        try {
+          return await api.uploadEntryStrategyCSV(file);
+        } catch (err) {
+          const code = (err as Error & { code?: string }).code || '';
+          const canRestore =
+            code === 'no_active_connection' || code === 'connection_not_found';
+          if (!canRestore) throw err;
+
+          const restored = await bootstrapSession();
+          if (restored?.status !== 'READY') throw err;
+          return api.uploadEntryStrategyCSV(file);
+        }
+      })();
       let msg = `Upload complete: ${result.created_count} created, ${result.updated_count} updated`;
       if (result.errors.length > 0) {
         msg += `. ${result.errors.length} errors`;
@@ -630,11 +656,26 @@ export default function EntryStrategiesPage() {
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
           <CircularProgress />
         </Box>
-      ) : !sessionId ? (
+      ) : !sessionReady ? (
         <Paper sx={{ p: 4, textAlign: 'center' }}>
           <Typography variant="body1" color="text.secondary">
-            No active session. Please start a session to view or manage entry strategies.
+            {!sessionId
+              ? 'No active session. Open Broker Accounts to prepare a trading session.'
+              : sessionReadiness === 'ERROR'
+                ? sessionMessage || 'Unable to prepare trading session. Retry.'
+                : sessionReadiness === 'INITIALIZING'
+                  ? 'Preparing trading session...'
+                  : sessionReadiness === 'LOADING'
+                    ? 'Loading session data...'
+                    : sessionReadiness === 'CONNECTED'
+                      ? 'Broker connected. Preparing trading session.'
+                      : 'Preparing trading session...'}
           </Typography>
+          {sessionReadiness === 'ERROR' && (
+            <Button size="small" sx={{ mt: 1 }} onClick={() => void retrySession()}>
+              Retry
+            </Button>
+          )}
         </Paper>
       ) : strategies.length === 0 ? (
         <Paper sx={{ p: 4, textAlign: 'center' }}>

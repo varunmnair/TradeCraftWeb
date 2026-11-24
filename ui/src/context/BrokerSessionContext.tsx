@@ -8,6 +8,7 @@ import React, {
   type ReactNode,
 } from 'react';
 import { api } from '../api/client';
+import { SESSION_RESTORE_REQUIRED_EVENT } from '../utils/sessionEvents';
 import type {
   BrokerAccountStatus,
   BrokerSessionBootstrapRequest,
@@ -20,6 +21,7 @@ import { useSession } from './SessionContext';
 
 const SESSION_STORAGE_KEY = 'tradecraftx_session_id';
 const OAUTH_PENDING_KEY = 'tradecraftx_oauth_pending_broker';
+const AUTO_RESTORE_SUPPRESSED_KEY = 'tradecraftx_auto_restore_suppressed';
 
 export interface BrokerSessionState {
   status: SessionReadiness;
@@ -34,6 +36,7 @@ export interface BrokerSessionState {
 interface BrokerSessionOrchestratorValue extends BrokerSessionState {
   bootstrap: (
     request?: BrokerSessionBootstrapRequest,
+    options?: { force?: boolean },
   ) => Promise<BrokerSessionBootstrapResponse | null>;
   retry: () => Promise<BrokerSessionBootstrapResponse | null>;
   clearSession: () => void;
@@ -84,13 +87,29 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
     setSessionInfo(null);
     setSelectedConnectionId(null);
     localStorage.removeItem(SESSION_STORAGE_KEY);
+    sessionStorage.removeItem(AUTO_RESTORE_SUPPRESSED_KEY);
   }, [setSelectedConnectionId, setSessionId, setSessionInfo]);
 
   const bootstrap = useCallback(
     async (
       request: BrokerSessionBootstrapRequest = {},
+      options: { force?: boolean } = {},
     ): Promise<BrokerSessionBootstrapResponse | null> => {
       lastRequestRef.current = request;
+      const hasExplicitSelection = Boolean(request.broker_name || request.broker_connection_id);
+
+      if (hasExplicitSelection || options.force) {
+        sessionStorage.removeItem(AUTO_RESTORE_SUPPRESSED_KEY);
+      } else if (sessionStorage.getItem(AUTO_RESTORE_SUPPRESSED_KEY) === '1') {
+        setState((previous) => ({
+          ...previous,
+          status: 'CONNECTED',
+          message: 'Trading session ended. Select an account to continue.',
+          requiresSelection: false,
+        }));
+        return null;
+      }
+
       const key = [
         request.broker_name || '',
         request.broker_connection_id ?? '',
@@ -156,13 +175,17 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
     [setSelectedConnectionId, setSessionId, setSessionInfo],
   );
 
-  const retry = useCallback(() => bootstrap(lastRequestRef.current), [bootstrap]);
+  const retry = useCallback(
+    () => bootstrap(lastRequestRef.current, { force: true }),
+    [bootstrap],
+  );
 
   const clearSession = useCallback(() => {
+    sessionStorage.setItem(AUTO_RESTORE_SUPPRESSED_KEY, '1');
     setState((previous) => ({
       ...previous,
       status: 'CONNECTED',
-      message: null,
+      message: 'Trading session ended. Select an account to continue.',
       requiresSelection: false,
     }));
     setSessionId(null);
@@ -187,6 +210,14 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
 
     void bootstrap({});
   }, [bootstrap, reset, user?.id]);
+
+  useEffect(() => {
+    const handleRestoreRequired = () => {
+      void bootstrap({});
+    };
+    window.addEventListener(SESSION_RESTORE_REQUIRED_EVENT, handleRestoreRequired);
+    return () => window.removeEventListener(SESSION_RESTORE_REQUIRED_EVENT, handleRestoreRequired);
+  }, [bootstrap]);
 
   return (
     <BrokerSessionContext.Provider value={{ ...state, bootstrap, retry, clearSession }}>
