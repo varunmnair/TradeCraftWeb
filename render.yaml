@@ -1,32 +1,34 @@
-# TradeCraftX Deployment Configuration for Render
-# Docs: https://render.com/docs/yaml
+# TradeCraftWeb - Render Free Tier Deployment
 #
-# Secrets are intentionally marked with `sync: false`; supply them in the
-# Render Dashboard when the Blueprint is applied. Never commit secret values.
+# GitHub:
+# https://github.com/varunmnair/TradeCraftWeb
+#
+# IMPORTANT:
+# Free-tier SQLite storage is temporary.
+# Database changes will be lost after restart,
+# redeployment or service spin-down.
 
 services:
   - type: web
-    name: tradecraftx
+    name: tradecraftweb
     runtime: docker
     region: oregon
-    plan: 0.5c-512mb
+    plan: free
     numInstances: 1
+
     dockerfilePath: ./Dockerfile
+
+    autoDeployTrigger: off
+
     healthCheckPath: /ready
 
-    # SQLite is persisted on this disk. The mount path must match DATABASE_URL.
-    # A persistent disk requires a paid plan and supports only one instance.
-    disk:
-      name: app-data
-      mountPath: /app/data
-      sizeGB: 5
-
     envVars:
+
       # Application mode
       - key: APP_MODE
         value: prod
 
-      # Production security
+      # Security
       - key: ALLOW_INSECURE_TOKENS
         value: "0"
 
@@ -36,20 +38,23 @@ services:
       - key: TOKEN_ENCRYPTION_KEY
         sync: false
 
-      # Database: absolute SQLite path under the persistent disk mount.
+      # Temporary SQLite database
       - key: DATABASE_URL
         value: sqlite:////app/data/tradecraftx.db
 
-      # The built UI is served by the API on the same origin. Keep CORS exact
-      # rather than using a wildcard with credentialed requests.
+      # Production cookie security
+      - key: COOKIE_SECURE
+        value: "1"
+
+      # Application origin
       - key: CORS_ALLOWED_ORIGINS
-        value: https://tradecraftx.onrender.com
+        value: https://tradecraftweb.onrender.com
 
-      # Mobile OAuth returns to /broker-connections on this origin.
+      # Mobile OAuth return
       - key: OAUTH_FRONTEND_ORIGIN
-        value: https://tradecraftx.onrender.com
+        value: https://tradecraftweb.onrender.com
 
-      # Upstox credentials and exact registered callback URL.
+      # Upstox
       - key: UPSTOX_API_KEY
         sync: false
 
@@ -57,13 +62,12 @@ services:
         sync: false
 
       - key: UPSTOX_REDIRECT_URI
-        value: https://tradecraftx.onrender.com/brokers/upstox/callback
+        value: https://tradecraftweb.onrender.com/brokers/upstox/callback
 
-      # Long-lived read-only analytics token used for CMP/OHLCV data.
       - key: UPSTOX_ANALYTICS_TOKEN
         sync: false
 
-      # Zerodha credentials and exact registered callback URL.
+      # Zerodha
       - key: KITE_API_KEY
         sync: false
 
@@ -71,13 +75,13 @@ services:
         sync: false
 
       - key: KITE_REDIRECT_URI
-        value: https://tradecraftx.onrender.com/brokers/zerodha/callback
+        value: https://tradecraftweb.onrender.com/brokers/zerodha/callback
 
-      # Optional: promotes/creates the first admin on startup.
+      # Optional admin initialization
       - key: BOOTSTRAP_ADMIN_EMAIL
         sync: false
 
-      # Optional AI providers.
+      # Optional AI integrations
       - key: GEMINI_API_KEY
         sync: false
 
