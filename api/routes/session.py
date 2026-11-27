@@ -264,17 +264,9 @@ def get_active_connection(
     if not connection.broker_user_id:
         bundle = session_manager.get_token_bundle(connection.broker_name, connection_id=connection.id)
         if bundle and bundle.broker_user_id:
-            from db.database import SessionLocal
-            from db import models
-            db = SessionLocal()
-            try:
-                conn_record = db.get(models.BrokerConnection, connection.id)
-                if conn_record:
-                    conn_record.broker_user_id = bundle.broker_user_id
-                    db.commit()
-                    connection = conn_record
-            finally:
-                db.close()
+            connection = connection_service.set_broker_user_id(
+                connection_id=connection.id, broker_user_id=bundle.broker_user_id
+            ) or connection
 
     return ActiveConnectionResponse(
         broker_connection_id=connection.id,

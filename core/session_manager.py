@@ -79,6 +79,24 @@ class SessionManager:
             user_id=user_id,
         )
 
+    def clear_tokens(
+        self,
+        broker_name: str,
+        *,
+        connection_id: int | None = None,
+        user_id: int | None = None,
+    ) -> bool:
+        clear = getattr(self.token_store, "clear_tokens", None)
+        if callable(clear):
+            return bool(
+                clear(
+                    broker_name,
+                    connection_id=connection_id,
+                    user_id=user_id,
+                )
+            )
+        return False
+
     def disconnect(
         self,
         broker_name: str,

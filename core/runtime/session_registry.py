@@ -242,18 +242,22 @@ class SessionRegistry:
             if context.expires_at and context.expires_at < datetime.now(timezone.utc):
                 del self._records[session_id]
                 return None
-            
+
             # Load order history from DB if not already loaded
             if context.session_cache and not context.session_cache.get_order_history_status()["available"]:
                 self._load_session_order_history(context)
-            
+
             return context
 
     def _load_session_order_history(self, context: "SessionContext") -> None:
         """Load order history from database into session cache."""
         try:
-            from api.routes.holdings_v2 import _load_trades_from_db, _load_trades_by_user, _update_trades_session_id
-            
+            from api.routes.holdings_v2 import (
+                _load_trades_by_user,
+                _load_trades_from_db,
+                _update_trades_session_id,
+            )
+
             trades = _load_trades_from_db(context.session_id)
             source = None
             if not trades:
@@ -312,7 +316,7 @@ class SessionRegistry:
         if context:
             # Clear session-scoped holdings and order history
             self._clear_session_data(context)
-        
+
         with self._lock:
             self._records.pop(session_id, None)
 
@@ -347,6 +351,25 @@ class SessionRegistry:
                 del self._records[sid]
             return len(to_evict)
 
+    def evict_other_sessions_for_device(
+        self, user_id: int, device_id: str, keep_session_id: str
+    ) -> int:
+        """Evict other trading sessions for the same device, keeping one active."""
+        with self._lock:
+            to_evict = [
+                sid
+                for sid, ctx in self._records.items()
+                if ctx.user_record_id == user_id
+                and ctx.device_id == device_id
+                and sid != keep_session_id
+            ]
+            for sid in to_evict:
+                ctx = self._records.get(sid)
+                if ctx:
+                    self._clear_session_data(ctx)
+                del self._records[sid]
+            return len(to_evict)
+
     def evict_all_for_user(self, user_id: int) -> int:
         """Evict every trading session for a user (logout-all only)."""
         with self._lock:
@@ -366,11 +389,11 @@ class SessionRegistry:
         """Clear all session-scoped data including holdings, order history, entry strategies, and entry plans."""
         try:
             logger.info(f"Clearing session data for session: {context.session_id}, user_id: {context.user_record_id}")
-            
+
             if hasattr(context, 'session_cache') and context.session_cache:
                 context.session_cache.clear_order_history()
                 context.session_cache.holdings = []
-            
+
             dm = SessionDataManager(context)
             logger.info(f"SessionDataManager user_id: {dm.user_id}, broker: {dm.broker_name}")
 
@@ -386,13 +409,13 @@ class SessionRegistry:
                     db.close()
 
             if is_premium:
-                logger.info(f"Premium user - only purging holdings, keeping entry strategies and order history")
+                logger.info("Premium user - only purging holdings, keeping entry strategies and order history")
                 dm.purge_holdings()
             else:
                 dm.purge_all()
 
             self._purge_entry_plans(context.session_id)
-            
+
             logging.info(f"Cleared session data for session: {context.session_id}")
         except Exception as e:
             logging.warning(f"Failed to clear session data: {e}")
@@ -402,7 +425,7 @@ class SessionRegistry:
         try:
             from db.database import SessionLocal
             from db.models import Job
-            
+
             db = SessionLocal()
             try:
                 count = db.query(Job).filter(

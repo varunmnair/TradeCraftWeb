@@ -23,6 +23,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(userData);
       sessionStorage.setItem('user', JSON.stringify(userData));
     } catch {
+      // A failed /auth/me means the bearer token is no longer usable. Clear it
+      // so later requests cannot look authenticated while this tab is not.
+      api.setToken(null);
       setUser(null);
       sessionStorage.removeItem('user');
     }
@@ -41,6 +44,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await api.logout();
     } finally {
+      api.setToken(null);
       setUser(null);
       sessionStorage.removeItem('user');
     }

@@ -64,6 +64,7 @@ interface CandidateMobileControlsProps {
   onClearFilters: () => void;
   selectedCount: number;
   busy: boolean;
+  sortableFields?: string[];
 }
 
 export function CandidateMobileControls({
@@ -78,15 +79,19 @@ export function CandidateMobileControls({
   onClearFilters,
   selectedCount,
   busy,
+  sortableFields,
 }: CandidateMobileControlsProps) {
   const [sortAnchorEl, setSortAnchorEl] = useState<HTMLElement | null>(null);
   const activeFilterCount = [
     strategyFilter !== 'ALL',
     statusFilter !== 'ALL',
   ].filter(Boolean).length;
+  const visibleSortFields = sortableFields
+    ? SORT_FIELDS.filter((f) => sortableFields.includes(f.field))
+    : SORT_FIELDS;
   const currentSort = sortBy ?? INITIAL_CANDIDATE_SORT;
   const currentSortLabel =
-    SORT_FIELDS.find((field) => field.field === currentSort.field)?.label ?? 'Symbol';
+    visibleSortFields.find((field) => field.field === currentSort.field)?.label ?? visibleSortFields[0]?.label ?? 'Symbol';
 
   return (
     <Box sx={{ mb: 2 }}>
@@ -169,7 +174,7 @@ export function CandidateMobileControls({
         anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
         transformOrigin={{ vertical: 'top', horizontal: 'left' }}
       >
-        {SORT_FIELDS.map((field) => (
+        {visibleSortFields.map((field) => (
           <MenuItem
             key={field.field}
             selected={sortBy?.field === field.field}

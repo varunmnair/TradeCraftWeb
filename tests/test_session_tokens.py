@@ -57,6 +57,47 @@ def test_db_token_store_roundtrip(engine):
     assert bundle.raw_profile["name"] == "User"
 
 
+def test_store_tokens_releases_conflicting_broker_identity(engine):
+    SessionTesting = sessionmaker(bind=engine)
+    store = DbTokenStore(session_factory=SessionTesting)
+    with SessionTesting() as session:
+        user = models.User(email="collision@example.com", role="admin")
+        session.add(user)
+        session.flush()
+        existing = models.BrokerConnection(
+            user_id=user.id,
+            broker_name="upstox",
+            broker_user_id="SAMEID",
+            encrypted_tokens=b"old-tokens",
+            metadata_json=json.dumps({}),
+        )
+        placeholder = models.BrokerConnection(
+            user_id=user.id,
+            broker_name="upstox",
+            metadata_json=json.dumps({}),
+        )
+        session.add_all([existing, placeholder])
+        session.commit()
+        existing_id, placeholder_id = existing.id, placeholder.id
+
+    store.store_tokens(
+        "upstox",
+        {"access_token": "NEWTOKEN", "broker_user_id": "SAMEID"},
+        connection_id=placeholder_id,
+    )
+
+    bundle = store.get_tokens("upstox", connection_id=placeholder_id)
+    assert bundle is not None
+    assert bundle.access_token == "NEWTOKEN"
+
+    with SessionTesting() as session:
+        target = session.get(models.BrokerConnection, placeholder_id)
+        stale = session.get(models.BrokerConnection, existing_id)
+        assert target.broker_user_id == "SAMEID"
+        assert stale.broker_user_id is None
+        assert stale.encrypted_tokens is None
+
+
 def test_session_registry_reads_tokens_from_db(engine, monkeypatch):
     SessionTesting = sessionmaker(bind=engine)
     store = DbTokenStore(session_factory=SessionTesting)

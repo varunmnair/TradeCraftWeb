@@ -10,9 +10,9 @@ from sqlalchemy.orm import sessionmaker
 
 from core.auth.active_connection_store import ActiveConnectionStore
 from core.auth.context import UserContext
+from core.runtime.session_registry import SessionRegistry
 from core.security.passwords import hash_password
 from core.services.auth_service import AuthService
-from core.runtime.session_registry import SessionRegistry
 from core.services.broker_connection_service import BrokerConnectionService
 from core.session_tokens import DbTokenStore
 from db import models
@@ -84,7 +84,7 @@ def test_multiple_sessions_per_user_and_device_isolation():
     assert registry.get_session(mobile.session_id) is not None
 
 
-def test_broker_reconnection_does_not_delete_other_connections():
+def test_broker_reconnection_reuses_the_existing_connection():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(bind=engine)
     factory = sessionmaker(bind=engine)
@@ -96,8 +96,48 @@ def test_broker_reconnection_does_not_delete_other_connections():
     first = service.ensure_connection(user_id=1, broker_name="upstox")
     second = service.ensure_connection(user_id=1, broker_name="upstox")
 
-    assert first.id != second.id
-    assert len(service.list_connections(user_id=1)) == 2
+    assert first.id == second.id
+    assert len(service.list_connections(user_id=1)) == 1
+
+    # A stale placeholder is preferred over nothing, but a row with tokens wins.
+    with factory() as session:
+        session.add(
+            models.BrokerConnection(
+                user_id=1,
+                broker_name="zerodha",
+                broker_user_id="TOKENHOLDER",
+                encrypted_tokens=b"tokens",
+                metadata_json="{}",
+            )
+        )
+        session.commit()
+    connection = service.ensure_connection(user_id=1, broker_name="zerodha")
+    assert connection.broker_user_id == "TOKENHOLDER"
+
+    # Stale ids kept in localStorage must not break reconnect.
+    stale = service.ensure_connection(
+        user_id=1, broker_name="upstox", connection_id=first.id + 999
+    )
+    assert stale.id == first.id
+
+    # An id left in localStorage by a different account must not be adopted.
+    with factory() as session:
+        other = models.User(email="other@example.com")
+        session.add(other)
+        session.commit()
+        other_connection = models.BrokerConnection(
+            user_id=other.id,
+            broker_name="upstox",
+            metadata_json="{}",
+        )
+        session.add(other_connection)
+        session.commit()
+        other_id = other_connection.id
+    foreign = service.ensure_connection(
+        user_id=1, broker_name="upstox", connection_id=other_id
+    )
+    assert foreign.id == first.id
+    assert foreign.user_id == 1
 
 
 def test_store_tokens_reuses_connection_without_deleting_others():

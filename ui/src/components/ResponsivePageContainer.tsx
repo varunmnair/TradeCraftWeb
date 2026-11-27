@@ -10,9 +10,9 @@ interface ResponsivePageContainerProps {
 }
 
 /**
- * Shell-level content wrapper. Desktop geometry (24px padding, 240px drawer
- * offset, 64px top offset, 80px bottom margin) is unchanged. On mobile the
- * bottom padding reserves room for the bottom navigation and safe area.
+ * Page content wrapper. Desktop geometry (24px padding, 80px bottom margin)
+ * is preserved. On mobile the bottom padding reserves room for the bottom
+ * navigation and safe area. Shell sizing/offset is owned by Layout.
  */
 export function ResponsivePageContainer({
   children,
@@ -21,15 +21,13 @@ export function ResponsivePageContainer({
 }: ResponsivePageContainerProps) {
   return (
     <Box
-      component="main"
       className={className}
       sx={{
         flexGrow: 1,
-        width: { sm: `calc(100% - ${layout.drawerWidth}px)` },
         p: layout.contentPadding,
         pb: { xs: mobileBottomSpacing.content, sm: layout.contentPadding.sm * 8 },
-        mt: 8,
         mb: { xs: 0, sm: 10 },
+        minWidth: 0,
         ...sx,
       }}
     >

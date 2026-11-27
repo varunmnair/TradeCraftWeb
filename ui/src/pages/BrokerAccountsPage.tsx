@@ -3,80 +3,79 @@ import {
   Alert,
   Box,
   Button,
-  Card,
-  CardContent,
-  Chip,
   CircularProgress,
   DialogActions,
   DialogContent,
   DialogTitle,
-  IconButton,
-  Menu,
-  MenuItem,
-  Step,
-  StepLabel,
-  Stepper,
-  Tooltip,
   Typography,
   useMediaQuery,
   useTheme,
 } from '@mui/material';
 import {
-  Add as AddIcon,
   Check as CheckIcon,
-  Cloud as ZerodhaIcon,
-  CloudDone as UpstoxIcon,
-  Delete as DeleteIcon,
   Error as ErrorIcon,
-  MoreVert as MoreIcon,
   Refresh as RefreshIcon,
-  StopCircle as EndSessionIcon,
   Warning as WarningIcon,
 } from '@mui/icons-material';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import { useBrokerSessionOrchestrator } from '../context/BrokerSessionContext';
 import { useSession } from '../context/SessionContext';
 import type {
-  BrokerAccountStatus,
+  ActiveConnectionResponse,
   BrokerConnectionResponse,
   SessionResponse,
 } from '../types';
 import { ResponsiveDialog } from '../components/ResponsiveDialog';
 import { ResponsivePageHeader } from '../components/ResponsivePageHeader';
-import { MobileBrokerAccountCard } from '../components/broker-connections/MobileBrokerAccountCard';
+import {
+  BrokerAccountCard,
+  type BrokerAccountOption,
+  type BrokerCardStatus,
+} from '../components/broker-connections/MobileBrokerAccountCard';
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 30;
+const BROKERS = ['zerodha', 'upstox'] as const;
 
 const STORAGE_KEY_UPSTOX = 'tradecraftx_upstox_connection_id';
 const STORAGE_KEY_ZERODHA = 'tradecraftx_zerodha_connection_id';
 const STORAGE_KEY_SESSION = 'tradecraftx_session_id';
 const STORAGE_KEY_OAUTH_PENDING = 'tradecraftx_oauth_pending_broker';
+const STORAGE_KEY_OAUTH_PENDING_CONNECTION = 'tradecraftx_oauth_pending_connection_id';
 
-type BrokerName = 'upstox' | 'zerodha';
-type ConnectionTone = 'default' | 'warning' | 'success';
+type BrokerName = (typeof BROKERS)[number];
 
 interface BrokerStatus {
   connected: boolean;
   broker_user_id: string | null;
   token_updated_at: string | null;
   connection_id: number;
-  expires_at: string | null;
   token_status: 'valid' | 'expired' | 'missing';
 }
 
-interface AccountView {
-  connection: BrokerConnectionResponse;
-  status: BrokerStatus | null;
-  connected: boolean;
-  connectionLabel: string;
-  connectionTone: ConnectionTone;
-  accountId: string;
-  tradingStatus: string;
-  dataStatus: string;
-  lastRefresh: string;
+interface BrokerCardModel {
+  broker: BrokerName;
+  status: BrokerCardStatus;
+  statusLabel: string;
+  detail: string | null;
+  accounts: BrokerAccountOption[];
+  selectedConnectionId: number | null;
+  accountId: string | null;
+  sessionInfo: { holdings: string; lastRefreshed: string } | null;
+  primaryLabel: string;
+  primaryDisabled: boolean;
+  busy: boolean;
   hasSession: boolean;
+  canManage: boolean;
 }
+
+const STATUS_LABELS: Record<BrokerCardStatus, string> = {
+  NOT_CONNECTED: 'Not Connected',
+  CONNECTING: 'Connecting...',
+  READY: 'Ready to Trade',
+  ATTENTION_REQUIRED: 'Attention Required',
+};
 
 function brokerLabel(broker: string | null | undefined): string {
   if (broker === 'zerodha') return 'Zerodha';
@@ -84,35 +83,103 @@ function brokerLabel(broker: string | null | undefined): string {
   return broker ? broker.charAt(0).toUpperCase() + broker.slice(1) : 'Broker';
 }
 
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return 'Not available';
+function friendlyError(message: string | null | undefined): string {
+  const text = (message || '').trim();
+  if (!text) return 'Session could not be started. Retry.';
+  if (/no longer valid|expired|reconnect|invalid/i.test(text)) {
+    return 'Broker authentication expired. Reconnect.';
+  }
+  if (/initialization failed|recovery failed|could not be started/i.test(text)) {
+    return 'Session could not be started. Retry.';
+  }
+  if (/no broker is connected/i.test(text)) {
+    return 'Connect a broker to start a trading session.';
+  }
+  return text;
+}
+
+function formatClock(value: string | null): string {
+  if (!value) return '—';
   try {
-    return new Date(dateStr).toLocaleString();
+    return new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   } catch {
-    return dateStr;
+    return '—';
   }
 }
 
-function connectionView(status: BrokerStatus | null): {
-  label: string;
-  tone: ConnectionTone;
-  connected: boolean;
-} {
-  if (!status || status.token_status === 'missing') {
-    return { label: 'Disconnected', tone: 'default', connected: false };
-  }
-  if (status.token_status === 'expired' || !status.connected) {
-    return { label: 'Expired', tone: 'warning', connected: false };
-  }
-  return { label: 'Connected', tone: 'success', connected: true };
+function storageKeyFor(broker: BrokerName, userId?: number): string {
+  const base = broker === 'upstox' ? STORAGE_KEY_UPSTOX : STORAGE_KEY_ZERODHA;
+  // Connection ids are user-scoped on the server. Keeping them in a global
+  // localStorage key leaks the previous account's ids into the next login.
+  return userId != null ? `${base}:user-${userId}` : base;
 }
 
-function BrokerIcon({ broker }: { broker: string }) {
-  return broker === 'upstox' ? (
-    <UpstoxIcon color="primary" fontSize="small" />
-  ) : (
-    <ZerodhaIcon fontSize="small" sx={{ color: '#283195' }} />
-  );
+function getPendingConnectionId(): number | undefined {
+  const raw = window.sessionStorage.getItem(STORAGE_KEY_OAUTH_PENDING_CONNECTION);
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function connectionErrorMessage(broker: BrokerName, error: unknown): string {
+  const label = brokerLabel(broker);
+  const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
+  if (code === 'internal_error') {
+    return `${label} connection failed on the server. Check the server logs and try again.`;
+  }
+  const message = error instanceof Error ? error.message.trim() : '';
+  return message ? `${label} connection failed: ${message}` : `${label} connection failed. Try again.`;
+}
+
+function oauthFailureMessage(
+  broker: BrokerName | string | null,
+  reason: string | null | undefined,
+): string {
+  const label = brokerLabel(broker);
+  const code = (reason || '').trim().toLowerCase();
+  if (code === 'cancelled') return `${label} login was cancelled.`;
+  if (code === 'invalid_state') return `${label} login timed out. Start a new connection.`;
+  if (code === 'missing_token') return `${label} did not return access tokens. Try again.`;
+  if (code === 'token_exchange_failed') {
+    return `${label} token exchange failed. Check broker credentials and server logs.`;
+  }
+  if (code === 'store_failed') {
+    return `${label} login succeeded but tokens could not be saved. Check server logs.`;
+  }
+  if (code) return `${label} login failed (${code}). Check server logs.`;
+  return `${label} connection failed. Try again.`;
+}
+
+function dedupeConnections(
+  connections: BrokerConnectionResponse[],
+  statuses: Map<number, BrokerStatus>,
+  active: ActiveConnectionResponse | null,
+): BrokerConnectionResponse[] {
+  const groups = new Map<string, BrokerConnectionResponse[]>();
+  for (const connection of connections) {
+    const identity = statuses.get(connection.id)?.broker_user_id || String(connection.id);
+    const key = `${connection.broker_name}:${identity}`;
+    const group = groups.get(key) || [];
+    group.push(connection);
+    groups.set(key, group);
+  }
+
+  const score = (connection: BrokerConnectionResponse) => {
+    const status = statuses.get(connection.id);
+    const valid = status?.connected && status.token_status === 'valid' && status.broker_user_id;
+    return (
+      (valid ? 1000 : 0) +
+      (connection.id === active?.broker_connection_id ? 100 : 0) +
+      connection.id
+    );
+  };
+
+  const result: BrokerConnectionResponse[] = [];
+  for (const group of groups.values()) {
+    group.sort((left, right) => score(right) - score(left));
+    result.push(group[0]);
+  }
+  return result;
 }
 
 export default function BrokerAccountsPage() {
@@ -120,22 +187,26 @@ export default function BrokerAccountsPage() {
   const [statusByConnection, setStatusByConnection] = useState<Map<number, BrokerStatus>>(
     new Map(),
   );
-  const [upstoxStatus, setUpstoxStatus] = useState<BrokerStatus | null>(null);
-  const [zerodhaStatus, setZerodhaStatus] = useState<BrokerStatus | null>(null);
-  const [activeConnectionId, setActiveConnectionId] = useState<number | null>(null);
+  const [activeConnection, setActiveConnection] = useState<ActiveConnectionResponse | null>(null);
   const [currentSession, setCurrentSession] = useState<SessionResponse | null>(null);
+  const [selectedAccountByBroker, setSelectedAccountByBroker] = useState<
+    Partial<Record<BrokerName, number>>
+  >({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshingData, setRefreshingData] = useState(false);
   const [endingSession, setEndingSession] = useState(false);
-  const [connecting, setConnecting] = useState(false);
+  const [busyBroker, setBusyBroker] = useState<BrokerName | null>(null);
+  const [activatingBroker, setActivatingBroker] = useState<BrokerName | null>(null);
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const [disconnectBroker, setDisconnectBroker] = useState<BrokerName | null>(null);
   const [endSessionDialogOpen, setEndSessionDialogOpen] = useState(false);
-  const [accountMenuAnchor, setAccountMenuAnchor] = useState<HTMLElement | null>(null);
-  const [menuAccount, setMenuAccount] = useState<AccountView | null>(null);
+
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+  const { user } = useAuth();
 
   // OAuth flow state
   const [oauthDialogOpen, setOauthDialogOpen] = useState(false);
@@ -147,27 +218,54 @@ export default function BrokerAccountsPage() {
   const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollAttemptsRef = useRef(0);
   const pollingActiveRef = useRef(false);
+  const pollGenerationRef = useRef(0);
+  const connectInFlightRef = useRef<BrokerName | null>(null);
   const clearPollingRef = useRef<() => void>(() => {});
-
-  const theme = useTheme();
-  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+  // Lets polling compare against the token that existed when it started
+  // without making startPolling change identity on every status refresh.
+  const statusByConnectionRef = useRef(statusByConnection);
+  statusByConnectionRef.current = statusByConnection;
 
   const {
     status: readinessStatus,
     message: sessionMessage,
     brokerConnected,
-    candidates,
-    requiresSelection,
-    bootstrap: bootstrapSession,
+    activateBroker,
     retry: retrySession,
     clearSession,
   } = useBrokerSessionOrchestrator();
   const { sessionId, setSessionId, setSessionInfo } = useSession();
 
+  const runActivation = useCallback(
+    async (broker: BrokerName, connectionId: number) => {
+      setActivatingBroker(broker);
+      setError('');
+      setSuccessMessage('');
+      try {
+        const response = await activateBroker(connectionId, broker);
+        if (response?.status === 'READY') {
+          setSuccessMessage(
+            response.message && /still active/i.test(response.message)
+              ? response.message
+              : `${brokerLabel(broker)} is ready to trade.`,
+          );
+        } else if (response) {
+          setError(friendlyError(response.message));
+        }
+      } finally {
+        setActivatingBroker(null);
+      }
+    },
+    [activateBroker],
+  );
+
   const fetchConnections = useCallback(async () => {
+    setRefreshing(true);
     try {
       const data = await api.listBrokerConnections();
-      setConnections(data);
+
+      const active = await api.getActiveConnection().catch(() => null);
+      setActiveConnection(active);
 
       const statuses = new Map<number, BrokerStatus>();
       await Promise.all(
@@ -186,7 +284,6 @@ export default function BrokerAccountsPage() {
                 broker_user_id: match.broker_user_id,
                 token_updated_at: match.token_updated_at,
                 connection_id: match.connection_id,
-                expires_at: match.expires_at,
                 token_status: match.token_status,
               });
             }
@@ -196,25 +293,26 @@ export default function BrokerAccountsPage() {
         }),
       );
       setStatusByConnection(statuses);
+      const visibleConnections = dedupeConnections(data, statuses, active);
+      setConnections(visibleConnections);
 
-      for (const broker of ['upstox', 'zerodha'] as BrokerName[]) {
-        const firstConnected = data.find(
-          (connection) =>
-            connection.broker_name === broker && statuses.get(connection.id)?.connected,
-        );
-        const status = firstConnected ? statuses.get(firstConnected.id) ?? null : null;
-        if (broker === 'upstox') setUpstoxStatus(status);
-        else setZerodhaStatus(status);
-        const storageKey = broker === 'upstox' ? STORAGE_KEY_UPSTOX : STORAGE_KEY_ZERODHA;
-        if (status) localStorage.setItem(storageKey, String(status.connection_id));
-        else localStorage.removeItem(storageKey);
-      }
-
-      try {
-        const active = await api.getActiveConnection();
-        setActiveConnectionId(active.broker_connection_id);
-      } catch {
-        setActiveConnectionId(null);
+      for (const broker of BROKERS) {
+        const valid = visibleConnections.filter((connection) => {
+          const status = statuses.get(connection.id);
+          return (
+            connection.broker_name === broker &&
+            status?.connected &&
+            status.token_status === 'valid' &&
+            Boolean(status.broker_user_id)
+          );
+        });
+        const preferred =
+          valid.find((connection) => connection.id === active?.broker_connection_id) ||
+          valid.find((connection) => statuses.get(connection.id)?.broker_user_id === active?.broker_user_id) ||
+          valid[0];
+        const key = storageKeyFor(broker, user?.id);
+        if (preferred) localStorage.setItem(key, String(preferred.id));
+        else localStorage.removeItem(key);
       }
 
       setLastRefreshedAt(new Date().toISOString());
@@ -222,10 +320,14 @@ export default function BrokerAccountsPage() {
       setError(err instanceof Error ? err.message : 'Failed to load broker accounts');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
+    // Drop the old account-agnostic keys once so ids cannot leak across users.
+    localStorage.removeItem(STORAGE_KEY_UPSTOX);
+    localStorage.removeItem(STORAGE_KEY_ZERODHA);
     void fetchConnections();
   }, [fetchConnections]);
 
@@ -266,36 +368,50 @@ export default function BrokerAccountsPage() {
     const oauthResult = params.get('oauth');
     if (oauthResult) {
       clearPollingRef.current();
+      setError('');
+      setSuccessMessage('');
       const pendingBroker = window.sessionStorage.getItem(STORAGE_KEY_OAUTH_PENDING);
+      const pendingConnectionRaw = window.sessionStorage.getItem(
+        STORAGE_KEY_OAUTH_PENDING_CONNECTION,
+      );
+      const pendingConnectionId = pendingConnectionRaw ? Number(pendingConnectionRaw) : undefined;
       const broker = params.get('broker') || pendingBroker;
       const reason = params.get('reason') || '';
       window.sessionStorage.removeItem(STORAGE_KEY_OAUTH_PENDING);
+      window.sessionStorage.removeItem(STORAGE_KEY_OAUTH_PENDING_CONNECTION);
       setOauthDialogOpen(false);
 
-      const verify = async (): Promise<boolean> => {
-        if (!broker) return false;
+      const verify = async (): Promise<number | null> => {
+        if (broker !== 'zerodha' && broker !== 'upstox') return null;
         try {
           const statuses =
             broker === 'zerodha'
               ? (await api.getZerodhaStatus()).connections
               : (await api.getUpstoxStatus()).connections;
-          return statuses.some((status) => status.connected);
+          // Only the connection authorized by this OAuth flow counts; a valid
+          // connection from an older account must not silently take over.
+          const match = statuses.find(
+            (status) =>
+              status.connected &&
+              status.token_status === 'valid' &&
+              status.connection_id === pendingConnectionId,
+          );
+          return match?.connection_id ?? null;
         } catch {
-          return false;
+          return null;
         }
       };
 
       void (async () => {
-        const verified = oauthResult === 'success' ? await verify() : false;
+        const verifiedConnectionId = oauthResult === 'success' ? await verify() : null;
         await fetchConnections();
-        if (oauthResult === 'success' && verified) {
-          setSuccessMessage(`${brokerLabel(broker)} connected successfully.`);
-          await bootstrapSession({ broker_name: broker ?? undefined });
+        if (oauthResult === 'success' && verifiedConnectionId != null) {
+          await runActivation(broker as BrokerName, verifiedConnectionId);
         } else if (oauthResult === 'success') {
-          setError(`${brokerLabel(broker)} connection could not be verified. Please try again.`);
+          setError(`${brokerLabel(broker)} connection could not be verified. Try again.`);
         } else {
-          const suffix = reason === 'cancelled' ? ' was cancelled.' : ' could not be completed.';
-          setError(`${brokerLabel(broker)} connection${suffix} Please try again.`);
+          console.warn('OAuth callback failed', { broker, reason });
+          setError(oauthFailureMessage(broker, reason));
         }
       })();
 
@@ -313,19 +429,26 @@ export default function BrokerAccountsPage() {
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin && event.origin !== apiOrigin) return;
       if (event.data?.type !== 'tradecraftx-oauth-complete') return;
+      setBusyBroker(null);
       const pendingBroker = event.data.broker || window.sessionStorage.getItem(STORAGE_KEY_OAUTH_PENDING);
+      const connectionId = getPendingConnectionId();
       window.sessionStorage.removeItem(STORAGE_KEY_OAUTH_PENDING);
-      if (event.data.success) {
-        setSuccessMessage(`${brokerLabel(pendingBroker)} connection completed. Status refreshed.`);
-        void bootstrapSession({ broker_name: pendingBroker ?? undefined });
+      window.sessionStorage.removeItem(STORAGE_KEY_OAUTH_PENDING_CONNECTION);
+      if (event.data.success && (pendingBroker === 'zerodha' || pendingBroker === 'upstox')) {
+        void (async () => {
+          if (connectionId !== undefined) await runActivation(pendingBroker, connectionId);
+          else setError(`${brokerLabel(pendingBroker)} connection could not be verified. Try again.`);
+          void fetchConnections();
+        })();
       } else {
-        setError(`${brokerLabel(pendingBroker)} connection could not be completed. Please try again.`);
+        console.warn('OAuth popup reported failure', event.data);
+        setError(oauthFailureMessage(pendingBroker, event.data.reason));
       }
-      void fetchConnections();
+      setOauthDialogOpen(false);
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [bootstrapSession, fetchConnections]);
+  }, [fetchConnections, runActivation]);
 
   useEffect(() => {
     return () => {
@@ -334,6 +457,8 @@ export default function BrokerAccountsPage() {
   }, []);
 
   const clearPolling = useCallback(() => {
+    // Invalidate any in-flight poll chain before a new one can start.
+    pollGenerationRef.current += 1;
     pollingActiveRef.current = false;
     if (pollingRef.current) {
       clearTimeout(pollingRef.current);
@@ -345,46 +470,79 @@ export default function BrokerAccountsPage() {
   }, []);
   clearPollingRef.current = clearPolling;
 
-  const checkBrokerStatus = useCallback(async (broker: BrokerName) => {
-    try {
-      const response =
-        broker === 'upstox' ? await api.getUpstoxStatus() : await api.getZerodhaStatus();
-      const first = response.connections[0];
-      if (!first) return null;
-      return {
-        connected: first.connected,
-        broker_user_id: first.broker_user_id,
-        token_updated_at: first.token_updated_at,
-        connection_id: first.connection_id,
-        expires_at: first.expires_at,
-        token_status: first.token_status,
-      };
-    } catch {
-      return null;
-    }
-  }, []);
+  const checkBrokerStatus = useCallback(
+    async (broker: BrokerName, connectionId?: number): Promise<BrokerStatus | null> => {
+      try {
+        const response =
+          broker === 'upstox' ? await api.getUpstoxStatus() : await api.getZerodhaStatus();
+        const match =
+          (connectionId === undefined
+            ? undefined
+            : response.connections.find((status) => status.connection_id === connectionId)) ||
+          response.connections.find(
+            (status) => status.connected && status.token_status === 'valid',
+          ) ||
+          response.connections[0];
+        if (!match) return null;
+        return {
+          connected: match.connected,
+          broker_user_id: match.broker_user_id,
+          token_updated_at: match.token_updated_at,
+          connection_id: match.connection_id,
+          token_status: match.token_status,
+        };
+      } catch {
+        return null;
+      }
+    },
+    [],
+  );
 
   const startPolling = useCallback(
-    async (broker: BrokerName) => {
+    async (broker: BrokerName, connectionId?: number) => {
+      const generation = pollGenerationRef.current + 1;
+      pollGenerationRef.current = generation;
       pollingActiveRef.current = true;
       pollAttemptsRef.current = 0;
       setPolling(true);
       setPollAttempts(0);
       setConnectionStatus(null);
 
-      const poll = async () => {
-        if (!pollingActiveRef.current) return;
-        const status = await checkBrokerStatus(broker);
-        setConnectionStatus(status);
+      // An expired token on the pending connection is expected at reconnect:
+      // it is the token we are about to replace. Remember it so polling waits
+      // for new tokens instead of failing immediately.
+      let baselineTokenUpdatedAt: string | null | undefined;
+      if (connectionId !== undefined) {
+        const known = statusByConnectionRef.current.has(connectionId);
+        baselineTokenUpdatedAt = known
+          ? statusByConnectionRef.current.get(connectionId)?.token_updated_at ?? null
+          : undefined;
+      }
+      const isCurrent = () =>
+        pollingActiveRef.current && generation === pollGenerationRef.current;
 
-        if (status?.connected) {
+      const poll = async () => {
+        if (!isCurrent()) return;
+        const status = await checkBrokerStatus(broker, connectionId);
+        if (!isCurrent()) return;
+        setConnectionStatus(status);
+        const tokenChanged =
+          baselineTokenUpdatedAt !== undefined &&
+          status?.token_updated_at !== baselineTokenUpdatedAt;
+
+        if (status?.connected && status.token_status === 'valid') {
           clearPolling();
+          window.sessionStorage.removeItem(STORAGE_KEY_OAUTH_PENDING);
+          window.sessionStorage.removeItem(STORAGE_KEY_OAUTH_PENDING_CONNECTION);
           await fetchConnections();
-          void bootstrapSession({ broker_name: broker });
+          await runActivation(broker, status.connection_id);
           return;
         }
-        if (status?.token_status === 'expired') {
+        // Only a newly stored token that is already expired is a real failure;
+        // the pre-existing expired token is what this reconnect is replacing.
+        if (status?.token_status === 'expired' && tokenChanged) {
           clearPolling();
+          setError('Broker authentication expired. Reconnect.');
           return;
         }
 
@@ -393,7 +551,11 @@ export default function BrokerAccountsPage() {
         setPollAttempts(attempts);
         if (attempts >= MAX_POLL_ATTEMPTS) {
           clearPolling();
-          setError('Connection timeout. Please try again.');
+          setError(
+            `${brokerLabel(broker)} connection timed out waiting for login. ` +
+              `Last status: ${status?.token_status ?? 'not found'}. ` +
+              'Check the login tab or server logs.',
+          );
           return;
         }
         pollingRef.current = setTimeout(poll, POLL_INTERVAL_MS);
@@ -401,11 +563,11 @@ export default function BrokerAccountsPage() {
 
       void poll();
     },
-    [bootstrapSession, checkBrokerStatus, clearPolling, fetchConnections],
+    [checkBrokerStatus, clearPolling, fetchConnections, runActivation],
   );
 
-  const getStoredConnectionId = (key: string): number | undefined => {
-    const raw = window.localStorage.getItem(key);
+  const getStoredConnectionId = (broker: BrokerName): number | undefined => {
+    const raw = window.localStorage.getItem(storageKeyFor(broker, user?.id));
     if (!raw) return undefined;
     const parsed = Number(raw);
     return Number.isFinite(parsed) ? parsed : undefined;
@@ -414,51 +576,76 @@ export default function BrokerAccountsPage() {
   const launchOAuth = (
     authorizeUrl: string,
     broker: BrokerName,
+    connectionId: number,
+    popup: Window | null,
   ) => {
     window.sessionStorage.setItem(STORAGE_KEY_OAUTH_PENDING, broker);
+    window.sessionStorage.setItem(STORAGE_KEY_OAUTH_PENDING_CONNECTION, String(connectionId));
     if (isMobile) {
       clearPollingRef.current();
       window.location.assign(authorizeUrl);
       return;
     }
-    window.open(authorizeUrl, '_blank');
+    if (popup && !popup.closed) {
+      popup.location.replace(authorizeUrl);
+    }
   };
 
-  const handleConnect = async (broker: BrokerName) => {
-    setConnecting(true);
+  const handleConnect = async (broker: BrokerName, connectionId?: number) => {
+    if (connectInFlightRef.current === broker) return;
+    // Open the popup synchronously inside the click handler. Opening it after
+    // the /connect await makes browsers treat it as unsolicited and block it,
+    // so the OAuth callback never reaches the backend.
+    const popup = isMobile
+      ? null
+      : window.open('about:blank', 'tradecraftx-oauth', 'width=600,height=760');
+    if (!isMobile && !popup) {
+      setError('Login popup was blocked. Allow popups for this site and try again.');
+      return;
+    }
+
+    connectInFlightRef.current = broker;
+    setBusyBroker(broker);
     setError('');
     setSuccessMessage('');
     try {
       const response =
         broker === 'upstox'
           ? await api.connectUpstox(
-              getStoredConnectionId(STORAGE_KEY_UPSTOX),
+              connectionId ?? getStoredConnectionId(broker),
               isMobile ? 'mobile' : 'popup',
             )
           : await api.connectZerodha(
-              getStoredConnectionId(STORAGE_KEY_ZERODHA),
+              connectionId ?? getStoredConnectionId(broker),
               isMobile ? 'mobile' : 'popup',
             );
       setOauthStep(broker);
-      launchOAuth(response.authorize_url, broker);
+      launchOAuth(response.authorize_url, broker, response.connection_id, popup);
       if (!isMobile) {
+        if (!popup || popup.closed) {
+          setError('Login popup was closed. Allow popups for this site and try again.');
+          return;
+        }
         setOauthDialogOpen(true);
-        void startPolling(broker);
+        void startPolling(broker, response.connection_id);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Failed to initiate ${brokerLabel(broker)} connection`);
+      popup?.close();
+      setError(connectionErrorMessage(broker, err));
+      if (err instanceof Error && err.message) {
+        console.error(err.message);
+      }
     } finally {
-      setConnecting(false);
+      connectInFlightRef.current = null;
+      if (!isMobile) setBusyBroker(null);
     }
   };
 
   const handleRefreshData = async () => {
-    if (!sessionId) {
-      await bootstrapSession({});
-      return;
-    }
-    setRefreshingData(true);
+    if (!sessionId) return;
     setError('');
+    setSuccessMessage('');
+    setRefreshingData(true);
     try {
       const session = await api.refreshSession(sessionId);
       setCurrentSession(session);
@@ -470,9 +657,10 @@ export default function BrokerAccountsPage() {
         tenant_id: session.tenant_id,
       });
       setSuccessMessage('Session data refreshed.');
+      setLastRefreshedAt(new Date().toISOString());
       await fetchConnections();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to refresh session data');
+      setError(friendlyError(err instanceof Error ? err.message : 'Session could not be started.'));
       if (err instanceof Error && err.message.toLowerCase().includes('not found')) {
         setCurrentSession(null);
         localStorage.removeItem(STORAGE_KEY_SESSION);
@@ -488,6 +676,7 @@ export default function BrokerAccountsPage() {
     if (!sessionId) return;
     setEndingSession(true);
     setError('');
+    setSuccessMessage('');
     try {
       await api.closeSession(sessionId);
       setCurrentSession(null);
@@ -495,7 +684,7 @@ export default function BrokerAccountsPage() {
       setSuccessMessage('Trading session ended. The broker connection remains active.');
       await fetchConnections();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to end trading session');
+      setError(friendlyError(err instanceof Error ? err.message : 'Session could not be ended.'));
     } finally {
       setEndingSession(false);
       setEndSessionDialogOpen(false);
@@ -505,7 +694,7 @@ export default function BrokerAccountsPage() {
   const confirmDisconnect = async () => {
     const broker = disconnectBroker;
     if (!broker) return;
-    setConnecting(true);
+    setBusyBroker(broker);
     setError('');
     setSuccessMessage('');
     try {
@@ -516,82 +705,115 @@ export default function BrokerAccountsPage() {
       setSuccessMessage(`${brokerLabel(broker)} disconnected.`);
       await fetchConnections();
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Failed to disconnect ${broker}`);
+      setError(
+        `${brokerLabel(broker)} disconnect failed. Try again. ${
+          err instanceof Error ? err.message : ''
+        }`.trim(),
+      );
     } finally {
-      setConnecting(false);
+      setBusyBroker(null);
       setDisconnectBroker(null);
     }
   };
 
-  const handleSelectAccount = async (candidate: BrokerAccountStatus) => {
-    setError('');
-    await bootstrapSession({
-      broker_name: candidate.broker_name,
-      broker_connection_id: candidate.connection_id,
+  const activeConnectionId = activeConnection?.broker_connection_id ?? null;
+  const brokerCards: BrokerCardModel[] = BROKERS.map((broker) => {
+    const brokerConnections = connections.filter((connection) => connection.broker_name === broker);
+    const candidates: Array<BrokerAccountOption & { tokenUpdatedAt: string | null }> = [];
+    for (const connection of brokerConnections) {
+      const status = statusByConnection.get(connection.id);
+      if (status?.connected && status.token_status === 'valid' && status.broker_user_id) {
+        candidates.push({
+          connectionId: connection.id,
+          brokerUserId: status.broker_user_id,
+          tokenUpdatedAt: status.token_updated_at,
+        });
+      }
+    }
+    // Prefer the active connection, then the most recently authenticated record,
+    // so historical rows for the same broker user never duplicate a card.
+    candidates.sort((left, right) => {
+      if (left.connectionId === activeConnectionId) return -1;
+      if (right.connectionId === activeConnectionId) return 1;
+      return (right.tokenUpdatedAt || '').localeCompare(left.tokenUpdatedAt || '');
     });
-  };
-
-  const selectionBrokers = Array.from(
-    new Set(candidates.map((candidate) => candidate.broker_name).filter(Boolean)),
-  );
-
-  const accountViews: AccountView[] = connections.map((connection) => {
-    const status = statusByConnection.get(connection.id) ?? null;
-    const view = connectionView(status);
-    const isActive =
-      activeConnectionId === connection.id ||
-      (Boolean(currentSession) && currentSession?.broker === connection.broker_name);
+    const uniqueAccounts = new Map<string, BrokerAccountOption>();
+    for (const candidate of candidates) {
+      if (!uniqueAccounts.has(candidate.brokerUserId)) {
+        uniqueAccounts.set(candidate.brokerUserId, {
+          connectionId: candidate.connectionId,
+          brokerUserId: candidate.brokerUserId,
+        });
+      }
+    }
+    const accounts = Array.from(uniqueAccounts.values());
+    const explicitlySelected = selectedAccountByBroker[broker];
+    const selected =
+      accounts.find((account) => account.connectionId === explicitlySelected) ||
+      accounts.find((account) => account.connectionId === activeConnectionId) ||
+      (accounts.length === 1 ? accounts[0] : undefined);
+    const needsSelection = accounts.length > 1 && !selected;
+    const expired = brokerConnections.some(
+      (connection) => statusByConnection.get(connection.id)?.token_status === 'expired',
+    );
+    const isActive = Boolean(selected && activeConnectionId === selected.connectionId);
     const hasSession = Boolean(sessionId && currentSession && isActive);
+    const sessionReady = isActive && hasSession && readinessStatus === 'READY';
+    const busy = busyBroker === broker || activatingBroker === broker;
 
-    let tradingStatus = 'No session';
-    if (view.connected) {
-      if (hasSession && readinessStatus === 'READY') tradingStatus = 'Ready to Trade';
-      else if (isActive && readinessStatus === 'INITIALIZING') {
-        tradingStatus = 'Preparing trading session.';
-      } else if (isActive && readinessStatus === 'LOADING') {
-        tradingStatus = 'Loading session data.';
-      } else if (isActive && readinessStatus === 'CONNECTED') {
-        tradingStatus = 'Broker connected. Preparing trading session.';
-      } else if (isActive && readinessStatus === 'ERROR') {
-        tradingStatus = 'Unable to initialize session. Retry.';
-      } else tradingStatus = 'Not started';
+    let status: BrokerCardStatus;
+    let detail: string | null = null;
+    if (busy || (oauthStep === broker && polling)) {
+      status = 'CONNECTING';
+      detail =
+        busyBroker === broker || (oauthStep === broker && polling)
+          ? 'Authenticating...'
+          : readinessStatus === 'LOADING'
+            ? 'Loading data...'
+            : 'Starting session...';
+    } else if (needsSelection) {
+      status = 'ATTENTION_REQUIRED';
+      detail = 'Select an account to continue.';
+    } else if (accounts.length === 0 && expired) {
+      status = 'ATTENTION_REQUIRED';
+      detail = 'Broker authentication expired. Reconnect.';
+    } else if (isActive && readinessStatus === 'ERROR') {
+      status = 'ATTENTION_REQUIRED';
+      detail = 'Session could not be started. Retry.';
+    } else if (sessionReady) {
+      status = 'READY';
+    } else {
+      status = 'NOT_CONNECTED';
     }
 
-    const dataStatus =
-      refreshingData || (isActive && readinessStatus === 'LOADING')
-        ? 'Loading session data…'
-        : hasSession
-          ? 'Data loaded'
-          : 'Not loaded';
-
     return {
-      connection,
+      broker,
       status,
-      connected: view.connected,
-      connectionLabel: view.label,
-      connectionTone: view.tone,
-      accountId: status?.broker_user_id || `#${connection.id}`,
-      tradingStatus,
-      dataStatus,
-      lastRefresh: formatDate(lastRefreshedAt),
+      statusLabel: STATUS_LABELS[status],
+      detail,
+      accounts,
+      selectedConnectionId: selected?.connectionId ?? null,
+      accountId: selected?.brokerUserId ?? null,
+      sessionInfo: sessionReady
+        ? {
+            holdings: refreshingData ? 'Loading...' : 'Loaded',
+            lastRefreshed: formatClock(lastRefreshedAt),
+          }
+        : null,
+      primaryLabel:
+        status === 'CONNECTING'
+          ? 'Connecting...'
+          : sessionReady
+            ? 'Refresh Data'
+            : accounts.length > 0
+              ? `Use ${brokerLabel(broker)}`
+              : 'Connect',
+      primaryDisabled: needsSelection,
+      busy,
       hasSession,
+      canManage: accounts.length > 0 || expired,
     };
   });
-
-  const openAccountMenu = (event: React.MouseEvent<HTMLElement>, account: AccountView) => {
-    setMenuAccount(account);
-    setAccountMenuAnchor(event.currentTarget);
-  };
-
-  const closeAccountMenu = () => {
-    setAccountMenuAnchor(null);
-    setMenuAccount(null);
-  };
-
-  const runAccountAction = (action: () => void) => {
-    closeAccountMenu();
-    action();
-  };
 
   if (loading) {
     return (
@@ -601,19 +823,19 @@ export default function BrokerAccountsPage() {
     );
   }
 
+  const displayedError = error || (readinessStatus === 'ERROR' && sessionMessage ? friendlyError(sessionMessage) : '');
+
   return (
     <Box>
       <ResponsivePageHeader
         title="Broker Accounts"
-        description="Manage broker connections and this device's trading session"
+        description="Choose the broker for this device's trading session"
         actions={
           <Button
             variant="outlined"
             startIcon={<RefreshIcon />}
-            onClick={() => {
-              void fetchConnections();
-            }}
-            disabled={refreshing}
+            onClick={() => void fetchConnections()}
+            disabled={refreshing || Boolean(busyBroker)}
             fullWidth={isMobile}
             sx={{ minHeight: isMobile ? 44 : undefined }}
           >
@@ -622,219 +844,75 @@ export default function BrokerAccountsPage() {
         }
       />
 
-      {error && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
-          {error}
+      {displayedError && (
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          onClose={() => {
+            setError('');
+            setSuccessMessage('');
+          }}
+          action={
+            brokerConnected && readinessStatus === 'ERROR' ? (
+              <Button color="inherit" size="small" onClick={() => void retrySession()}>
+                Retry
+              </Button>
+            ) : undefined
+          }
+        >
+          {displayedError}
         </Alert>
       )}
-      {successMessage && (
+      {successMessage && !displayedError && (
         <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccessMessage('')}>
           {successMessage}
         </Alert>
       )}
-      {requiresSelection && (
-        <Alert severity="info" sx={{ mb: 2 }}>
-          <Typography variant="body2" sx={{ mb: 1 }}>
-            {sessionMessage || 'Multiple broker accounts detected. Select one to continue.'}
-          </Typography>
-          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-            {selectionBrokers.length > 1
-              ? selectionBrokers.map((broker) => (
-                  <Button
-                    key={broker}
-                    size="small"
-                    variant="outlined"
-                    onClick={() => void bootstrapSession({ broker_name: broker })}
-                  >
-                    {brokerLabel(broker)}
-                  </Button>
-                ))
-              : candidates.map((candidate) => (
-                  <Button
-                    key={candidate.connection_id}
-                    size="small"
-                    variant="outlined"
-                    onClick={() => void handleSelectAccount(candidate)}
-                  >
-                    {candidate.broker_user_id || `#${candidate.connection_id}`}
-                  </Button>
-                ))}
-          </Box>
-        </Alert>
-      )}
-      {readinessStatus === 'ERROR' && sessionMessage && !requiresSelection && (
-        <Alert
-          severity="warning"
-          sx={{ mb: 2 }}
-          action={
-            brokerConnected ? (
-              <Button color="inherit" size="small" onClick={() => void retrySession()}>
-                Retry
-              </Button>
-            ) : (
-              <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                <Button color="inherit" size="small" onClick={() => void handleConnect('upstox')}>
-                  Connect Upstox
-                </Button>
-                <Button color="inherit" size="small" onClick={() => void handleConnect('zerodha')}>
-                  Connect Zerodha
-                </Button>
-              </Box>
-            )
-          }
-        >
-          {sessionMessage}
-        </Alert>
-      )}
 
-      {isMobile ? (
-        <Box>
-          {accountViews.map((account) => (
-            <MobileBrokerAccountCard
-              key={account.connection.id}
-              broker={account.connection.broker_name as BrokerName}
-              accountId={account.accountId}
-              connectionLabel={account.connectionLabel}
-              connectionTone={account.connectionTone}
-              tradingStatus={account.tradingStatus}
-              dataStatus={account.dataStatus}
-              lastRefresh={account.lastRefresh}
-              connecting={connecting}
-              refreshing={refreshingData}
-              hasSession={account.hasSession}
-              onPrimary={() => {
-                if (account.connected) void handleRefreshData();
-                else void handleConnect(account.connection.broker_name as BrokerName);
-              }}
-              onRefreshStatus={() => {
-                void fetchConnections();
-              }}
-              onEndSession={() => setEndSessionDialogOpen(true)}
-              onReconnect={() => void handleConnect(account.connection.broker_name as BrokerName)}
-              onDisconnect={() => setDisconnectBroker(account.connection.broker_name as BrokerName)}
-            />
-          ))}
-        </Box>
-      ) : (
-        <Box sx={{ display: 'grid', gap: 1.5 }}>
-          {accountViews.map((account) => (
-            <Card key={account.connection.id}>
-              <CardContent sx={{ py: 1.75, '&:last-child': { pb: 1.75 } }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
-                  <BrokerIcon broker={account.connection.broker_name} />
-                  <Typography variant="subtitle1" fontWeight={700}>
-                    {brokerLabel(account.connection.broker_name)}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" noWrap>
-                    {account.accountId}
-                  </Typography>
-                  <Chip
-                    label={account.connectionLabel}
-                    size="small"
-                    color={account.connectionTone}
-                    icon={account.connectionTone === 'success' ? <CheckIcon /> : <ErrorIcon />}
-                  />
-                  <Chip
-                    label={account.tradingStatus}
-                    size="small"
-                    variant="outlined"
-                    color={account.tradingStatus === 'Ready to Trade' ? 'success' : 'default'}
-                  />
-                  <Box sx={{ flex: 1 }} />
-                  <Tooltip title="More actions">
-                    <IconButton
-                      size="small"
-                      onClick={(event) => openAccountMenu(event, account)}
-                      aria-label={`More actions for ${brokerLabel(account.connection.broker_name)}`}
-                    >
-                      <MoreIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                </Box>
-
-                <Box
-                  sx={{
-                    display: 'grid',
-                    gridTemplateColumns: { xs: '1fr', sm: 'repeat(4, minmax(0, 1fr))' },
-                    gap: 1,
-                    mt: 1.5,
-                  }}
-                >
-                  <Detail label="Connection" value={account.connectionLabel} />
-                  <Detail label="Trading session" value={account.tradingStatus} />
-                  <Detail label="Data loading" value={account.dataStatus} />
-                  <Detail label="Last refresh" value={account.lastRefresh} />
-                </Box>
-
-                <Box sx={{ display: 'flex', gap: 1, mt: 1.5 }}>
-                  <Button
-                    variant={account.connected ? 'outlined' : 'contained'}
-                    size="small"
-                    startIcon={account.connected ? <RefreshIcon /> : <AddIcon />}
-                    onClick={() => {
-                      if (account.connected) void handleRefreshData();
-                      else void handleConnect(account.connection.broker_name as BrokerName);
-                    }}
-                    disabled={connecting || refreshingData}
-                  >
-                    {account.connected ? 'Refresh Data' : 'Connect'}
-                  </Button>
-                </Box>
-              </CardContent>
-            </Card>
-          ))}
-        </Box>
-      )}
-
-      <Menu
-        anchorEl={accountMenuAnchor}
-        open={Boolean(accountMenuAnchor)}
-        onClose={closeAccountMenu}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+      <Box
+        sx={{
+          display: 'grid',
+          gap: 2,
+          gridTemplateColumns: { xs: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
+        }}
       >
-        <MenuItem
-          onClick={() => {
-            void fetchConnections();
-            closeAccountMenu();
-          }}
-        >
-          <RefreshIcon fontSize="small" sx={{ mr: 1 }} />
-          Refresh status
-        </MenuItem>
-        {menuAccount?.connected && (
-          <MenuItem
-            onClick={() =>
-              runAccountAction(() => void handleConnect(menuAccount.connection.broker_name as BrokerName))
+        {brokerCards.map((card) => (
+          <BrokerAccountCard
+            key={card.broker}
+            broker={card.broker}
+            status={card.status}
+            statusLabel={card.statusLabel}
+            detail={card.detail}
+            accounts={card.accounts}
+            selectedConnectionId={card.selectedConnectionId}
+            accountId={card.accountId}
+            sessionInfo={card.sessionInfo}
+            primaryLabel={card.primaryLabel}
+            primaryDisabled={card.primaryDisabled}
+            busy={card.busy}
+            hasSession={card.hasSession}
+            canManage={card.canManage}
+            onSelectAccount={(connectionId) =>
+              setSelectedAccountByBroker((previous) => ({ ...previous, [card.broker]: connectionId }))
             }
-            disabled={connecting}
-          >
-            <AddIcon fontSize="small" sx={{ mr: 1 }} />
-            Reconnect broker
-          </MenuItem>
-        )}
-        {menuAccount?.hasSession && (
-          <MenuItem onClick={() => runAccountAction(() => setEndSessionDialogOpen(true))}>
-            <EndSessionIcon fontSize="small" sx={{ mr: 1 }} />
-            End session
-          </MenuItem>
-        )}
-        {menuAccount?.connected && (
-          <MenuItem
-            onClick={() =>
-              runAccountAction(() =>
-                setDisconnectBroker(menuAccount.connection.broker_name as BrokerName),
-              )
+            onPrimary={() => {
+              if (card.status === 'READY') void handleRefreshData();
+              else if (card.selectedConnectionId !== null)
+                void runActivation(card.broker, card.selectedConnectionId);
+              else if (card.accounts.length > 0) return;
+              else void handleConnect(card.broker);
+            }}
+            onRefreshStatus={() => void fetchConnections()}
+            onEndSession={() => setEndSessionDialogOpen(true)}
+            onReconnect={() =>
+              void handleConnect(card.broker, card.selectedConnectionId ?? undefined)
             }
-            disabled={connecting}
-          >
-            <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
-            Disconnect broker
-          </MenuItem>
-        )}
-      </Menu>
+            onDisconnect={() => setDisconnectBroker(card.broker)}
+          />
+        ))}
+      </Box>
 
-      {/* OAuth Polling Dialog */}
+      {/* OAuth progress dialog (desktop popup; mobile uses same-tab redirect) */}
       <ResponsiveDialog
         open={oauthDialogOpen}
         onClose={() => {
@@ -842,76 +920,44 @@ export default function BrokerAccountsPage() {
           setOauthDialogOpen(false);
           setOauthStep(null);
           setConnectionStatus(null);
+          setBusyBroker(null);
         }}
-        maxWidth="sm"
+        maxWidth="xs"
         fullWidth
       >
-        <DialogTitle>Connecting {brokerLabel(oauthStep)}...</DialogTitle>
+        <DialogTitle>Connecting {brokerLabel(oauthStep)}</DialogTitle>
         <DialogContent>
-          <Stepper activeStep={oauthStep === 'zerodha' ? 1 : 0} sx={{ mb: 3 }}>
-            <Step>
-              <StepLabel>Upstox</StepLabel>
-            </Step>
-            <Step>
-              <StepLabel>Zerodha</StepLabel>
-            </Step>
-          </Stepper>
-
-          {connectionStatus?.connected && (
-            <Box sx={{ textAlign: 'center', py: 2 }}>
-              <CheckIcon color="success" sx={{ fontSize: 48, mb: 2 }} />
-              <Typography variant="h6" color="success">
-                Connected successfully!
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Broker User ID: {connectionStatus.broker_user_id || 'N/A'}
-              </Typography>
-            </Box>
-          )}
-          {connectionStatus?.token_status === 'expired' && !polling && (
-            <Box sx={{ textAlign: 'center', py: 2 }}>
-              <WarningIcon color="warning" sx={{ fontSize: 48, mb: 2 }} />
-              <Typography variant="h6" color="warning">
-                Token Expired
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Your access token has expired. Please reconnect.
-              </Typography>
-            </Box>
-          )}
-          {polling && !connectionStatus?.connected && (
-            <Box sx={{ textAlign: 'center', py: 2 }}>
-              <CircularProgress sx={{ mb: 2 }} />
+          <Box sx={{ textAlign: 'center', py: 2 }}>
+            {connectionStatus?.connected ? (
+              <>
+                <CheckIcon color="success" sx={{ fontSize: 48, mb: 1 }} />
+                <Typography>Connected. Starting your trading session...</Typography>
+              </>
+            ) : connectionStatus?.token_status === 'expired' && !polling ? (
+              <>
+                <WarningIcon color="warning" sx={{ fontSize: 48, mb: 1 }} />
+                <Typography>Broker authentication expired. Reconnect.</Typography>
+              </>
+            ) : polling ? (
+              <>
+                <CircularProgress sx={{ mb: 2 }} />
+                <Typography>Authenticating...</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                  Complete the login in the opened tab, then close it.
+                </Typography>
+              </>
+            ) : pollAttempts >= MAX_POLL_ATTEMPTS ? (
+              <>
+                <ErrorIcon color="error" sx={{ fontSize: 48, mb: 1 }} />
+                <Typography>{brokerLabel(oauthStep)} connection failed. Try again.</Typography>
+              </>
+            ) : (
               <Typography>
-                Waiting for authentication... (
-                {Math.floor((pollAttempts * POLL_INTERVAL_MS) / 1000)}s / 60s)
+                Complete {brokerLabel(oauthStep)} login in the opened tab, then select “I completed
+                login”.
               </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                Complete the login in the opened tab, then close it.
-              </Typography>
-            </Box>
-          )}
-          {!polling && !connectionStatus?.connected && pollAttempts >= MAX_POLL_ATTEMPTS && (
-            <Box sx={{ textAlign: 'center', py: 2 }}>
-              <ErrorIcon color="error" sx={{ fontSize: 48, mb: 2 }} />
-              <Typography color="error">Connection timed out</Typography>
-              <Button
-                variant="outlined"
-                onClick={() => oauthStep && void startPolling(oauthStep)}
-                sx={{ mt: 2 }}
-              >
-                Retry
-              </Button>
-            </Box>
-          )}
-          {!connectionStatus && !polling && (
-            <Box sx={{ textAlign: 'center', py: 2 }}>
-              <Typography>
-                Complete {brokerLabel(oauthStep)} login in the opened tab, then click below to
-                verify.
-              </Typography>
-            </Box>
-          )}
+            )}
+          </Box>
         </DialogContent>
         <DialogActions>
           {connectionStatus?.connected || connectionStatus?.token_status === 'expired' ? (
@@ -921,9 +967,9 @@ export default function BrokerAccountsPage() {
                 setOauthDialogOpen(false);
                 setOauthStep(null);
                 setConnectionStatus(null);
+                setBusyBroker(null);
               }}
               variant="contained"
-              autoFocus
             >
               Done
             </Button>
@@ -935,15 +981,15 @@ export default function BrokerAccountsPage() {
                   setOauthDialogOpen(false);
                   setOauthStep(null);
                   setConnectionStatus(null);
+                  setBusyBroker(null);
                 }}
               >
                 Cancel
               </Button>
               {pollAttempts < MAX_POLL_ATTEMPTS && (
                 <Button
-                  onClick={() => oauthStep && void startPolling(oauthStep)}
+                  onClick={() => oauthStep && void startPolling(oauthStep, getPendingConnectionId())}
                   variant="contained"
-                  autoFocus
                   disabled={polling}
                 >
                   I completed login
@@ -954,7 +1000,7 @@ export default function BrokerAccountsPage() {
         </DialogActions>
       </ResponsiveDialog>
 
-      {/* End Session confirmation */}
+      {/* End session confirmation */}
       <ResponsiveDialog
         open={endSessionDialogOpen}
         onClose={() => setEndSessionDialogOpen(false)}
@@ -991,9 +1037,8 @@ export default function BrokerAccountsPage() {
         <DialogTitle>Disconnect {brokerLabel(disconnectBroker)}?</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
-            This removes the broker account from TradeCraftX on all devices. Active sessions using
-            this connection on other devices will be affected. This is different from End Session,
-            which ends only this device's session.
+            This will remove the saved {brokerLabel(disconnectBroker)} connection from TradeCraftWeb
+            and may affect other devices using this account.
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -1002,25 +1047,12 @@ export default function BrokerAccountsPage() {
             onClick={() => void confirmDisconnect()}
             color="error"
             variant="contained"
-            disabled={connecting}
+            disabled={busyBroker !== null}
           >
-            {connecting ? 'Disconnecting...' : 'Disconnect'}
+            {busyBroker ? 'Disconnecting...' : 'Disconnect'}
           </Button>
         </DialogActions>
       </ResponsiveDialog>
-    </Box>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <Box sx={{ minWidth: 0 }}>
-      <Typography variant="caption" color="text.secondary" display="block">
-        {label}
-      </Typography>
-      <Typography variant="body2" fontWeight={600} noWrap title={value}>
-        {value}
-      </Typography>
     </Box>
   );
 }

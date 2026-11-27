@@ -33,7 +33,6 @@ import {
   MoreVert as MoreVertIcon,
   Notifications as GttIcon,
   PowerSettingsNew as PowerIcon,
-  ShoppingCart as BuyIcon,
   Work as JobsIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../context/AuthContext';
@@ -54,7 +53,6 @@ const navItems = [
   { text: 'Dashboard', icon: <DashboardIcon />, path: '/dashboard' },
   { text: 'Broker Accounts', icon: <BrokerIcon />, path: '/broker-connections' },
   { text: 'Holdings', icon: <HoldingsIcon />, path: '/holdings' },
-  { text: 'Entry Plans', icon: <BuyIcon />, path: '/entries' },
   { text: 'Entry Strategies', icon: <PlanIcon />, path: '/entry-strategies' },
   { text: 'Entry Candidates', icon: <CandidatesIcon />, path: '/entry-candidates' },
   { text: 'Buy Orders', icon: <GttIcon />, path: '/gtt' },
@@ -77,18 +75,11 @@ export default function Layout({ children }: LayoutProps) {
     status: sessionStatus,
     message: sessionMessage,
     brokerConnected,
-    requiresSelection,
-    candidates,
     retry: retrySession,
-    bootstrap: bootstrapSession,
   } = useBrokerSessionOrchestrator();
   const navigate = useNavigate();
   const location = useLocation();
   const isBrokerAccountsPage = location.pathname === '/broker-connections';
-
-  const selectionBrokers = Array.from(
-    new Set(candidates.map((candidate) => candidate.broker_name).filter(Boolean)),
-  );
 
   const handleNavigation = (path: string) => {
     navigate(path);
@@ -270,85 +261,64 @@ export default function Layout({ children }: LayoutProps) {
         </Drawer>
       </Box>
 
-      {sessionExpiredMessage && (
-        <Alert
-          severity="warning"
-          sx={{ mx: { xs: 2, sm: 3 }, mt: 2 }}
-          action={
-            <Button
-              color="inherit"
-              size="small"
-              onClick={() => {
-                clearSessionExpired();
-                navigate('/broker-connections');
-              }}
-            >
-              Reconnect
-            </Button>
-          }
-        >
-          Trading session expired. Reconnect your broker session before placing orders.
-        </Alert>
-      )}
-
-      {!isBrokerAccountsPage && requiresSelection && (
-        <Alert
-          severity="info"
-          sx={{ mx: { xs: 2, sm: 3 }, mt: 2 }}
-          action={
-            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-              {selectionBrokers.length > 1 ? (
-                selectionBrokers.map((broker) => (
-                  <Button
-                    key={broker}
-                    color="inherit"
-                    size="small"
-                    onClick={() => void bootstrapSession({ broker_name: broker })}
-                  >
-                    {broker.toUpperCase()}
-                  </Button>
-                ))
-              ) : (
-                <Button
-                  color="inherit"
-                  size="small"
-                  onClick={() => navigate('/broker-connections')}
-                >
-                  Broker Accounts
-                </Button>
-              )}
-            </Box>
-          }
-        >
-          {sessionMessage || 'Multiple broker accounts detected. Select one to continue.'}
-        </Alert>
-      )}
-
-      {!isBrokerAccountsPage && sessionStatus === 'ERROR' && !requiresSelection && sessionMessage && (
-        <Alert
-          severity={brokerConnected ? 'warning' : 'info'}
-          sx={{ mx: { xs: 2, sm: 3 }, mt: 2 }}
-          action={
-            <Button
-              color="inherit"
-              size="small"
-              onClick={() => {
-                if (brokerConnected) {
-                  void retrySession();
-                } else {
+      <Box
+        component="main"
+        sx={{
+          flexGrow: 1,
+          width: { sm: `calc(100% - ${layout.drawerWidth}px)` },
+          mt: 8,
+          minWidth: 0,
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        {sessionExpiredMessage && (
+          <Alert
+            severity="warning"
+            sx={{ mx: { xs: 2, sm: 3 }, mt: 2 }}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => {
+                  clearSessionExpired();
                   navigate('/broker-connections');
-                }
-              }}
-            >
-              {brokerConnected ? 'Retry' : 'Connect Broker'}
-            </Button>
-          }
-        >
-          {sessionMessage}
-        </Alert>
-      )}
+                }}
+              >
+                Reconnect
+              </Button>
+            }
+          >
+            Trading session expired. Reconnect your broker session before placing orders.
+          </Alert>
+        )}
 
-      <ResponsivePageContainer>{children}</ResponsivePageContainer>
+        {!isBrokerAccountsPage && sessionStatus === 'ERROR' && sessionMessage && (
+          <Alert
+            severity={brokerConnected ? 'warning' : 'info'}
+            sx={{ mx: { xs: 2, sm: 3 }, mt: 2 }}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => {
+                  if (brokerConnected) {
+                    void retrySession();
+                  } else {
+                    navigate('/broker-connections');
+                  }
+                }}
+              >
+                {brokerConnected ? 'Retry' : 'Connect Broker'}
+              </Button>
+            }
+          >
+            {sessionMessage}
+          </Alert>
+        )}
+
+        <ResponsivePageContainer>{children}</ResponsivePageContainer>
+      </Box>
 
       <MobileNavigation onHelp={() => setHelpOpen(true)} />
       <JobMonitor />

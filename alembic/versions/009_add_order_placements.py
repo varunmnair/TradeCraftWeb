@@ -19,6 +19,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Dev/prod startup calls Base.metadata.create_all(), so the table can
+    # already exist on databases whose revision has not been stamped yet.
     op.create_table(
         "order_placements",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -35,8 +37,14 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.UniqueConstraint("user_id", "idempotency_key", name="uq_order_placement_user_key"),
+        if_not_exists=True,
     )
-    op.create_index("ix_order_placements_session", "order_placements", ["session_id"])
+    op.create_index(
+        "ix_order_placements_session",
+        "order_placements",
+        ["session_id"],
+        if_not_exists=True,
+    )
 
 
 def downgrade() -> None:

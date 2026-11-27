@@ -1,66 +1,52 @@
-import React, { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Box,
-  Typography,
-  Paper,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  Alert,
-  CircularProgress,
-  Chip,
-  IconButton,
-  Drawer,
   Button,
   Dialog,
-  DialogTitle,
-  DialogContent,
   DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
   TextField,
+  Typography,
 } from '@mui/material';
-import {
-  Refresh as RefreshIcon,
-  Close as CloseIcon,
-  ContentCopy as CopyIcon,
-  Visibility as ViewIcon,
-} from '@mui/icons-material';
+import { ContentCopy as CopyIcon, Refresh as RefreshIcon, Visibility as ViewIcon } from '@mui/icons-material';
 import { api } from '../api/client';
 import { JobStatus } from '../types';
-
-const statusColors: Record<string, 'default' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning'> = {
-  pending: 'warning',
-  running: 'info',
-  completed: 'success',
-  failed: 'error',
-};
+import { ResponsivePageHeader } from '../components/ResponsivePageHeader';
+import { StatusChip } from '../components/StatusChip';
+import { TradePageLayout } from '../components/TradePageLayout';
+import { TradeStatusAlert } from '../components/TradeStatusAlert';
+import { TradeSummaryStrip } from '../components/TradeSummaryStrip';
+import { TradeDataTable } from '../components/tradeTable/TradeDataTable';
+import type { TradeColumnDef, TradeSelectionAction } from '../components/tradeTable/types';
+import { tradeTableRegistry } from '../config/tradeTableRegistry';
+import { uiPageConfigToTradeTableConfig, useUiPageConfig } from '../hooks/useUiPageConfig';
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedJob, setSelectedJob] = useState<JobStatus | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
 
-  const fetchJobs = async () => {
+  const fetchJobs = useCallback(async () => {
     try {
       const data = await api.listJobs();
       setJobs(data.jobs);
+      setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load jobs');
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchJobs();
-    const interval = setInterval(fetchJobs, 10000);
+    void fetchJobs();
+    const interval = setInterval(() => void fetchJobs(), 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchJobs]);
 
   const handleViewJob = async (job: JobStatus) => {
     try {
@@ -76,89 +62,173 @@ export default function JobsPage() {
     navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
   };
 
-  const formatJson = (obj: unknown): string => {
-    return JSON.stringify(obj, null, 2);
-  };
+  const runningCount = jobs.filter((j) => j.status === 'pending' || j.status === 'running').length;
+  const failedCount = jobs.filter((j) => j.status === 'failed').length;
+  const completedCount = jobs.filter((j) => j.status === 'completed' || j.status === 'succeeded').length;
 
-  if (loading) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
+  const { config: uiConfig } = useUiPageConfig('jobs');
+
+  const tableConfig = useMemo(() => {
+    const runtimeBaseColumns: TradeColumnDef<JobStatus>[] = (tradeTableRegistry.jobs.config.columns as TradeColumnDef<JobStatus>[]).map((col) => {
+      if (col.id === 'status') {
+        return {
+          ...col,
+          filterOptions: [
+            { value: 'pending', label: 'Pending' },
+            { value: 'running', label: 'Running' },
+            { value: 'completed', label: 'Completed' },
+            { value: 'succeeded', label: 'Succeeded' },
+            { value: 'failed', label: 'Failed' },
+            { value: 'cancelled', label: 'Cancelled' },
+          ],
+          renderCell: (row: JobStatus) => <StatusChip status={row.status} />,
+        };
+      }
+      if (col.id === 'progress') {
+        return {
+          ...col,
+          formatValue: (value: unknown) => `${((Number(value) || 0) * 100).toFixed(0)}%`,
+        };
+      }
+      if (col.id === 'created_at') {
+        return {
+          ...col,
+          formatValue: (value: unknown) => (value ? new Date(String(value)).toLocaleString() : '-'),
+        };
+      }
+      return col;
+    });
+
+    const actionColumn: TradeColumnDef<JobStatus> = {
+      id: 'actions',
+      label: 'Actions',
+      dataType: 'text',
+      visible: true,
+      sortable: false,
+      filterable: false,
+      position: 99,
+      width: 100,
+      alignment: 'center',
+      renderCell: (row: JobStatus) => (
+        <IconButton size="small" onClick={() => void handleViewJob(row)} aria-label="View job details">
+          <ViewIcon fontSize="small" />
+        </IconButton>
+      ),
+    };
+
+    const baseConfig = {
+      ...tradeTableRegistry.jobs.config,
+      columns: [...runtimeBaseColumns, actionColumn],
+    };
+
+    const effective = uiConfig
+      ? uiPageConfigToTradeTableConfig('jobs', uiConfig, baseConfig)
+      : baseConfig;
+
+    const mergedColumns = (effective.columns as TradeColumnDef<JobStatus>[]).map((col) => {
+      const runtime = baseConfig.columns.find((c) => c.id === col.id);
+      return runtime
+        ? {
+            ...runtime,
+            ...col,
+            renderCell: runtime.renderCell ?? col.renderCell,
+            formatValue: runtime.formatValue ?? col.formatValue,
+            filterOptions: runtime.filterOptions ?? col.filterOptions,
+          }
+        : col;
+    });
+
+    const hasActions = mergedColumns.some((c) => c.id === 'actions');
+    return {
+      ...effective,
+      columns: hasActions ? mergedColumns : [...mergedColumns, actionColumn],
+    };
+  }, [uiConfig]);
+
+  const selectionActions = useMemo<TradeSelectionAction[]>(
+    () => [
+      {
+        label: 'Copy IDs',
+        onClick: (ids) => navigator.clipboard.writeText(ids.join(', ')),
+        variant: 'outlined',
+        priority: 'primary',
+      },
+    ],
+    [],
+  );
 
   return (
-    <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-        <Typography variant="h4">Jobs</Typography>
-        <Box>
-          <IconButton onClick={fetchJobs}>
-            <RefreshIcon />
-          </IconButton>
-        </Box>
-      </Box>
+    <TradePageLayout
+      header={
+        <ResponsivePageHeader
+          title="Jobs"
+          description="Background job status and history"
+          recordCount={jobs.length}
+          secondaryActions={[
+            {
+              label: 'Refresh jobs',
+              onClick: () => void fetchJobs(),
+              icon: <RefreshIcon />,
+            },
+          ]}
+        />
+      }
+      summary={
+        !loading ? (
+          <TradeSummaryStrip
+            ariaLabel="Jobs summary"
+            items={[
+              { label: 'Total', value: jobs.length },
+              { label: 'Running', value: runningCount, tone: runningCount > 0 ? 'info' : 'default' },
+              { label: 'Completed', value: completedCount, tone: 'success' },
+              { label: 'Failed', value: failedCount, tone: failedCount > 0 ? 'error' : 'default' },
+            ]}
+          />
+        ) : undefined
+      }
+    >
+      {error ? (
+        <TradeStatusAlert kind="critical" message={error} onClose={() => setError('')} sx={{ mb: 2 }} />
+      ) : null}
 
-      {error && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
-          {error}
-        </Alert>
-      )}
+      <TradeDataTable<JobStatus>
+        config={tableConfig}
+        rows={jobs}
+        getRowId={(row) => row.id}
+        loading={loading}
+        error={null}
+        emptyTitle="No jobs yet"
+        emptyDescription="Background jobs will appear here when you generate plans, refresh data, or run other tasks."
+        selectionActions={selectionActions}
+        renderMobileCard={(row, selected, toggleSelect) => (
+          <Box
+            onClick={toggleSelect}
+            sx={{
+              border: '1px solid',
+              borderColor: selected ? 'primary.main' : 'divider',
+              borderRadius: 1,
+              p: 1.5,
+              bgcolor: selected ? 'action.selected' : 'background.paper',
+            }}
+          >
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, mb: 0.5 }}>
+              <Typography variant="subtitle2">{row.job_type}</Typography>
+              <StatusChip status={row.status} />
+            </Box>
+            <Typography variant="body2" color="text.secondary">ID: {row.id} · {(row.progress * 100).toFixed(0)}%</Typography>
+            <Typography variant="body2" color="text.secondary">{new Date(row.created_at).toLocaleString()}</Typography>
+            <Button size="small" onClick={(e) => { e.stopPropagation(); void handleViewJob(row); }} sx={{ mt: 0.5, px: 0 }}>
+              View details
+            </Button>
+          </Box>
+        )}
+      />
 
-      <TableContainer component={Paper}>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell>ID</TableCell>
-              <TableCell>Type</TableCell>
-              <TableCell>Session</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Progress</TableCell>
-              <TableCell>Created</TableCell>
-              <TableCell>Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {jobs.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} align="center">
-                  No jobs yet
-                </TableCell>
-              </TableRow>
-            ) : (
-              jobs.map((job) => (
-                <TableRow key={job.id}>
-                  <TableCell>{job.id}</TableCell>
-                  <TableCell>{job.job_type}</TableCell>
-                  <TableCell>{job.session_id}</TableCell>
-                  <TableCell>
-                    <Chip label={job.status} color={statusColors[job.status] || 'default'} size="small" />
-                  </TableCell>
-                  <TableCell>{(job.progress * 100).toFixed(0)}%</TableCell>
-                  <TableCell>{new Date(job.created_at).toLocaleString()}</TableCell>
-                  <TableCell>
-                    <IconButton size="small" onClick={() => handleViewJob(job)}>
-                      <ViewIcon />
-                    </IconButton>
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </TableContainer>
-
-      {/* Job Details Dialog */}
-      <Dialog 
-        open={detailOpen} 
-        onClose={() => setDetailOpen(false)} 
-        maxWidth="md" 
-        fullWidth
-      >
+      <Dialog open={detailOpen} onClose={() => setDetailOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             Job Details (#{selectedJob?.id})
-            <IconButton onClick={() => handleCopyJson(selectedJob)} size="small">
+            <IconButton onClick={() => handleCopyJson(selectedJob)} size="small" aria-label="Copy job JSON">
               <CopyIcon />
             </IconButton>
           </Box>
@@ -169,54 +239,32 @@ export default function JobsPage() {
               <Box sx={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: 1 }}>
                 <Typography variant="body2" color="text.secondary">ID:</Typography>
                 <Typography variant="body2">{selectedJob.id}</Typography>
-                
                 <Typography variant="body2" color="text.secondary">Type:</Typography>
                 <Typography variant="body2">{selectedJob.job_type}</Typography>
-                
                 <Typography variant="body2" color="text.secondary">Session:</Typography>
                 <Typography variant="body2">{selectedJob.session_id}</Typography>
-                
                 <Typography variant="body2" color="text.secondary">Status:</Typography>
-                <Chip 
-                  label={selectedJob.status} 
-                  color={statusColors[selectedJob.status] || 'default'} 
-                  size="small" 
-                />
-                
+                <Box><StatusChip status={selectedJob.status} /></Box>
                 <Typography variant="body2" color="text.secondary">Progress:</Typography>
-                <Typography variant="body2">{(selectedJob.progress * 100).toFixed(0)}%</Typography>
-                
+                <Typography variant="body2">{((selectedJob.progress || 0) * 100).toFixed(0)}%</Typography>
                 <Typography variant="body2" color="text.secondary">Created:</Typography>
                 <Typography variant="body2">{new Date(selectedJob.created_at).toLocaleString()}</Typography>
-                
                 <Typography variant="body2" color="text.secondary">Updated:</Typography>
                 <Typography variant="body2">{new Date(selectedJob.updated_at).toLocaleString()}</Typography>
               </Box>
-
               {selectedJob.log && (
                 <>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>Log:</Typography>
-                  <TextField
-                    multiline
-                    rows={10}
-                    fullWidth
-                    value={selectedJob.log}
-                    InputProps={{ readOnly: true }}
-                    variant="outlined"
-                    size="small"
-                  />
+                  <TextField multiline rows={10} fullWidth value={selectedJob.log} InputProps={{ readOnly: true }} variant="outlined" size="small" />
                 </>
               )}
-
               <Box>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
-                  Raw JSON:
-                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>Raw JSON:</Typography>
                 <TextField
                   multiline
                   rows={15}
                   fullWidth
-                  value={formatJson(selectedJob)}
+                  value={JSON.stringify(selectedJob, null, 2)}
                   InputProps={{ readOnly: true }}
                   variant="outlined"
                   size="small"
@@ -227,14 +275,10 @@ export default function JobsPage() {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => handleCopyJson(selectedJob)} startIcon={<CopyIcon />}>
-            Copy JSON
-          </Button>
-          <Button onClick={() => setDetailOpen(false)} variant="contained">
-            Close
-          </Button>
+          <Button onClick={() => handleCopyJson(selectedJob)} startIcon={<CopyIcon />}>Copy JSON</Button>
+          <Button onClick={() => setDetailOpen(false)} variant="contained">Close</Button>
         </DialogActions>
       </Dialog>
-    </Box>
+    </TradePageLayout>
   );
 }

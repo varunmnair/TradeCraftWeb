@@ -8,10 +8,13 @@ import {
   Button,
   Chip,
   TextField,
-  InputAdornment,
   DialogTitle,
   DialogContent,
   DialogActions,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
   useMediaQuery,
   useTheme,
   Table,
@@ -21,10 +24,8 @@ import {
   TableHead,
   TableRow,
 } from '@mui/material';
-import { DataGrid, GridColDef, GridRowSelectionModel } from '@mui/x-data-grid';
-import { 
+import {
   Refresh as RefreshIcon,
-  Search as SearchIcon,
   Delete as DeleteIcon,
   Tune as NormalizeIcon,
 } from '@mui/icons-material';
@@ -32,12 +33,16 @@ import { api } from '../api/client';
 import { useSession } from '../context/SessionContext';
 import { ResponsiveDialog } from '../components/ResponsiveDialog';
 import { ResponsivePageHeader } from '../components/ResponsivePageHeader';
+import { TradePageLayout } from '../components/TradePageLayout';
 import { GTTMobileActionBar } from '../components/gtt/GTTMobileActionBar';
-import { GTTMobileControls } from '../components/gtt/GTTMobileControls';
 import { MobileGTTOrderCard } from '../components/gtt/MobileGTTOrderCard';
 import type { GTTOrder, GttSideFilter, GttStatusFilter } from '../components/gtt/gttDisplay';
 import { orderSide, orderStatus } from '../components/gtt/gttDisplay';
 import { newPlacementKey } from '../utils/placementIdempotency';
+import { TradeDataTable } from '../components/tradeTable/TradeDataTable';
+import type { TradeColumnDef } from '../components/tradeTable/types';
+import { tradeTableRegistry } from '../config/tradeTableRegistry';
+import { uiPageConfigToTradeTableConfig, useUiPageConfig } from '../hooks/useUiPageConfig';
 
 const WARNING_TEXT = 'DELETE';
 
@@ -45,18 +50,18 @@ export default function GTTPage() {
   const { sessionId } = useSession();
   
   const [orders, setOrders] = useState<GTTOrder[]>([]);
-  const [columns, setColumns] = useState<GridColDef[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   
-  // Filters
-  const [searchText, setSearchText] = useState('');
+  // Domain filters (pre-filter before config-driven table)
   const [varianceThreshold, setVarianceThreshold] = useState<number | ''>('');
   const [varianceFilterType, setVarianceFilterType] = useState<'gt' | 'lt'>('gt');
   const [sideFilter, setSideFilter] = useState<GttSideFilter>('all');
   const [statusFilter, setStatusFilter] = useState<GttStatusFilter>('all');
-  const [selectedRows, setSelectedRows] = useState<GridRowSelectionModel>([]);
+  const [selectedRows, setSelectedRows] = useState<Array<string | number>>([]);
+
+  const { config: uiConfig } = useUiPageConfig('buy_orders');
 
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -107,8 +112,7 @@ export default function GTTPage() {
         symbolCount[o.Symbol] = (symbolCount[o.Symbol] || 0) + 1;
       });
       const allDuplicates = new Set(Object.keys(symbolCount).filter(s => symbolCount[s] > 1));
-      
-      generateColumns(ordersWithId, allDuplicates);
+
     } catch (err) {
       console.error('GTT fetch error:', err);
       setError(err instanceof Error ? err.message : 'Failed to load orders');
@@ -123,111 +127,10 @@ export default function GTTPage() {
     }
   }, [sessionId]);
 
-  const generateColumns = (ordersData: GTTOrder[], duplicates: Set<string>) => {
-    if (ordersData.length === 0) {
-      setColumns([]);
-      return;
-    }
-    
-    const cols: GridColDef[] = [
-      { 
-        field: 'GTT ID', 
-        headerName: 'GTT ID', 
-        width: 100,
-        type: 'string',
-      },
-      { 
-        field: 'Symbol', 
-        headerName: 'Symbol', 
-        width: 120,
-        flex: 1,
-        type: 'string',
-        renderCell: (params) => {
-          const isDuplicate = duplicates.has(params.value as string);
-          return (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              {isDuplicate && (
-                <Chip label="DUP" size="small" color="warning" sx={{ height: 18, fontSize: '0.65rem' }} />
-              )}
-              <span style={{ color: isDuplicate ? '#ed6c02' : 'inherit' }}>
-                {params.value as string}
-              </span>
-            </Box>
-          );
-        },
-      },
-      { 
-        field: 'Trigger Price', 
-        headerName: 'Trigger', 
-        width: 100,
-        type: 'number',
-      },
-      { 
-        field: 'LTP', 
-        headerName: 'CMP', 
-        width: 100,
-        type: 'number',
-        renderCell: (params) => {
-          const val = params.value as number | null;
-          if (val === null || val === undefined) {
-            return <Typography variant="body2" color="text.disabled">N/A</Typography>;
-          }
-          return val.toFixed(2);
-        },
-      },
-      { 
-        field: 'Variance (%)', 
-        headerName: 'Variance %', 
-        width: 100,
-        type: 'number',
-        renderCell: (params) => {
-          const val = params.value as number | null;
-          if (val === null || val === undefined) {
-            return <Typography variant="body2" color="text.disabled">N/A</Typography>;
-          }
-          const color = val > 0 ? 'success.main' : val < 0 ? 'error.main' : 'text.secondary';
-          return (
-            <Box sx={{ color, fontWeight: 'bold' }}>
-              {val.toFixed(2)}%
-            </Box>
-          );
-        },
-      },
-      { 
-        field: 'Qty', 
-        headerName: 'Qty', 
-        width: 80,
-        type: 'number',
-      },
-      { 
-        field: 'Buy Amount', 
-        headerName: 'Amount', 
-        width: 120,
-        type: 'number',
-        renderCell: (params) => {
-          const val = params.value as number | null;
-          if (val === null || val === undefined) {
-            return <Typography variant="body2" color="text.disabled">N/A</Typography>;
-          }
-          return val.toLocaleString();
-        },
-      },
-    ];
-    setColumns(cols);
-  };
-
   // Filtered orders
   const filteredOrders = useMemo(() => {
     let result = orders;
     
-    // Search filter
-    if (searchText) {
-      const search = searchText.toLowerCase();
-      result = result.filter(o =>
-        o.Symbol?.toLowerCase().includes(search)
-      );
-    }
-
     if (sideFilter !== 'all') {
       result = result.filter((order) => orderSide(order) === sideFilter);
     }
@@ -256,7 +159,7 @@ export default function GTTPage() {
     // but we keep the checkbox for UI clarity
     
     return result;
-  }, [orders, searchText, varianceThreshold, varianceFilterType, sideFilter, statusFilter]);
+  }, [orders, varianceThreshold, varianceFilterType, sideFilter, statusFilter]);
 
   // Total amount and duplicates
   const totalAmount = useMemo(() => {
@@ -271,15 +174,83 @@ export default function GTTPage() {
     return new Set(Object.keys(symbolCount).filter(s => symbolCount[s] > 1));
   }, [filteredOrders]);
 
+  const tableConfig = useMemo(() => {
+    const base = tradeTableRegistry.buy_orders.config;
+    const runtimeColumns = (base.columns as TradeColumnDef<GTTOrder>[]).map((col) => {
+      if (col.id === 'Symbol') {
+        return {
+          ...col,
+          required: true,
+          valueGetter: (row: GTTOrder) => row.Symbol,
+          renderCell: (row: GTTOrder) => {
+            const isDup = duplicateSymbols.has(row.Symbol);
+            return (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                {isDup && <Chip label="DUP" size="small" color="warning" sx={{ height: 18, fontSize: '0.65rem' }} />}
+                <span style={{ color: isDup ? '#ed6c02' : 'inherit' }}>{row.Symbol}</span>
+              </Box>
+            );
+          },
+        };
+      }
+      if (col.id === 'Trigger Price' || col.id === 'LTP') {
+        return {
+          ...col,
+          valueGetter: (row: GTTOrder) => (row as any)[col.id],
+          formatValue: (val: unknown) => (val == null ? 'N/A' : Number(val).toLocaleString()),
+        };
+      }
+      if (col.id === 'Variance (%)') {
+        return {
+          ...col,
+          valueGetter: (row: GTTOrder) => row['Variance (%)'],
+          renderCell: (row: GTTOrder) => {
+            const val = row['Variance (%)'];
+            if (val == null) return <Typography variant="body2" color="text.disabled">N/A</Typography>;
+            const bg = val < 0 ? '#ffcdd2' : '#c8e6c9';
+            return <Box sx={{ backgroundColor: bg, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', px: 1 }}>{val.toFixed(2)}%</Box>;
+          },
+        };
+      }
+      if (col.id === 'Buy Amount') {
+        return {
+          ...col,
+          valueGetter: (row: GTTOrder) => row['Buy Amount'],
+          formatValue: (val: unknown) => (val == null ? 'N/A' : Number(val).toLocaleString()),
+        };
+      }
+      if (col.id === 'Status') {
+        return {
+          ...col,
+          valueGetter: (row: GTTOrder) => (row as any)['Order Status'] ?? (row as any).Status ?? '',
+          filterOptions: [{ value: 'ACTIVE', label: 'Active' }, { value: 'TRIGGERED', label: 'Triggered' }, { value: 'CANCELLED', label: 'Cancelled' }, { value: 'DELETED', label: 'Deleted' }, { value: 'EXPIRED', label: 'Expired' }],
+        };
+      }
+      if (col.id === 'GTT ID') {
+        return { ...col, valueGetter: (row: GTTOrder) => row['GTT ID'] };
+      }
+      if (col.id === 'Qty') {
+        return { ...col, valueGetter: (row: GTTOrder) => row.Qty };
+      }
+      return col;
+    });
+    const baseConfig = { ...base, columns: runtimeColumns };
+    const effective = uiConfig ? uiPageConfigToTradeTableConfig<any>('buy_orders', uiConfig, baseConfig as any) : (baseConfig as any);
+    const mergedColumns = (effective.columns as TradeColumnDef<any>[]).map((col) => {
+      const runtime = runtimeColumns.find((c) => c.id === col.id);
+      return runtime ? { ...runtime, ...col, renderCell: runtime.renderCell ?? col.renderCell, formatValue: runtime.formatValue ?? col.formatValue, filterOptions: runtime.filterOptions ?? col.filterOptions, valueGetter: runtime.valueGetter ?? col.valueGetter } : col;
+    });
+    return { ...effective, columns: mergedColumns } as any;
+  }, [uiConfig, duplicateSymbols]);
+
   const handleRefresh = () => {
     fetchOrders();
   };
 
-  const handleDeleteClick = (rowId?: string | number) => {
-    if (rowId !== undefined) {
-      setSelectedRows([rowId]);
-    }
-    if (selectedRows.length === 0 && rowId === undefined) return;
+  const handleDeleteClick = (rowId?: string | number, ids?: Array<string | number>) => {
+    const next = ids ?? (rowId !== undefined ? [rowId] : selectedRows);
+    if (next.length === 0) return;
+    setSelectedRows(next);
     setError('');
     setDeleteDialogOpen(true);
     setDeleteConfirmText('');
@@ -309,11 +280,10 @@ export default function GTTPage() {
     }
   };
 
-  const handleNormalizeClick = (rowId?: string | number) => {
-    if (rowId !== undefined) {
-      setSelectedRows([rowId]);
-    }
-    if (selectedRows.length === 0 && rowId === undefined) return;
+  const handleNormalizeClick = (rowId?: string | number, ids?: Array<string | number>) => {
+    const next = ids ?? (rowId !== undefined ? [rowId] : selectedRows);
+    if (next.length === 0) return;
+    setSelectedRows(next);
     setError('');
     setNormalizeDialogOpen(true);
     setNormalizeConfirmText('');
@@ -358,21 +328,24 @@ export default function GTTPage() {
 
   if (!sessionId) {
     return (
-      <Box>
-        <ResponsivePageHeader title="Buy Orders" />
+      <TradePageLayout header={<ResponsivePageHeader title="Buy Orders" />}>
         <Alert severity="warning">
           No active session. Please start a session from the Sessions page first.
         </Alert>
-      </Box>
+      </TradePageLayout>
     );
   }
 
   return (
-    <Box sx={{ pb: isMobile ? '88px' : 0 }}>
-      <ResponsivePageHeader
-        title="Buy Orders"
-        description="Active GTT buy orders for this session"
-      />
+    <TradePageLayout
+      sx={{ pb: isMobile ? '88px' : 0 }}
+      header={
+        <ResponsivePageHeader
+          title="Buy Orders"
+          description="Active GTT buy orders for this session"
+        />
+      }
+    >
 
       {/* Total Amount Display */}
       {orders.length > 0 && (
@@ -411,170 +384,75 @@ export default function GTTPage() {
         </Alert>
       )}
 
-      {isMobile ? (
-        <>
-          <GTTMobileControls
-            searchText={searchText}
-            sideFilter={sideFilter}
-            statusFilter={statusFilter}
-            varianceThreshold={varianceThreshold}
-            varianceFilterType={varianceFilterType}
-            loading={loading}
-            onSearch={setSearchText}
-            onSideFilter={setSideFilter}
-            onStatusFilter={setStatusFilter}
-            onVarianceThreshold={setVarianceThreshold}
-            onVarianceFilterType={setVarianceFilterType}
-            onRefresh={handleRefresh}
-          />
-
-          {loading ? (
-            <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-              <CircularProgress />
-            </Box>
-          ) : filteredOrders.length === 0 ? (
-            <Alert severity="info">
-              {orders.length === 0 ? 'No GTT orders found' : 'No orders match filters'}
-            </Alert>
-          ) : (
-            filteredOrders.map((order) => (
-              <MobileGTTOrderCard
-                key={String(order.id ?? order['GTT ID'])}
-                order={order}
-                selected={selectedRows.includes(order.id as string | number)}
-                duplicate={duplicateSymbols.has(order.Symbol)}
-                onToggleSelect={() =>
-                  setSelectedRows((current) =>
-                    current.includes(order.id as string | number)
-                      ? current.filter((id) => id !== order.id)
-                      : [...current, order.id as string | number],
-                  )
-                }
-                onDelete={() => handleDeleteClick(order.id)}
-                onNormalize={() => handleNormalizeClick(order.id)}
-              />
-            ))
-          )}
-        </>
-      ) : (
-        <>
-      {/* Toolbar */}
-      <Paper sx={{ p: 2, mb: 2, overflowX: 'auto' }}>
-        <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'nowrap', minWidth: 'max-content' }}>
-          <Button
-            variant="contained"
-            startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <RefreshIcon />}
-            onClick={handleRefresh}
-            disabled={loading}
-          >
-            Refresh
-          </Button>
-
-          <TextField
-            size="small"
-            placeholder="Search symbol..."
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon />
-                </InputAdornment>
-              ),
-            }}
-            sx={{ width: 200 }}
-          />
-
-          <TextField
-            size="small"
-            type="number"
-            placeholder="Variance %"
-            value={varianceThreshold}
-            onChange={(e) => setVarianceThreshold(e.target.value === '' ? '' : Number(e.target.value))}
-            sx={{ width: 120 }}
-          />
-
-          <Button
-            size="small"
-            variant={varianceFilterType === 'gt' ? 'contained' : 'outlined'}
-            onClick={() => setVarianceFilterType('gt')}
-            sx={{ minWidth: 40 }}
-          >
-            &gt;=
-          </Button>
-          <Button
-            size="small"
-            variant={varianceFilterType === 'lt' ? 'contained' : 'outlined'}
-            onClick={() => setVarianceFilterType('lt')}
-            sx={{ minWidth: 40 }}
-          >
-            &lt;
-          </Button>
-
-          <Box sx={{ flexGrow: 1 }} />
-
-          <Chip 
-            label={`${selectedRows.length} selected`} 
-            color={selectedRows.length > 0 ? 'primary' : 'default'}
-          />
-
-          <Button
-            variant="contained"
-            color="error"
-            startIcon={<DeleteIcon />}
-            onClick={() => handleDeleteClick()}
-            disabled={selectedRows.length === 0}
-          >
-            Delete Selected
-          </Button>
-
-          <Button
-            variant="contained"
-            color="info"
-            startIcon={<NormalizeIcon />}
-            onClick={() => handleNormalizeClick()}
-            disabled={selectedRows.length === 0}
-          >
-            Normalize Variance
-          </Button>
-        </Box>
-      </Paper>
-
       {/* Orders Table */}
-      <Paper sx={{ p: 2, height: 600 }}>
-        {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-            <CircularProgress />
-          </Box>
-        ) : error ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4, flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-            <Typography color="error">
-              {error}
-            </Typography>
-            <Button variant="outlined" onClick={handleRefresh}>
-              Retry
-            </Button>
-          </Box>
-        ) : filteredOrders.length === 0 ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-            <Typography color="text.secondary">
-              {orders.length === 0 ? 'No GTT orders found' : 'No orders match filters'}
-            </Typography>
-          </Box>
-        ) : (
-          <DataGrid
-            rows={filteredOrders}
-            columns={columns}
-            initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
-            pageSizeOptions={[10, 25, 50]}
-            checkboxSelection
-            disableRowSelectionOnClick={false}
-            rowSelectionModel={selectedRows}
-            onRowSelectionModelChange={setSelectedRows}
-            getRowId={(row) => row.id}
+      <TradeDataTable<GTTOrder>
+        config={tableConfig}
+        rows={filteredOrders}
+        getRowId={(row) => (row as any).id ?? `${row['GTT ID']}-${row.Symbol}`}
+        loading={loading}
+        error={error || null}
+        onRetry={handleRefresh}
+        emptyTitle={orders.length === 0 ? 'No GTT orders found' : 'No orders match filters'}
+        onSelectionChange={setSelectedRows}
+        isRowSelectable={(row) => (row.Side ?? 'BUY') === 'BUY'}
+        selectionActions={[
+          {
+            label: 'Delete Selected',
+            color: 'error',
+            variant: 'contained',
+            icon: <DeleteIcon />,
+            onClick: (ids) => handleDeleteClick(undefined, ids),
+          },
+          {
+            label: 'Normalize Variance',
+            color: 'info',
+            variant: 'contained',
+            icon: <NormalizeIcon />,
+            onClick: (ids) => handleNormalizeClick(undefined, ids),
+          },
+        ]}
+        renderMobileCard={(row, selected, toggleSelect) => (
+          <MobileGTTOrderCard
+            order={row}
+            selected={selected}
+            duplicate={duplicateSymbols.has(row.Symbol)}
+            onToggleSelect={() => toggleSelect()}
+            onDelete={() => handleDeleteClick((row as any).id)}
+            onNormalize={() => handleNormalizeClick((row as any).id)}
           />
         )}
-      </Paper>
+        toolbarExtra={
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center', mb: 1 }}>
+            <FormControl size="small" sx={{ minWidth: 110 }}>
+              <InputLabel>Side</InputLabel>
+              <Select value={sideFilter} label="Side" onChange={(e) => setSideFilter(e.target.value as GttSideFilter)}>
+                <MenuItem value="all">All</MenuItem>
+                <MenuItem value="BUY">BUY</MenuItem>
+                <MenuItem value="SELL">SELL</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: 120 }}>
+              <InputLabel>Status</InputLabel>
+              <Select value={statusFilter} label="Status" onChange={(e) => setStatusFilter(e.target.value as GttStatusFilter)}>
+                <MenuItem value="all">All</MenuItem>
+                <MenuItem value="active">Active</MenuItem>
+                <MenuItem value="inactive">Inactive</MenuItem>
+              </Select>
+            </FormControl>
+            <TextField
+              size="small"
+              type="number"
+              placeholder="Variance %"
+              value={varianceThreshold}
+              onChange={(e) => setVarianceThreshold(e.target.value === '' ? '' : Number(e.target.value))}
+              sx={{ width: 120 }}
+            />
+            <Button size="small" variant={varianceFilterType === 'gt' ? 'contained' : 'outlined'} onClick={() => setVarianceFilterType('gt')} sx={{ minWidth: 40 }}>&gt;</Button>
+            <Button size="small" variant={varianceFilterType === 'lt' ? 'contained' : 'outlined'} onClick={() => setVarianceFilterType('lt')} sx={{ minWidth: 40 }}>&lt;</Button>
+            <Button variant="outlined" startIcon={<RefreshIcon />} onClick={handleRefresh} disabled={loading} sx={{ ml: 'auto' }}>Refresh</Button>
+          </Box>
+        }
+      />
 
       {/* Status Bar */}
       <Paper sx={{ p: 1, mt: 2 }}>
@@ -584,8 +462,6 @@ export default function GTTPage() {
           <Chip label={`Selected: ${selectedRows.length}`} size="small" color="secondary" />
         </Box>
       </Paper>
-      </>
-      )}
 
       <GTTMobileActionBar
         count={selectedRows.length}
@@ -830,6 +706,6 @@ export default function GTTPage() {
           )}
         </DialogActions>
       </ResponsiveDialog>
-    </Box>
+    </TradePageLayout>
   );
 }

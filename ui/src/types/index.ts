@@ -81,11 +81,6 @@ export interface SessionStartRequest {
   warm_start?: boolean;
 }
 
-export interface SessionCreate {
-  broker_connection_id: number;
-  warm_start?: boolean;
-}
-
 export type SessionReadiness =
   | 'CONNECTED'
   | 'INITIALIZING'
@@ -667,4 +662,82 @@ export interface CandidatePlaceResponse {
   uncertain?: number;
   idempotency_key?: string | null;
   replayed?: boolean;
+}
+
+// ── UI Configuration (Phase 3) ──────────────────────────────────────────────
+
+export type UiDensity = 'compact' | 'comfortable';
+export type UiSortDirection = 'asc' | 'desc';
+
+export interface UiConfigSort {
+  field: string;
+  direction: UiSortDirection;
+}
+
+export interface UiConfigColumn {
+  id: string;
+  label?: string;
+  dataType?: 'text' | 'number' | 'date' | 'boolean' | 'categorical';
+  visible: boolean;
+  sortable: boolean;
+  filterable: boolean;
+  sortableSupported?: boolean;
+  filterableSupported?: boolean;
+  position: number;
+  required?: boolean;
+  mobilePrimary?: boolean;
+  mobileDetail?: boolean;
+  width?: number;
+}
+
+export interface UiPageConfig {
+  pageId: string;
+  searchEnabled: boolean;
+  searchField?: string | null;
+  defaultPageSize: number;
+  allowedPageSizes: number[];
+  density: UiDensity;
+  selectionEnabled: boolean;
+  defaultSort?: UiConfigSort | null;
+  mobilePrimaryFields: string[];
+  mobileDetailFields: string[];
+  columns: UiConfigColumn[];
+  _meta?: {
+    source: 'default' | 'saved';
+    schemaVersion: number;
+    updatedAt: string | null;
+    updatedBy: number | null;
+  };
+}
+
+export interface UiConfigPageSummary {
+  page_id: string;
+  label: string;
+  search_supported: boolean;
+  selection_supported: boolean;
+  column_count: number;
+}
+
+export interface UiConfigPagesResponse {
+  pages: UiConfigPageSummary[];
+}
+
+export interface UiPageConfigUpdatePayload {
+  pageId?: string;
+  searchEnabled?: boolean;
+  searchField?: string | null;
+  defaultPageSize?: number;
+  allowedPageSizes?: number[];
+  density?: UiDensity;
+  selectionEnabled?: boolean;
+  defaultSort?: UiConfigSort | null;
+  mobilePrimaryFields?: string[];
+  mobileDetailFields?: string[];
+  columns?: Array<{
+    id: string;
+    visible?: boolean;
+    sortable?: boolean;
+    filterable?: boolean;
+    position?: number;
+  }>;
 }

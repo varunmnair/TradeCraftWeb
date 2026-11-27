@@ -15,7 +15,7 @@ import BuyEntriesPage from './pages/BuyEntriesPage';
 import EntryStrategiesPage from './pages/EntryStrategiesPage';
 import EntryCandidatesPage from './pages/EntryCandidatesPage';
 import StrategyDetailPage from './pages/StrategyDetailPage';
-import PlanPage from './pages/PlanPage';
+// Legacy PlanPage removed from navigation; /plan redirects to Entry Strategies.
 import GTTPage from './pages/GTTPage';
 import JobsPage from './pages/JobsPage';
 import AdminPage from './pages/AdminPage';
@@ -141,16 +141,7 @@ export default function App() {
                     </PrivateRoute>
                   }
                 />
-                <Route
-                  path="/plan"
-                  element={
-                    <PrivateRoute>
-                      <Layout>
-                        <PlanPage />
-                      </Layout>
-                    </PrivateRoute>
-                  }
-                />
+                <Route path="/plan" element={<Navigate to="/entry-strategies" replace />} />
                 <Route
                   path="/gtt"
                   element={

@@ -79,6 +79,7 @@ class TestZerodhaBrokerTokenHandling:
             broker.login()
 
         assert "Zerodha session expired" in str(exc_info.value)
+        mock_session_manager.clear_tokens.assert_called_once_with("zerodha", connection_id=42)
 
     @patch("brokers.zerodha_broker.KiteConnect")
     def test_zerodha_broker_get_holdings_normalizes_output(self, mock_kite_class):
@@ -132,6 +133,7 @@ class TestZerodhaBrokerTokenHandling:
 
         assert "Zerodha session expired" in str(exc_info.value)
         assert broker.kite is None
+        mock_session_manager.clear_tokens.assert_called_once_with("zerodha", connection_id=42)
 
     @patch("brokers.zerodha_broker.KiteConnect")
     def test_zerodha_broker_ensure_kite_recreates_on_error(self, mock_kite_class):

@@ -1,6 +1,15 @@
-import React, { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  ReactNode,
+} from 'react';
 import { JobStatus } from '../types';
 import { api } from '../api/client';
+import { SESSION_CHANGED_EVENT } from '../utils/sessionEvents';
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -81,6 +90,18 @@ export function JobsProvider({ children }: { children: ReactNode }) {
   const getJob = useCallback((jobId: number) => {
     return activeJobs.get(jobId);
   }, [activeJobs]);
+
+  // Job results belong to the session that started them. Drop polling and
+  // cached results when the device switches brokers or ends its session.
+  useEffect(() => {
+    const handleSessionChanged = () => {
+      intervalsRef.current.forEach((interval) => clearInterval(interval));
+      intervalsRef.current.clear();
+      setActiveJobs(new Map());
+    };
+    window.addEventListener(SESSION_CHANGED_EVENT, handleSessionChanged);
+    return () => window.removeEventListener(SESSION_CHANGED_EVENT, handleSessionChanged);
+  }, []);
 
   return (
     <JobsContext.Provider value={{ activeJobs, trackJob, untrackJob, getJob }}>

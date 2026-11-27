@@ -32,6 +32,7 @@ from api.routes import market as market_routes
 from api.routes import plan as plan_routes
 from api.routes import risk as risk_routes
 from api.routes import session as session_routes
+from api.routes import ui_config as ui_config_routes
 from db.database import SessionLocal
 
 logging.basicConfig(
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(ai_routes.router)
     app.include_router(entry_strategy_routes.router)
     app.include_router(candidates_routes.router)
+    app.include_router(ui_config_routes.router)
 
     @app.on_event("startup")
     async def startup_event():

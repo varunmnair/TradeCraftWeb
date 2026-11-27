@@ -151,6 +151,57 @@ class BrokerSessionOrchestrator:
         label = accounts[0].broker_name.capitalize()
         return f"Multiple accounts are available for {label}. Select one to continue."
 
+    def _session_to_result(
+        self,
+        session: dict[str, Any],
+        *,
+        connection_id: int,
+        broker_name: str,
+        broker_user_id: Optional[str],
+        candidates: list[dict[str, Any]],
+        message: Optional[str] = None,
+        data_status: str = "fresh",
+    ) -> OrchestrationResult:
+        return OrchestrationResult(
+            status=SessionReadiness.READY,
+            broker_connected=True,
+            broker_name=broker_name,
+            connection_id=connection_id,
+            broker_user_id=session.get("broker_user_id") or broker_user_id,
+            session_id=session.get("session_id"),
+            session=session,
+            candidates=candidates,
+            message=message,
+            data_status=data_status,
+        )
+
+    def _existing_device_session(self, user_id: int, device_id: str):
+        return self._registry.find_session_for_user(user_id, device_id)
+
+    def _recover_existing_session(
+        self, user_id: int, device_id: str, candidates: list[dict[str, Any]]
+    ) -> OrchestrationResult | None:
+        existing = self._existing_device_session(user_id, device_id)
+        if not existing:
+            return None
+        try:
+            session = self._sessions.refresh_caches(existing.session_id)
+        except Exception:
+            LOGGER.exception(
+                "Session recovery failed for session_id=%s", existing.session_id
+            )
+            return None
+        self._active_store.set_active_connection(
+            user_id, existing.trading_broker_connection_id, device_id
+        )
+        return self._session_to_result(
+            session,
+            connection_id=existing.trading_broker_connection_id,
+            broker_name=existing.broker_name,
+            broker_user_id=existing.broker_user_id,
+            candidates=candidates,
+        )
+
     def orchestrate(
         self,
         user: UserContext,
@@ -160,7 +211,13 @@ class BrokerSessionOrchestrator:
         warm_start: bool = True,
         refresh_data: bool = False,
     ) -> OrchestrationResult:
-        """Return readiness for one authenticated device and optional broker."""
+        """Resolve, reuse or initialize a device-scoped trading session.
+
+        Explicit activation: broker_connection_id or broker_name is provided.
+        Recovery/no-op: no explicit target - reuse existing device session or
+        the device's explicitly-selected active connection; never auto-pick a
+        new broker on login.
+        """
         if not user.user_id:
             return OrchestrationResult(
                 status=SessionReadiness.ERROR,
@@ -168,19 +225,90 @@ class BrokerSessionOrchestrator:
             )
 
         device_id = user.device_id or "default-device"
+        explicit_target = broker_connection_id is not None or broker_name is not None
         accounts = self.available_accounts(user.user_id, broker_name)
         candidate_dicts = [account.as_dict() for account in accounts]
 
         if broker_connection_id is not None:
             accounts = [a for a in accounts if a.connection_id == broker_connection_id]
             if not accounts:
+                existing = self._recover_existing_session(
+                    user.user_id, device_id, candidate_dicts
+                )
+                if existing:
+                    existing.message = (
+                        "The selected broker connection is no longer valid. "
+                        "Your current session is still active."
+                    )
+                    return existing
                 return OrchestrationResult(
                     status=SessionReadiness.ERROR,
                     candidates=candidate_dicts,
                     message="The selected broker connection is no longer valid. Connect the broker again.",
                 )
 
+        if not explicit_target:
+            # Recovery only: keep an already-active device session, or restore the
+            # device's explicitly selected active connection. Never auto-select.
+            existing = self._existing_device_session(user.user_id, device_id)
+            if existing:
+                recovered = self._recover_existing_session(
+                    user.user_id, device_id, candidate_dicts
+                )
+                if recovered:
+                    return recovered
+                return OrchestrationResult(
+                    status=SessionReadiness.ERROR,
+                    broker_connected=True,
+                    broker_name=existing.broker_name,
+                    connection_id=existing.trading_broker_connection_id,
+                    broker_user_id=existing.broker_user_id,
+                    session_id=existing.session_id,
+                    candidates=candidate_dicts,
+                    message="Session recovery failed. Retry to continue.",
+                )
+
+            active_connection_id = self._active_store.get_active_connection(
+                user.user_id, device_id
+            )
+            if active_connection_id is not None:
+                active_accounts = [
+                    a for a in self.available_accounts(user.user_id)
+                    if a.connection_id == active_connection_id
+                ]
+                if active_accounts:
+                    return self._activate_account(
+                        user.user_id,
+                        device_id,
+                        active_accounts[0],
+                        warm_start=warm_start,
+                        candidate_dicts=candidate_dicts,
+                    )
+                self._active_store.clear_active_connection(user.user_id, device_id)
+
+            if not candidate_dicts:
+                return OrchestrationResult(
+                    status=SessionReadiness.ERROR,
+                    candidates=candidate_dicts,
+                    message="No broker is connected. Connect a broker to start a trading session.",
+                )
+            return OrchestrationResult(
+                status=SessionReadiness.CONNECTED,
+                broker_connected=True,
+                requires_selection=False,
+                candidates=candidate_dicts,
+                message="Select a broker to start a trading session.",
+            )
+
         if not accounts:
+            existing = self._recover_existing_session(
+                user.user_id, device_id, candidate_dicts
+            )
+            if existing:
+                existing.message = (
+                    "Unable to activate the selected broker. Your current session is still active."
+                )
+                return existing
             return OrchestrationResult(
                 status=SessionReadiness.ERROR,
                 candidates=candidate_dicts,
@@ -197,7 +325,23 @@ class BrokerSessionOrchestrator:
                 message=selection_message,
             )
 
-        account = accounts[0]
+        return self._activate_account(
+            user.user_id,
+            device_id,
+            accounts[0],
+            warm_start=warm_start,
+            candidate_dicts=candidate_dicts,
+        )
+
+    def _activate_account(
+        self,
+        user_id: int,
+        device_id: str,
+        account: BrokerAccount,
+        *,
+        warm_start: bool,
+        candidate_dicts: list[dict[str, Any]],
+    ) -> OrchestrationResult:
         result = OrchestrationResult(
             status=SessionReadiness.CONNECTED,
             broker_connected=True,
@@ -206,11 +350,10 @@ class BrokerSessionOrchestrator:
             broker_user_id=account.broker_user_id,
             candidates=[account.as_dict()],
         )
-
-        lock = self._lock_for(user.user_id, device_id, account.connection_id)
+        lock = self._lock_for(user_id, device_id, account.connection_id)
         with lock:
             existing = self._registry.find_session_for_connection(
-                user.user_id, device_id, account.connection_id
+                user_id, device_id, account.connection_id
             )
             if existing:
                 try:
@@ -221,15 +364,28 @@ class BrokerSessionOrchestrator:
                         existing.session_id,
                         account.connection_id,
                     )
+                    fallback = self._recover_existing_session(
+                        user_id, device_id, candidate_dicts
+                    )
+                    if fallback and fallback.session_id != existing.session_id:
+                        fallback.message = (
+                            "Session recovery failed. Your current session is still active."
+                        )
+                        return fallback
                     result.status = SessionReadiness.ERROR
                     result.message = "Broker connected. Session initialization failed."
                     return result
                 self._active_store.set_active_connection(
-                    user.user_id, account.connection_id, device_id
+                    user_id, account.connection_id, device_id
+                )
+                self._registry.evict_other_sessions_for_device(
+                    user_id, device_id, existing.session_id
                 )
                 result.status = SessionReadiness.READY
                 result.session_id = session.get("session_id")
-                result.broker_user_id = session.get("broker_user_id") or account.broker_user_id
+                result.broker_user_id = (
+                    session.get("broker_user_id") or account.broker_user_id
+                )
                 result.session = session
                 return result
 
@@ -242,24 +398,63 @@ class BrokerSessionOrchestrator:
             except Exception:
                 LOGGER.exception(
                     "Session initialization failed for user_id=%d connection_id=%d",
-                    user.user_id,
+                    user_id,
                     account.connection_id,
                 )
+                fallback = self._fallback_after_switch_failure(
+                    user_id, device_id, candidate_dicts, account.connection_id
+                )
+                if fallback:
+                    fallback.message = (
+                        f"Unable to activate {account.broker_name.capitalize()}. "
+                        "Your current session is still active."
+                    )
+                    return fallback
                 result.status = SessionReadiness.ERROR
                 result.message = "Broker connected. Session initialization failed."
                 return result
 
             if session.get("warm_start") is False:
+                fallback = self._fallback_after_switch_failure(
+                    user_id, device_id, candidate_dicts, account.connection_id
+                )
+                if fallback:
+                    fallback.message = (
+                        f"Unable to activate {account.broker_name.capitalize()}. "
+                        "Your current session is still active."
+                    )
+                    return fallback
                 result.status = SessionReadiness.ERROR
                 result.message = "Broker connected. Session initialization failed."
                 result.session_id = session.get("session_id")
                 result.session = session
                 return result
 
-            self._active_store.set_active_connection(user.user_id, account.connection_id, device_id)
+            self._active_store.set_active_connection(
+                user_id, account.connection_id, device_id
+            )
+            self._registry.evict_other_sessions_for_device(
+                user_id, device_id, session.get("session_id")
+            )
             result.status = SessionReadiness.READY
             result.session_id = session.get("session_id")
-            result.broker_user_id = session.get("broker_user_id") or account.broker_user_id
+            result.broker_user_id = (
+                session.get("broker_user_id") or account.broker_user_id
+            )
             result.session = session
             result.data_status = "fresh"
             return result
+
+    def _fallback_after_switch_failure(
+        self,
+        user_id: int,
+        device_id: str,
+        candidate_dicts: list[dict[str, Any]],
+        failed_connection_id: int,
+    ) -> OrchestrationResult | None:
+        existing = self._existing_device_session(user_id, device_id)
+        if not existing:
+            return None
+        if existing.trading_broker_connection_id == failed_connection_id:
+            return None
+        return self._recover_existing_session(user_id, device_id, candidate_dicts)

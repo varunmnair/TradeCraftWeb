@@ -26,6 +26,7 @@ from core.services.risk_service import RiskService
 from core.services.session_service import SessionService
 from core.services.symbol_catalog_service import SymbolCatalogService
 from core.services.trades_service import TradesService, get_trades_service
+from core.services.ui_configuration_service import UiConfigurationService
 from core.session_manager import SessionManager
 from db.database import SessionLocal, get_db
 
@@ -64,6 +65,7 @@ _placement_guard = PlacementGuardService(SessionLocal)
 _job_runner = JobRunner(SessionLocal, session_registry=_session_registry)
 _trades_service = get_trades_service()
 _symbol_catalog_service = SymbolCatalogService()
+_ui_configuration_service = UiConfigurationService(db_session_factory=SessionLocal)
 _global_cmp_manager = CMPManager(
     broker=None,
     session_manager=None,
@@ -317,6 +319,10 @@ def get_trades_service() -> TradesService:
 
 def get_symbol_catalog_service() -> SymbolCatalogService:
     return _symbol_catalog_service
+
+
+def get_ui_configuration_service() -> UiConfigurationService:
+    return _ui_configuration_service
 
 
 def get_global_cmp_manager() -> CMPManager:

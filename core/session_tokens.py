@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from core.security.encryption import get_encryptor
+from core.services.broker_connection_service import release_broker_identity
 from db import models
 from db.database import SessionLocal
 
@@ -108,6 +109,16 @@ class BaseTokenStore:
     ) -> None:
         raise NotImplementedError
 
+    def clear_tokens(
+        self,
+        broker_name: str,
+        *,
+        connection_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ) -> bool:
+        """Clear stored tokens without deleting the connection row."""
+        raise NotImplementedError
+
     def disconnect(
         self,
         broker_name: str,
@@ -165,58 +176,96 @@ class DbTokenStore(BaseTokenStore):
                     )
 
                 new_broker_user_id = payload.get("broker_user_id")
-                # Reuse an existing connection for the same broker identity instead
-                # of deleting records that another device may be using.
-                connection = (
-                    session.query(models.BrokerConnection)
-                    .filter(
-                        models.BrokerConnection.user_id == user_id,
-                        models.BrokerConnection.broker_name == broker_name,
-                        models.BrokerConnection.broker_user_id == new_broker_user_id,
-                    )
-                    .order_by(models.BrokerConnection.id.desc())
-                    .first()
+                query = session.query(models.BrokerConnection).filter(
+                    models.BrokerConnection.user_id == user_id,
+                    models.BrokerConnection.broker_name == broker_name,
                 )
+                connection = None
+                if new_broker_user_id:
+                    connection = (
+                        query.filter(
+                            models.BrokerConnection.broker_user_id == new_broker_user_id
+                        )
+                        .order_by(models.BrokerConnection.id.desc())
+                        .first()
+                    )
+                if connection is None:
+                    # Reuse the broker's existing connection rather than adding a
+                    # second row for the same user and broker.
+                    connection = query.order_by(
+                        models.BrokerConnection.encrypted_tokens.is_(None).asc(),
+                        models.BrokerConnection.id.desc(),
+                    ).first()
                 if connection is None:
                     connection = models.BrokerConnection(
                         user_id=user_id,
                         broker_name=broker_name,
-                        encrypted_tokens=encrypted,
                         metadata_json=json.dumps({}),
-                        broker_user_id=new_broker_user_id,
-                        token_updated_at=datetime.now(timezone.utc),
                     )
                     session.add(connection)
-                else:
-                    connection.encrypted_tokens = encrypted
-                    connection.token_updated_at = datetime.now(timezone.utc)
-                session.commit()
-                session.refresh(connection)
-                return
-
-            connection = session.get(models.BrokerConnection, connection_id)
-            if not connection:
-                raise ValueError("Broker connection not found")
+            else:
+                connection = session.get(models.BrokerConnection, connection_id)
+                if not connection:
+                    raise ValueError("Broker connection not found")
 
             new_broker_user_id = payload.get("broker_user_id")
-            if new_broker_user_id and new_broker_user_id != connection.broker_user_id:
-                existing = (
-                    session.query(models.BrokerConnection)
-                    .filter(
-                        models.BrokerConnection.user_id == connection.user_id,
-                        models.BrokerConnection.broker_name == connection.broker_name,
-                        models.BrokerConnection.broker_user_id == new_broker_user_id,
-                        models.BrokerConnection.id != connection_id,
-                    )
-                    .first()
+            if new_broker_user_id:
+                # Clear conflicting identities and flush before assigning this
+                # one; SQLAlchemy would otherwise UPDATE before any DELETE.
+                release_broker_identity(
+                    session, connection=connection, broker_user_id=new_broker_user_id
                 )
-                if existing:
-                    session.delete(existing)
-
+                connection.broker_user_id = new_broker_user_id
             connection.encrypted_tokens = encrypted
-            connection.broker_user_id = new_broker_user_id or connection.broker_user_id
             connection.token_updated_at = datetime.now(timezone.utc)
             session.commit()
+            session.refresh(connection)
+
+    def clear_tokens(
+        self,
+        broker_name: str,
+        *,
+        connection_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ) -> bool:
+        """Clear stored tokens without deleting the connection row.
+
+        Used when a broker reports definitive auth failure so stale tokens are not
+        reused and reconnect flows can store fresh tokens.
+        """
+        broker_name = (broker_name or "").lower()
+        with self._session_factory() as session:
+            if connection_id is not None:
+                connection = session.get(models.BrokerConnection, connection_id)
+                if connection and connection.broker_name == broker_name:
+                    if connection.encrypted_tokens is None and connection.token_updated_at is None:
+                        return False
+                    connection.encrypted_tokens = None
+                    connection.token_updated_at = None
+                    session.commit()
+                    return True
+                return False
+
+            if user_id is not None:
+                rows = (
+                    session.query(models.BrokerConnection)
+                    .filter(
+                        models.BrokerConnection.user_id == user_id,
+                        models.BrokerConnection.broker_name == broker_name,
+                    )
+                    .all()
+                )
+                changed = False
+                for row in rows:
+                    if row.encrypted_tokens is not None or row.token_updated_at is not None:
+                        row.encrypted_tokens = None
+                        row.token_updated_at = None
+                        changed = True
+                if changed:
+                    session.commit()
+                return changed
+
+            raise ValueError("Either connection_id or user_id required")
 
     def disconnect(
         self,

@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState, ReactNode } from 'react';
 import {
+  SESSION_CHANGED_EVENT,
   SESSION_EXPIRED_EVENT,
   SESSION_RESTORE_REQUIRED_EVENT,
 } from '../utils/sessionEvents';
@@ -56,11 +57,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clearStoredSession();
     };
 
+    // A successful switch/recovery replaces the previous session; old expiry
+    // warnings must not remain visible against the new broker session.
+    const handleSessionChanged = () => setSessionExpiredMessage(null);
+
     window.addEventListener(SESSION_EXPIRED_EVENT, handleExpired);
     window.addEventListener(SESSION_RESTORE_REQUIRED_EVENT, handleRestoreRequired);
+    window.addEventListener(SESSION_CHANGED_EVENT, handleSessionChanged);
     return () => {
       window.removeEventListener(SESSION_EXPIRED_EVENT, handleExpired);
       window.removeEventListener(SESSION_RESTORE_REQUIRED_EVENT, handleRestoreRequired);
+      window.removeEventListener(SESSION_CHANGED_EVENT, handleSessionChanged);
     };
   }, []);
 

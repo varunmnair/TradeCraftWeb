@@ -50,12 +50,29 @@ class GTTManager:
             "status": g.get("status"),
         }
 
-        trigger_values = g.get("trigger_values") or g.get("condition", {}).get(
-            "trigger_values"
-        )
-        details["trigger"] = (
-            trigger_values[0] if trigger_values else order_data.get("price")
-        )
+        condition = g.get("condition") or {}
+        trigger_values = g.get("trigger_values") or condition.get("trigger_values")
+        trigger = None
+        if isinstance(trigger_values, (list, tuple)):
+            for value in trigger_values:
+                try:
+                    candidate = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if candidate > 0:
+                    trigger = candidate
+                    break
+
+        # MARKET GTTs carry price=0. That is not a usable trigger; treating it
+        # as one used to display 0 and suppress variance/buy-amount calculation.
+        if trigger is None:
+            try:
+                price = float(order_data.get("price"))
+            except (TypeError, ValueError):
+                price = 0.0
+            trigger = price if price > 0 else None
+
+        details["trigger"] = trigger
 
         return details
 

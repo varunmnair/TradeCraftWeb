@@ -7,7 +7,6 @@ import {
   BrokerConnectionCreate,
   SessionResponse,
   SessionStartRequest,
-  SessionCreate,
   BrokerSessionBootstrapRequest,
   BrokerSessionBootstrapResponse,
   JobStatusResponse,
@@ -52,6 +51,9 @@ import {
   CandidateGenerateRequest,
   CandidateGenerateResponse,
   CandidatePlaceResponse,
+  UiPageConfig,
+  UiConfigPagesResponse,
+  UiPageConfigUpdatePayload,
 } from '../types';
 import { getDeviceId } from '../utils/deviceId';
 import {
@@ -64,7 +66,10 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 class ApiClient {
   private token: string | null = null;
   private isRefreshing = false;
-  private refreshSubscribers: ((token: string) => void)[] = [];
+  private refreshSubscribers: Array<{
+    onSuccess: (token: string) => void;
+    onFailure: (error: Error) => void;
+  }> = [];
 
   constructor() {
     this.token = sessionStorage.getItem('access_token');
@@ -83,18 +88,28 @@ class ApiClient {
     return this.token;
   }
 
-  private subscribeToRefresh(callback: (token: string) => void) {
-    this.refreshSubscribers.push(callback);
+  private subscribeToRefresh(
+    onSuccess: (token: string) => void,
+    onFailure: (error: Error) => void
+  ) {
+    this.refreshSubscribers.push({ onSuccess, onFailure });
   }
 
   private onTokenRefreshed(token: string) {
-    this.refreshSubscribers.forEach(callback => callback(token));
+    const subscribers = this.refreshSubscribers;
     this.refreshSubscribers = [];
+    subscribers.forEach(subscriber => subscriber.onSuccess(token));
+  }
+
+  private onRefreshFailed(error: Error) {
+    const subscribers = this.refreshSubscribers;
+    this.refreshSubscribers = [];
+    subscribers.forEach(subscriber => subscriber.onFailure(error));
   }
 
   private async request<T>(
     endpoint: string,
-    options: RequestInit & { retryRefresh?: boolean } = {},
+    options: RequestInit = {},
     retryRefresh = true
   ): Promise<T> {
     const headers: HeadersInit = {
@@ -115,41 +130,45 @@ class ApiClient {
 
     if (response.status === 401 && retryRefresh) {
       if (this.isRefreshing) {
-        return new Promise((resolve, reject) => {
-          this.subscribeToRefresh((token: string) => {
-            this.request<T>(endpoint, { ...options, retryRefresh: false })
-              .then(resolve)
-              .catch(reject);
-          });
+        return new Promise<T>((resolve, reject) => {
+          this.subscribeToRefresh(
+            () => {
+              // Third argument is the retry guard; options never carries it.
+              this.request<T>(endpoint, options, false).then(resolve).catch(reject);
+            },
+            error => reject(error)
+          );
         });
       }
 
       this.isRefreshing = true;
-      
+      let refreshedToken: string;
       try {
         const refreshResponse = await fetch(`${API_BASE_URL}/auth/refresh`, {
           method: 'POST',
           credentials: 'include',
         });
-
-        if (refreshResponse.ok) {
-          const data: AuthResponse = await refreshResponse.json();
-          this.setToken(data.access_token);
-          this.isRefreshing = false;
-          this.onTokenRefreshed(data.access_token);
-          
-          return this.request<T>(endpoint, { ...options, retryRefresh: false });
-        } else {
-          this.setToken(null);
-          window.location.href = '/login';
+        if (!refreshResponse.ok) {
           throw new Error('Session expired');
         }
+        const data: AuthResponse = await refreshResponse.json();
+        refreshedToken = data.access_token;
       } catch (error) {
+        const failure = error instanceof Error ? error : new Error('Session expired');
         this.isRefreshing = false;
         this.setToken(null);
-        window.location.href = '/login';
-        throw error;
+        // Settle every queued request; otherwise their promises hang forever.
+        this.onRefreshFailed(failure);
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login';
+        }
+        throw failure;
       }
+
+      this.setToken(refreshedToken);
+      this.isRefreshing = false;
+      this.onTokenRefreshed(refreshedToken);
+      return this.request<T>(endpoint, options, false);
     }
 
     if (!response.ok) {
@@ -273,13 +292,6 @@ class ApiClient {
     });
   }
 
-  async createSession(data: SessionCreate): Promise<SessionResponse> {
-    return this.request<SessionResponse>('/api/v1/sessions', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  }
-
   async startSession(data: SessionStartRequest): Promise<SessionResponse> {
     return this.request<SessionResponse>('/session/start', {
       method: 'POST',
@@ -293,6 +305,17 @@ class ApiClient {
     return this.request<BrokerSessionBootstrapResponse>('/session/orchestrate', {
       method: 'POST',
       body: JSON.stringify(data),
+    });
+  }
+
+  /** Explicitly activate one broker connection on this device. */
+  async activateBroker(
+    brokerConnectionId: number,
+    brokerName?: string,
+  ): Promise<BrokerSessionBootstrapResponse> {
+    return this.bootstrapSession({
+      broker_connection_id: brokerConnectionId,
+      ...(brokerName ? { broker_name: brokerName } : {}),
     });
   }
 
@@ -1007,6 +1030,30 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ enabled }),
       headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // ── UI Configuration (Phase 3) ──────────────────────────────────────────────
+
+  async getUiConfigPages(): Promise<UiConfigPagesResponse> {
+    return this.request<UiConfigPagesResponse>('/admin/ui-config/pages');
+  }
+
+  async getUiPageConfig(pageId: string): Promise<UiPageConfig> {
+    return this.request<UiPageConfig>(`/ui-config/${encodeURIComponent(pageId)}`);
+  }
+
+  async saveUiPageConfig(pageId: string, config: UiPageConfigUpdatePayload): Promise<UiPageConfig> {
+    return this.request<UiPageConfig>(`/admin/ui-config/${encodeURIComponent(pageId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(config),
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  async resetUiPageConfig(pageId: string): Promise<UiPageConfig> {
+    return this.request<UiPageConfig>(`/admin/ui-config/${encodeURIComponent(pageId)}/reset`, {
+      method: 'POST',
     });
   }
 

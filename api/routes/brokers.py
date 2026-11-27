@@ -39,6 +39,26 @@ PUBLIC_OAUTH_ERRORS = {
     "cancelled": "Broker authorization was cancelled. Please try again.",
 }
 
+
+def _visible_connections(connections, broker_name: str, connection_id: int | None = None):
+    """Hide abandoned placeholder rows from status responses.
+
+    An explicit ``connection_id`` is still returned so an in-flight OAuth poll
+    can observe its pending connection before tokens have been saved.
+    """
+    return [
+        conn
+        for conn in connections
+        if conn.broker_name == broker_name
+        and (
+            connection_id is not None
+            or conn.encrypted_tokens is not None
+            or conn.broker_user_id is not None
+        )
+        and (connection_id is None or conn.id == connection_id)
+    ]
+
+
 # --- Upstox Broker Connection ---
 
 router = APIRouter(prefix="/brokers/upstox", tags=["brokers"])
@@ -67,6 +87,21 @@ def _extract_jwt_expiration(token: str) -> Optional[datetime]:
     except Exception:
         pass
     return None
+
+
+def _default_zerodha_expiry(now: Optional[datetime] = None) -> datetime:
+    """Approximate Zerodha daily token expiry (next 6:00 AM IST)."""
+    from zoneinfo import ZoneInfo
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    ist = ZoneInfo("Asia/Kolkata")
+    now_ist = current.astimezone(ist)
+    candidate = now_ist.replace(hour=6, minute=0, second=0, microsecond=0)
+    if now_ist >= candidate:
+        candidate = candidate + timedelta(days=1)
+    return candidate.astimezone(timezone.utc)
 
 
 class ConnectionStatus(BaseModel):
@@ -379,17 +414,18 @@ def upstox_callback(
         allow_admin=True,
     )
 
-    # Idempotency check: if tokens already exist, return success
+    # Always replace tokens on a successful OAuth callback. A previous token may be
+    # stale/expired/invalid while still present in DB; short-circuiting here would
+    # block reconnect and leave the stale token in place.
     existing_bundle = session_manager.get_token_bundle(
         "upstox", connection_id=connection.id
     )
     if existing_bundle and existing_bundle.access_token:
         LOGGER.info(
-            "Upstox callback: tokens already exist for connection_id=%d, user_id=%d",
+            "Upstox callback: replacing existing token for connection_id=%d, user_id=%d",
             connection.id,
             state_info.user_id,
         )
-        return render("Upstox already connected. You may close this tab.", True)
 
     client_id, client_secret, redirect_uri = _get_upstox_env()
     token_payload = {
@@ -498,25 +534,18 @@ def upstox_callback(
         return render(
             _public_oauth_message("missing_token"), False, "missing_token"
         )
-    session_manager.store_tokens(
-        "upstox",
-        bundle_payload,
-        connection_id=connection.id,
-    )
-    
-    broker_user_id_from_oauth = token_data.get("user_id")
-    if broker_user_id_from_oauth:
-        from db.database import SessionLocal
-        from db import models
-        db = SessionLocal()
-        try:
-            conn_record = db.get(models.BrokerConnection, connection.id)
-            if conn_record:
-                conn_record.broker_user_id = broker_user_id_from_oauth
-                db.commit()
-        finally:
-            db.close()
-    
+    try:
+        session_manager.store_tokens(
+            "upstox",
+            bundle_payload,
+            connection_id=connection.id,
+        )
+    except Exception as exc:
+        LOGGER.error(
+            "Failed to store upstox tokens for connection_id=%d: %s", connection.id, exc
+        )
+        return render(_public_oauth_message("store_failed"), False, "store_failed")
+
     return render("✅ Upstox connected successfully. You may close this tab.", True)
 
 
@@ -536,12 +565,7 @@ def upstox_status(
     connections = broker_service.list_connections(
         user_id=current_user.user_id,
     )
-    upstox_connections = [
-        conn
-        for conn in connections
-        if conn.broker_name == "upstox"
-        and (connection_id is None or conn.id == connection_id)
-    ]
+    upstox_connections = _visible_connections(connections, "upstox", connection_id)
     if connection_id and not upstox_connections:
         raise ServiceError(
             "Connection not found", error_code="not_found", http_status=404
@@ -749,17 +773,18 @@ def zerodha_callback(
         allow_admin=True,
     )
 
-    # Idempotency check: if tokens already exist, return success
+    # Always replace tokens on a successful OAuth callback. A previous token may be
+    # stale/expired/invalid while still present in DB; short-circuiting here would
+    # block reconnect and leave the stale token in place.
     existing_bundle = session_manager.get_token_bundle(
         "zerodha", connection_id=connection.id
     )
     if existing_bundle and existing_bundle.access_token:
         LOGGER.info(
-            "Zerodha callback: tokens already exist for connection_id=%d, user_id=%d",
+            "Zerodha callback: replacing existing token for connection_id=%d, user_id=%d",
             connection.id,
             state_info.user_id,
         )
-        return render("Zerodha already connected. You may close this tab.", True)
 
     api_key, api_secret, redirect_uri = _get_kite_env()
     checksum = hashlib.sha256(
@@ -852,12 +877,14 @@ def zerodha_callback(
     if expires_iso:
         bundle_payload["expires_at"] = expires_iso
     else:
-        # Zerodha tokens are opaque (not JWT) and Kite API doesn't return
-        # expiry_timestamp.  Default to obtained_at + 12 h which covers
-        # the trading session plus a generous buffer.
-        bundle_payload["expires_at"] = (
-            datetime.now(timezone.utc) + timedelta(hours=12)
-        ).isoformat()
+        # Zerodha tokens are opaque and may not include explicit expiry. Use the
+        # next 6:00 AM IST daily expiry as a conservative default.
+        expires_dt = _default_zerodha_expiry()
+        bundle_payload["expires_at"] = expires_dt.isoformat()
+        LOGGER.info(
+            "Zerodha callback: no explicit token expiry; defaulted to %s",
+            bundle_payload["expires_at"],
+        )
 
     LOGGER.info(
         "Zerodha token exchange successful, storing tokens for connection_id=%d",
@@ -881,19 +908,6 @@ def zerodha_callback(
             _public_oauth_message("store_failed"), False, "store_failed"
         )
 
-    broker_user_id_from_oauth = token_data.get("data", {}).get("user_id")
-    if broker_user_id_from_oauth:
-        from db.database import SessionLocal
-        from db import models
-        db = SessionLocal()
-        try:
-            conn_record = db.get(models.BrokerConnection, connection.id)
-            if conn_record:
-                conn_record.broker_user_id = broker_user_id_from_oauth
-                db.commit()
-        finally:
-            db.close()
-
     return render("✅ Zerodha connected successfully. You may close this tab.", True)
 
 
@@ -913,12 +927,7 @@ def zerodha_status(
     connections = broker_service.list_connections(
         user_id=current_user.user_id,
     )
-    zerodha_connections = [
-        conn
-        for conn in connections
-        if conn.broker_name == "zerodha"
-        and (connection_id is None or conn.id == connection_id)
-    ]
+    zerodha_connections = _visible_connections(connections, "zerodha", connection_id)
     if connection_id and not zerodha_connections:
         raise ServiceError(
             "Connection not found", error_code="not_found", http_status=404

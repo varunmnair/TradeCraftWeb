@@ -50,6 +50,24 @@ class ZerodhaBroker:
             return self.access_token
         raise RuntimeError(self.TOKEN_ERROR)
 
+    def _invalidate_stored_token(self) -> None:
+        if self.session_manager and self.connection_id:
+            try:
+                cleared = self.session_manager.clear_tokens(
+                    "zerodha", connection_id=self.connection_id
+                )
+                if cleared:
+                    logging.info(
+                        "Cleared stale Zerodha token for connection_id=%s",
+                        self.connection_id,
+                    )
+            except Exception:
+                logging.warning(
+                    "Failed to clear stale Zerodha token for connection_id=%s",
+                    self.connection_id,
+                    exc_info=True,
+                )
+
     def _ensure_kite(self) -> KiteConnect:
         if self.kite is None:
             self.kite = KiteConnect(api_key=self.api_key)
@@ -73,6 +91,7 @@ class ZerodhaBroker:
                 or "Invalid" in error_msg
             ):
                 self.kite = None
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error logging in to Zerodha: {e}")
             raise
@@ -120,6 +139,7 @@ class ZerodhaBroker:
                 or "Invalid" in error_msg
             ):
                 self.kite = None
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error getting holdings from Zerodha: {e}")
             return []
@@ -138,6 +158,9 @@ class ZerodhaBroker:
                 logging.info(
                     f"Processing GTT: trigger_id={trigger_id}, status={g.get('status')}"
                 )
+                # Zerodha nests these fields under "condition". Keep top-level
+                # fallbacks for older/raw payload shapes.
+                condition = g.get("condition") or {}
                 normalized.append(
                     {
                         "id": trigger_id,
@@ -148,10 +171,16 @@ class ZerodhaBroker:
                         "expires_at": g.get("expires_at"),
                         "status": g.get("status"),
                         "condition": {
-                            "exchange": g.get("exchange"),
-                            "last_price": g.get("last_price"),
-                            "tradingsymbol": g.get("tradingsymbol"),
-                            "trigger_values": g.get("trigger_values"),
+                            "exchange": condition.get("exchange") or g.get("exchange"),
+                            "last_price": (
+                                condition.get("last_price")
+                                if "last_price" in condition
+                                else g.get("last_price")
+                            ),
+                            "tradingsymbol": condition.get("tradingsymbol")
+                            or g.get("tradingsymbol"),
+                            "trigger_values": condition.get("trigger_values")
+                            or g.get("trigger_values"),
                         },
                         "orders": g.get("orders", []),
                     }
@@ -165,6 +194,7 @@ class ZerodhaBroker:
                 or "Invalid" in error_msg
             ):
                 self.kite = None
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error getting GTT orders from Zerodha: {e}")
             return []
@@ -205,6 +235,7 @@ class ZerodhaBroker:
                 or "Invalid" in error_msg
             ):
                 self.kite = None
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error getting trades from Zerodha API: {e}")
             return []
@@ -232,6 +263,7 @@ class ZerodhaBroker:
                 or "Invalid" in error_msg
             ):
                 self.kite = None
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error placing order in Zerodha: {e}")
             raise
@@ -291,6 +323,7 @@ class ZerodhaBroker:
                 or "Invalid" in error_msg
             ):
                 self.kite = None
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error placing GTT in Zerodha: {e}")
             raise
@@ -315,6 +348,7 @@ class ZerodhaBroker:
                 or "Invalid" in error_msg
             ):
                 self.kite = None
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error modifying GTT in Zerodha: {e}")
             raise
@@ -332,6 +366,7 @@ class ZerodhaBroker:
                 or "Invalid" in error_msg
             ):
                 self.kite = None
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error cancelling GTT in Zerodha: {e}")
             raise

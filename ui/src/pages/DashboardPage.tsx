@@ -13,7 +13,7 @@ import { useAuth } from '../context/AuthContext';
 const quickLinks = [
   { text: 'Broker Accounts', icon: <BrokerIcon sx={{ fontSize: 40 }} />, path: '/broker-connections', color: '#1976d2' },
   { text: 'Holdings', icon: <HoldingsIcon sx={{ fontSize: 40 }} />, path: '/holdings', color: '#d32f2f' },
-  { text: 'Plan', icon: <PlanIcon sx={{ fontSize: 40 }} />, path: '/plan', color: '#7b1fa2' },
+  { text: 'Entry Strategies', icon: <PlanIcon sx={{ fontSize: 40 }} />, path: '/entry-strategies', color: '#7b1fa2' },
   { text: 'GTT Orders', icon: <GttIcon sx={{ fontSize: 40 }} />, path: '/gtt', color: '#f57c00' },
   { text: 'Jobs', icon: <JobsIcon sx={{ fontSize: 40 }} />, path: '/jobs', color: '#00796b' },
 ];

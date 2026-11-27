@@ -31,6 +31,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { Switch, FormControlLabel } from '@mui/material';
+import UiConfigTab from '../components/admin/UiConfigTab';
 
 interface SymbolCatalogStatus {
   total_symbols: number;
@@ -89,7 +90,7 @@ interface JobFailures {
 
 export default function AdminPage() {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'market' | 'users'>('market');
+  const [activeTab, setActiveTab] = useState<'market' | 'users' | 'ui-config'>('market');
   
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'warning' | 'info'; text: string } | null>(null);
@@ -346,6 +347,7 @@ export default function AdminPage() {
         <Tabs value={activeTab} onChange={(_, v) => setActiveTab(v)}>
           <Tab label="Market Data" value="market" />
           <Tab label="User Management" value="users" />
+          <Tab label="UI Configuration" value="ui-config" />
         </Tabs>
       </Box>
 
@@ -664,6 +666,8 @@ export default function AdminPage() {
           </TableContainer>
         </Paper>
       )}
+
+      {activeTab === 'ui-config' && <UiConfigTab />}
 
       {/* Purge Confirmation Dialog */}
       <Dialog open={purgeConfirmOpen} onClose={() => setPurgeConfirmOpen(false)}>

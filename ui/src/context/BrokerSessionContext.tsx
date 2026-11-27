@@ -8,9 +8,12 @@ import React, {
   type ReactNode,
 } from 'react';
 import { api } from '../api/client';
-import { SESSION_RESTORE_REQUIRED_EVENT } from '../utils/sessionEvents';
+import {
+  dispatchSessionChanged,
+  SESSION_RESTORE_REQUIRED_EVENT,
+  type SessionChangedDetail,
+} from '../utils/sessionEvents';
 import type {
-  BrokerAccountStatus,
   BrokerSessionBootstrapRequest,
   BrokerSessionBootstrapResponse,
   SessionReadiness,
@@ -20,36 +23,30 @@ import { useAuth } from './AuthContext';
 import { useSession } from './SessionContext';
 
 const SESSION_STORAGE_KEY = 'tradecraftx_session_id';
-const OAUTH_PENDING_KEY = 'tradecraftx_oauth_pending_broker';
-const AUTO_RESTORE_SUPPRESSED_KEY = 'tradecraftx_auto_restore_suppressed';
 
 export interface BrokerSessionState {
   status: SessionReadiness;
   message: string | null;
   brokerConnected: boolean;
-  requiresSelection: boolean;
-  candidates: BrokerAccountStatus[];
-  brokerName: string | null;
-  connectionId: number | null;
 }
 
 interface BrokerSessionOrchestratorValue extends BrokerSessionState {
   bootstrap: (
     request?: BrokerSessionBootstrapRequest,
-    options?: { force?: boolean },
+  ) => Promise<BrokerSessionBootstrapResponse | null>;
+  /** Explicitly activate a broker connection for this device. */
+  activateBroker: (
+    brokerConnectionId: number,
+    brokerName?: string,
   ) => Promise<BrokerSessionBootstrapResponse | null>;
   retry: () => Promise<BrokerSessionBootstrapResponse | null>;
   clearSession: () => void;
 }
 
 const initialState: BrokerSessionState = {
-  status: 'INITIALIZING',
+  status: 'CONNECTED',
   message: null,
   brokerConnected: false,
-  requiresSelection: false,
-  candidates: [],
-  brokerName: null,
-  connectionId: null,
 };
 
 const BrokerSessionContext = createContext<BrokerSessionOrchestratorValue | undefined>(
@@ -80,35 +77,37 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
   const inFlightRef = useRef<Map<string, Promise<BrokerSessionBootstrapResponse | null>>>(
     new Map(),
   );
+  const activeSessionRef = useRef<SessionChangedDetail>({
+    session_id: null,
+    broker_connection_id: null,
+  });
+
+  const publishSessionChange = useCallback((detail: SessionChangedDetail) => {
+    const previous = activeSessionRef.current;
+    if (
+      previous.session_id === detail.session_id &&
+      previous.broker_connection_id === detail.broker_connection_id
+    ) {
+      return;
+    }
+    activeSessionRef.current = detail;
+    dispatchSessionChanged(detail);
+  }, []);
 
   const reset = useCallback(() => {
+    publishSessionChange({ session_id: null, broker_connection_id: null });
     setState(initialState);
     setSessionId(null);
     setSessionInfo(null);
     setSelectedConnectionId(null);
     localStorage.removeItem(SESSION_STORAGE_KEY);
-    sessionStorage.removeItem(AUTO_RESTORE_SUPPRESSED_KEY);
-  }, [setSelectedConnectionId, setSessionId, setSessionInfo]);
+  }, [publishSessionChange, setSelectedConnectionId, setSessionId, setSessionInfo]);
 
   const bootstrap = useCallback(
     async (
       request: BrokerSessionBootstrapRequest = {},
-      options: { force?: boolean } = {},
     ): Promise<BrokerSessionBootstrapResponse | null> => {
       lastRequestRef.current = request;
-      const hasExplicitSelection = Boolean(request.broker_name || request.broker_connection_id);
-
-      if (hasExplicitSelection || options.force) {
-        sessionStorage.removeItem(AUTO_RESTORE_SUPPRESSED_KEY);
-      } else if (sessionStorage.getItem(AUTO_RESTORE_SUPPRESSED_KEY) === '1') {
-        setState((previous) => ({
-          ...previous,
-          status: 'CONNECTED',
-          message: 'Trading session ended. Select an account to continue.',
-          requiresSelection: false,
-        }));
-        return null;
-      }
 
       const key = [
         request.broker_name || '',
@@ -122,7 +121,6 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
         ...previous,
         status: 'INITIALIZING',
         message: null,
-        requiresSelection: false,
       }));
 
       const task = (async () => {
@@ -131,7 +129,13 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
           setState((previous) => ({ ...previous, status: 'LOADING' }));
           const response = await api.bootstrapSession(request);
 
-          if (response.status === 'READY' && response.session_id) {
+          const ready = response.status === 'READY' && Boolean(response.session_id);
+          publishSessionChange({
+            session_id: ready ? response.session_id ?? null : null,
+            broker_connection_id: ready ? response.connection_id ?? null : null,
+          });
+
+          if (ready && response.session_id) {
             const info = sessionInfoFromResponse(response);
             setSessionId(response.session_id);
             setSessionInfo(info);
@@ -140,6 +144,7 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
           } else {
             setSessionId(null);
             setSessionInfo(null);
+            setSelectedConnectionId(null);
             localStorage.removeItem(SESSION_STORAGE_KEY);
           }
 
@@ -147,10 +152,6 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
             status: response.status,
             message: response.message ?? null,
             brokerConnected: response.broker_connected,
-            requiresSelection: response.requires_selection,
-            candidates: response.candidates ?? [],
-            brokerName: response.broker_name ?? null,
-            connectionId: response.connection_id ?? null,
           });
           return response;
         } catch (error) {
@@ -172,26 +173,32 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
       inFlightRef.current.set(key, task);
       return task;
     },
-    [setSelectedConnectionId, setSessionId, setSessionInfo],
+    [publishSessionChange, setSelectedConnectionId, setSessionId, setSessionInfo],
   );
 
-  const retry = useCallback(
-    () => bootstrap(lastRequestRef.current, { force: true }),
+  const activateBroker = useCallback(
+    (brokerConnectionId: number, brokerName?: string) =>
+      bootstrap({
+        broker_connection_id: brokerConnectionId,
+        ...(brokerName ? { broker_name: brokerName } : {}),
+      }),
     [bootstrap],
   );
 
+  const retry = useCallback(() => bootstrap(lastRequestRef.current), [bootstrap]);
+
   const clearSession = useCallback(() => {
-    sessionStorage.setItem(AUTO_RESTORE_SUPPRESSED_KEY, '1');
+    publishSessionChange({ session_id: null, broker_connection_id: null });
     setState((previous) => ({
       ...previous,
       status: 'CONNECTED',
       message: 'Trading session ended. Select an account to continue.',
-      requiresSelection: false,
     }));
     setSessionId(null);
     setSessionInfo(null);
+    setSelectedConnectionId(null);
     localStorage.removeItem(SESSION_STORAGE_KEY);
-  }, [setSessionId, setSessionInfo]);
+  }, [publishSessionChange, setSelectedConnectionId, setSessionId, setSessionInfo]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -203,13 +210,10 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
     if (initializedForRef.current === userId) return;
     initializedForRef.current = userId;
 
-    const params = new URLSearchParams(window.location.search);
-    const oauthReturning =
-      params.has('oauth') || Boolean(window.sessionStorage.getItem(OAUTH_PENDING_KEY));
-    if (oauthReturning) return;
-
-    void bootstrap({});
-  }, [bootstrap, reset, user?.id]);
+    // Login never activates a broker. Only explicit activation or session
+    // recovery calls bootstrap; OAuth completion does so explicitly.
+    setState(initialState);
+  }, [reset, user?.id]);
 
   useEffect(() => {
     const handleRestoreRequired = () => {
@@ -220,7 +224,9 @@ export function BrokerSessionOrchestratorProvider({ children }: { children: Reac
   }, [bootstrap]);
 
   return (
-    <BrokerSessionContext.Provider value={{ ...state, bootstrap, retry, clearSession }}>
+    <BrokerSessionContext.Provider
+      value={{ ...state, bootstrap, activateBroker, retry, clearSession }}
+    >
       {children}
     </BrokerSessionContext.Provider>
   );

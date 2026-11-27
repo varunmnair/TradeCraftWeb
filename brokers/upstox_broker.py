@@ -198,9 +198,28 @@ class UpstoxBroker(BaseBroker):
             return holdings
         except ApiException as e:
             if getattr(e, "status", None) in (401, 403):
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error getting holdings from Upstox: {e}")
             return []
+
+    def _invalidate_stored_token(self) -> None:
+        if self.session_manager and self.connection_id:
+            try:
+                cleared = self.session_manager.clear_tokens(
+                    "upstox", connection_id=self.connection_id
+                )
+                if cleared:
+                    logging.info(
+                        "Cleared stale Upstox token for connection_id=%s",
+                        self.connection_id,
+                    )
+            except Exception:
+                logging.warning(
+                    "Failed to clear stale Upstox token for connection_id=%s",
+                    self.connection_id,
+                    exc_info=True,
+                )
 
     def _get_gtt_headers(self):
         token = self._get_access_token()
@@ -310,6 +329,7 @@ class UpstoxBroker(BaseBroker):
 
         except requests.exceptions.RequestException as e:
             if e.response is not None and e.response.status_code in (401, 403):
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error getting GTT orders from Upstox: {e}")
             return []
@@ -376,6 +396,7 @@ class UpstoxBroker(BaseBroker):
             return response.json()
         except requests.exceptions.RequestException as e:
             if e.response is not None and e.response.status_code in (401, 403):
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.error(f"Error placing GTT order in Upstox: {e}")
             if e.response is not None:
@@ -397,6 +418,7 @@ class UpstoxBroker(BaseBroker):
             return response.json()
         except requests.exceptions.RequestException as e:
             if e.response is not None and e.response.status_code in (401, 403):
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error modifying GTT in Upstox: {e}")
             raise
@@ -415,6 +437,7 @@ class UpstoxBroker(BaseBroker):
             return response.json()
         except requests.exceptions.RequestException as e:
             if e.response is not None and e.response.status_code in (401, 403):
+                self._invalidate_stored_token()
                 raise RuntimeError(self.TOKEN_ERROR) from e
             logging.debug(f"Error cancelling GTT in Upstox: {e}")
             raise

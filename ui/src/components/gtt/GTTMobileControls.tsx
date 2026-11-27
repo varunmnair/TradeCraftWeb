@@ -2,23 +2,20 @@ import {
   Box,
   Button,
   FormControl,
-  InputAdornment,
   InputLabel,
   MenuItem,
   Select,
   TextField,
 } from '@mui/material';
-import { Refresh as RefreshIcon, Search as SearchIcon } from '@mui/icons-material';
+import { Refresh as RefreshIcon } from '@mui/icons-material';
 import type { GttSideFilter, GttStatusFilter } from './gttDisplay';
 
 interface GTTMobileControlsProps {
-  searchText: string;
   sideFilter: GttSideFilter;
   statusFilter: GttStatusFilter;
   varianceThreshold: number | '';
   varianceFilterType: 'gt' | 'lt';
   loading: boolean;
-  onSearch: (value: string) => void;
   onSideFilter: (value: GttSideFilter) => void;
   onStatusFilter: (value: GttStatusFilter) => void;
   onVarianceThreshold: (value: number | '') => void;
@@ -27,13 +24,11 @@ interface GTTMobileControlsProps {
 }
 
 export function GTTMobileControls({
-  searchText,
   sideFilter,
   statusFilter,
   varianceThreshold,
   varianceFilterType,
   loading,
-  onSearch,
   onSideFilter,
   onStatusFilter,
   onVarianceThreshold,
@@ -42,21 +37,7 @@ export function GTTMobileControls({
 }: GTTMobileControlsProps) {
   return (
     <Box sx={{ display: 'grid', gap: 1.25, mb: 2 }}>
-      <Box sx={{ display: 'flex', gap: 1 }}>
-        <TextField
-          size="small"
-          fullWidth
-          placeholder="Search symbol..."
-          value={searchText}
-          onChange={(event) => onSearch(event.target.value)}
-          InputProps={{
-            startAdornment: (
-              <InputAdornment position="start">
-                <SearchIcon />
-              </InputAdornment>
-            ),
-          }}
-        />
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Button
           variant="outlined"
           onClick={onRefresh}

@@ -9,7 +9,7 @@ import {
   IconButton,
   Menu,
   MenuItem,
-  Tooltip,
+  Select,
   Typography,
 } from '@mui/material';
 import {
@@ -18,24 +18,38 @@ import {
   Cloud as ZerodhaIcon,
   CloudDone as UpstoxIcon,
   Delete as DeleteIcon,
-  Error as ErrorIcon,
   MoreVert as MoreIcon,
   Refresh as RefreshIcon,
   StopCircle as EndSessionIcon,
   Warning as WarningIcon,
 } from '@mui/icons-material';
 
-export interface MobileBrokerAccountCardProps {
+export type BrokerCardStatus =
+  | 'NOT_CONNECTED'
+  | 'CONNECTING'
+  | 'READY'
+  | 'ATTENTION_REQUIRED';
+
+export interface BrokerAccountOption {
+  connectionId: number;
+  brokerUserId: string;
+}
+
+export interface BrokerAccountCardProps {
   broker: 'upstox' | 'zerodha';
-  accountId: string;
-  connectionLabel: string;
-  connectionTone: 'default' | 'warning' | 'success';
-  tradingStatus: string;
-  dataStatus: string;
-  lastRefresh: string;
-  connecting: boolean;
-  refreshing: boolean;
+  status: BrokerCardStatus;
+  statusLabel: string;
+  detail: string | null;
+  accounts: BrokerAccountOption[];
+  selectedConnectionId: number | null;
+  accountId: string | null;
+  sessionInfo: { holdings: string; lastRefreshed: string } | null;
+  primaryLabel: string;
+  primaryDisabled: boolean;
+  busy: boolean;
   hasSession: boolean;
+  canManage: boolean;
+  onSelectAccount: (connectionId: number) => void;
   onPrimary: () => void;
   onRefreshStatus: () => void;
   onEndSession: () => void;
@@ -43,67 +57,73 @@ export interface MobileBrokerAccountCardProps {
   onDisconnect: () => void;
 }
 
-function MobileBrokerAccountCardBase({
+const STATUS_COLORS: Record<BrokerCardStatus, 'default' | 'info' | 'success' | 'warning'> = {
+  NOT_CONNECTED: 'default',
+  CONNECTING: 'info',
+  READY: 'success',
+  ATTENTION_REQUIRED: 'warning',
+};
+
+function BrokerAccountCardBase({
   broker,
+  status,
+  statusLabel,
+  detail,
+  accounts,
+  selectedConnectionId,
   accountId,
-  connectionLabel,
-  connectionTone,
-  tradingStatus,
-  dataStatus,
-  lastRefresh,
-  connecting,
-  refreshing,
+  sessionInfo,
+  primaryLabel,
+  primaryDisabled,
+  busy,
   hasSession,
+  canManage,
+  onSelectAccount,
   onPrimary,
   onRefreshStatus,
   onEndSession,
   onReconnect,
   onDisconnect,
-}: MobileBrokerAccountCardProps) {
+}: BrokerAccountCardProps) {
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   const isUpstox = broker === 'upstox';
-  const connected = connectionTone === 'success';
+  const needsSelection = accounts.length > 1 && selectedConnectionId === null;
 
   const openMenu = (event: MouseEvent<HTMLElement>) => setMenuAnchor(event.currentTarget);
   const closeMenu = () => setMenuAnchor(null);
-
   const runAction = (action: () => void) => {
     closeMenu();
     action();
   };
 
   return (
-    <Card sx={{ mb: 1.5, overflow: 'hidden' }}>
-      <CardContent sx={{ p: 1.75, '&:last-child': { pb: 1.75 } }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+    <Card sx={{ minWidth: 0, overflow: 'hidden' }}>
+      <CardContent sx={{ p: { xs: 1.75, sm: 2 }, '&:last-child': { pb: { xs: 1.75, sm: 2 } } }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, flexWrap: 'wrap' }}>
           {isUpstox ? (
-            <UpstoxIcon color="primary" fontSize="small" />
+            <UpstoxIcon color="primary" />
           ) : (
-            <ZerodhaIcon fontSize="small" sx={{ color: '#283195' }} />
+            <ZerodhaIcon sx={{ color: '#283195' }} />
           )}
-          <Typography variant="subtitle1" fontWeight={800} sx={{ minWidth: 0 }}>
+          <Typography variant="subtitle1" fontWeight={800} noWrap>
             {isUpstox ? 'Upstox' : 'Zerodha'}
           </Typography>
-          <Box sx={{ flex: 1, minWidth: 0 }} />
           <Chip
-            label={connectionLabel}
+            label={statusLabel}
             size="small"
-            color={connectionTone}
+            color={STATUS_COLORS[status]}
             icon={
-              connectionTone === 'success' ? (
+              status === 'READY' ? (
                 <CheckIcon />
-              ) : connectionTone === 'warning' ? (
+              ) : status === 'ATTENTION_REQUIRED' ? (
                 <WarningIcon />
-              ) : (
-                <ErrorIcon />
-              )
+              ) : undefined
             }
           />
-          <Tooltip title="More actions">
-            <IconButton size="small" onClick={openMenu} aria-label="More broker account actions">
-              <MoreIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          <Box sx={{ flex: 1, minWidth: 0 }} />
+          <IconButton size="small" onClick={openMenu} aria-label={`More ${broker} actions`}>
+            <MoreIcon fontSize="small" />
+          </IconButton>
         </Box>
 
         <Menu
@@ -113,76 +133,101 @@ function MobileBrokerAccountCardBase({
           anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
           transformOrigin={{ vertical: 'top', horizontal: 'right' }}
         >
-          <MenuItem onClick={() => runAction(onRefreshStatus)} disabled={refreshing}>
-            <RefreshIcon fontSize="small" sx={{ mr: 1 }} />
-            Refresh status
-          </MenuItem>
-          {connected && (
-            <MenuItem onClick={() => runAction(onReconnect)} disabled={connecting}>
-              <AddIcon fontSize="small" sx={{ mr: 1 }} />
-              Reconnect broker
+          <MenuItem onClick={() => runAction(onRefreshStatus)}>Refresh status</MenuItem>
+          {canManage && (
+            <MenuItem onClick={() => runAction(onReconnect)} disabled={busy}>
+              Reconnect
             </MenuItem>
           )}
           {hasSession && (
-            <MenuItem onClick={() => runAction(onEndSession)}>
-              <EndSessionIcon fontSize="small" sx={{ mr: 1 }} />
-              End session
-            </MenuItem>
+            <MenuItem onClick={() => runAction(onEndSession)}>End session</MenuItem>
           )}
-          {connected && (
-            <MenuItem onClick={() => runAction(onDisconnect)} disabled={connecting}>
-              <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
-              Disconnect broker
+          {canManage && (
+            <MenuItem onClick={() => runAction(onDisconnect)} disabled={busy}>
+              Disconnect
             </MenuItem>
           )}
         </Menu>
 
-        <Box sx={{ display: 'grid', gap: 0.5, mt: 1.5 }}>
-          <Typography variant="body2" color="text.secondary">
+        {detail && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            {detail}
+          </Typography>
+        )}
+
+        {needsSelection && (
+          <Box sx={{ mt: 1.5, maxWidth: 320 }}>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+              Account
+            </Typography>
+            <Select
+              value=""
+              displayEmpty
+              fullWidth
+              size="small"
+              renderValue={() => 'Select account'}
+              onChange={(event) => onSelectAccount(Number(event.target.value))}
+              inputProps={{ 'aria-label': `Select ${broker} account` }}
+            >
+              {accounts.map((account) => (
+                <MenuItem key={account.connectionId} value={account.connectionId}>
+                  {account.brokerUserId}
+                </MenuItem>
+              ))}
+            </Select>
+          </Box>
+        )}
+
+        {accountId && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
             Account:{' '}
             <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
               {accountId}
             </Box>
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Trading:{' '}
-            <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
-              {tradingStatus}
-            </Box>
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Data:{' '}
-            <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
-              {dataStatus}
-            </Box>
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Last refresh:{' '}
-            <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
-              {lastRefresh}
-            </Box>
-          </Typography>
-        </Box>
+        )}
+
+        {sessionInfo && (
+          <Box
+            sx={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: { xs: 0.5, sm: 3 },
+              mt: 1,
+              '& .MuiTypography-root': { fontSize: 14 },
+            }}
+          >
+            <Typography variant="body2" color="text.secondary">
+              Holdings:{' '}
+              <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                {sessionInfo.holdings}
+              </Box>
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Last refreshed:{' '}
+              <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                {sessionInfo.lastRefreshed}
+              </Box>
+            </Typography>
+          </Box>
+        )}
 
         <Button
-          variant={connected ? 'outlined' : 'contained'}
-          startIcon={connected ? <RefreshIcon /> : <AddIcon />}
+          variant={status === 'READY' ? 'outlined' : 'contained'}
+          size="large"
+          startIcon={status === 'READY' ? <RefreshIcon /> : <AddIcon />}
           onClick={onPrimary}
-          disabled={connecting || refreshing}
-          fullWidth
-          sx={{ minHeight: 44, mt: 2, textTransform: 'none' }}
+          disabled={busy || primaryDisabled}
+          sx={{ mt: 2, minHeight: 44, textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
         >
-          {connecting
-            ? 'Connecting…'
-            : refreshing
-              ? 'Refreshing…'
-              : connected
-                ? 'Refresh'
-                : 'Connect'}
+          {primaryLabel}
         </Button>
       </CardContent>
     </Card>
   );
 }
 
-export const MobileBrokerAccountCard = memo(MobileBrokerAccountCardBase);
+export const BrokerAccountCard = memo(BrokerAccountCardBase);
+
+/** Kept for compatibility with existing imports. */
+export const MobileBrokerAccountCard = BrokerAccountCard;

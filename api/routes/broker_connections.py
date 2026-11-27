@@ -33,7 +33,11 @@ def list_connections(
     # Always show only current user's connections for security
     # Never allow user_id parameter to override - use current_user.user_id only
     LOGGER.info("list_connections: user_id=%s", current_user.user_id)
-    connections = service.list_connections(user_id=current_user.user_id)
+    connections = [
+        conn
+        for conn in service.list_connections(user_id=current_user.user_id)
+        if conn.encrypted_tokens is not None or conn.broker_user_id is not None
+    ]
     LOGGER.info(
         "list_connections: found %d connections for user_id=%s",
         len(connections),

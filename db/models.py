@@ -403,3 +403,18 @@ class SessionHolding(Base):
         UniqueConstraint("session_id", "symbol", "exchange", name="uq_session_holding_symbol"),
         Index("ix_session_holdings_session", "session_id"),
     )
+
+
+class UiPageConfiguration(Base):
+    __tablename__ = "ui_page_configurations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    page_id = Column(String(100), nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    configuration_json = Column(Text, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("page_id", name="uq_ui_page_configuration_page_id"),
+    )

@@ -13,6 +13,7 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TableSortLabel,
   Checkbox,
   Switch,
   FormControlLabel,
@@ -42,7 +43,6 @@ import {
 import { useSession } from '../context/SessionContext';
 import { useJobs } from '../context/JobsContext';
 import PlaceOrdersDialog from '../components/PlaceOrdersDialog';
-import { ResponsiveToolbar } from '../components/ResponsiveToolbar';
 import { MobileEntryCandidateCard } from '../components/candidates/MobileEntryCandidateCard';
 import { MobileSkippedCandidateCard } from '../components/candidates/MobileSkippedCandidateCard';
 import {
@@ -61,6 +61,15 @@ import {
   getActualOrderValue,
 } from '../components/candidates/candidateDisplay';
 import { newPlacementKey } from '../utils/placementIdempotency';
+import { TradePageLayout } from '../components/TradePageLayout';
+import { ResponsivePageHeader } from '../components/ResponsivePageHeader';
+import { TradeTableToolbar } from '../components/tradeTable/TradeTableToolbar';
+import { TradeMobileFilterDialog } from '../components/tradeTable/TradeMobileFilterDialog';
+import { resolveTradeTableConfig, getFilterableColumns } from '../components/tradeTable/config';
+import { applyTradeFilters, applyTradeSort } from '../components/tradeTable/tableState';
+import type { TradeColumnDef, TradeFilterRule, TradeSortState } from '../components/tradeTable/types';
+import { tradeTableRegistry } from '../config/tradeTableRegistry';
+import { uiPageConfigToTradeTableConfig, useUiPageConfig } from '../hooks/useUiPageConfig';
 
 
 function DeltaChip({ cmp, entry }: { cmp: number | null; entry: number | null }) {
@@ -97,6 +106,12 @@ export default function EntryCandidatesPage() {
   const [sortBy, setSortBy] = useState<CandidateSort | null>(null);
   const placingRef = useRef(false);
 
+  // Admin UI config integration
+  const { config: uiConfig } = useUiPageConfig('entry_candidates');
+  const [filters, setFilters] = useState<TradeFilterRule[]>([]);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
+
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const busy = generating || placing || loading;
@@ -117,11 +132,13 @@ export default function EntryCandidatesPage() {
   }, [sessionId]);
 
   useEffect(() => {
-    fetchCandidates();
-  }, [fetchCandidates]);
-
-  useEffect(() => {
+    setData(null);
+    setSelected([]);
+    setExistingOrderSymbols(new Set());
+    setError('');
+    setPlaceResults(null);
     if (!sessionId) return;
+    fetchCandidates();
     api.getGTTOrders(sessionId).then(resp => {
       const symbols = new Set<string>();
       for (const order of resp.orders) {
@@ -130,7 +147,7 @@ export default function EntryCandidatesPage() {
       }
       setExistingOrderSymbols(symbols);
     }).catch(() => {});
-  }, [sessionId]);
+  }, [sessionId, fetchCandidates]);
 
   const handleGenerate = async () => {
     if (!sessionId) return;
@@ -186,12 +203,14 @@ export default function EntryCandidatesPage() {
     });
   };
 
-  const handleSort = (field: CandidateSort['field']) => {
+  const handleSort = (field: string) => {
+    const col = tableConfig.columns.find((c) => c.id === field);
+    if (!col || !col.sortable) return;
     setSortBy((previous) => {
       if (previous?.field === field) {
-        return { field, direction: previous.direction === 'asc' ? 'desc' : 'asc' };
+        return { field: field as CandidateSort['field'], direction: previous.direction === 'asc' ? 'desc' : 'asc' };
       }
-      return { field, direction: field === 'symbol' ? 'asc' : 'desc' };
+      return { field: field as CandidateSort['field'], direction: field === 'symbol' ? 'asc' : 'desc' };
     });
   };
 
@@ -237,7 +256,58 @@ export default function EntryCandidatesPage() {
   const summary = data?.summary;
   const candidates = data?.candidates ?? [];
   const skipped = data?.skipped ?? [];
-  const selectableCount = candidates.filter(c => c.is_selectable).length;
+
+  const tableConfig = useMemo(() => {
+    const base = tradeTableRegistry.entry_candidates.config;
+    const runtimeColumns = (base.columns as TradeColumnDef<NormalizedCandidate>[]).map((col) => {
+      if (col.id === 'symbol') return { ...col, required: true, valueGetter: (row: NormalizedCandidate) => row.symbol };
+      if (col.id === 'strategy') return { ...col, valueGetter: (row: NormalizedCandidate) => row.strategy_type, filterOptions: [{ value: 'MULTI_LEVEL', label: 'Multi-Level Entry' }, { value: 'DYNAMIC_AVERAGING', label: 'Dynamic Averaging' }] };
+      if (col.id === 'signal') return { ...col, valueGetter: (row: NormalizedCandidate) => row.signal ?? '' };
+      if (col.id === 'cmp') return { ...col, valueGetter: (row: NormalizedCandidate) => row.cmp };
+      if (col.id === 'trigger') return { ...col, valueGetter: (row: NormalizedCandidate) => row.trigger_price ?? row.order_price };
+      if (col.id === 'qty') return { ...col, valueGetter: (row: NormalizedCandidate) => row.qty };
+      if (col.id === 'amount') return { ...col, valueGetter: (row: NormalizedCandidate) => getActualOrderValue(row) };
+      if (col.id === 'delta_vs_entry') return { ...col, valueGetter: (row: NormalizedCandidate) => {
+        if (row.strategy_type === 'DYNAMIC_AVERAGING' && row.additional_details?.drop_from_avg_pct != null) return -(Number(row.additional_details.drop_from_avg_pct) || 0);
+        const entry = (row.additional_details?.level_price as number | null | undefined) ?? null;
+        if (row.cmp == null || entry == null || entry === 0) return null;
+        return ((row.cmp - entry) / entry) * 100;
+      } };
+      if (col.id === 'status') return { ...col, valueGetter: (row: NormalizedCandidate) => row.status, filterOptions: [{ value: 'READY', label: 'Ready' }, { value: 'WARNING', label: 'Warning' }, { value: 'REVIEW', label: 'Review' }] };
+      return col;
+    });
+    const baseConfig = { ...base, columns: runtimeColumns };
+    const effective = uiConfig ? uiPageConfigToTradeTableConfig<any>('entry_candidates', uiConfig, baseConfig as any) : (baseConfig as any);
+    const mergedColumns = (effective.columns as TradeColumnDef<any>[]).map((col) => {
+      const runtime = runtimeColumns.find((c) => c.id === col.id);
+      return runtime ? { ...runtime, ...col, renderCell: runtime.renderCell ?? col.renderCell, formatValue: runtime.formatValue ?? col.formatValue, filterOptions: runtime.filterOptions ?? col.filterOptions, valueGetter: runtime.valueGetter ?? col.valueGetter } : col;
+    });
+    return resolveTradeTableConfig<any>({ ...effective, columns: mergedColumns } as any);
+  }, [uiConfig]);
+
+  useEffect(() => {
+    setColumnVisibility((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const col of tableConfig.columns) next[col.id] = prev[col.id] ?? col.visible;
+      for (const col of tableConfig.columns) if (col.required) next[col.id] = true;
+      return next;
+    });
+    setSortBy((prev) => {
+      if (prev) return prev;
+      const ds = tableConfig.defaultSort;
+      if (!ds) return null;
+      const field = ds.field as CandidateSort['field'];
+      if (['symbol', 'cmp', 'amount', 'status', 'strategy'].includes(field)) return { field, direction: ds.direction };
+      return null;
+    });
+  }, [tableConfig]);
+
+  const visibleColumns = useMemo(() => {
+    return tableConfig.columns
+      .filter((c) => columnVisibility[c.id] !== false)
+      .sort((a, b) => a.position - b.position);
+  }, [tableConfig.columns, columnVisibility]);
+  const filterableColumns = useMemo(() => getFilterableColumns({ ...tableConfig, columns: tableConfig.columns.map((c) => ({ ...c, visible: columnVisibility[c.id] !== false })) } as any), [tableConfig, columnVisibility]);
 
   const filteredCandidates = useMemo(
     () =>
@@ -247,36 +317,24 @@ export default function EntryCandidatesPage() {
     [candidates, hideWithOrders, existingOrderSymbols],
   );
 
-  const visibleCandidates = useMemo(() => {
+  const domainFilteredCandidates = useMemo(() => {
     let list = filteredCandidates.filter(
       c => strategyFilter === 'ALL' || c.strategy_type === strategyFilter,
     );
-    if (statusFilter === 'SKIPPED') {
-      list = [];
-    } else if (statusFilter !== 'ALL') {
-      list = list.filter(c => c.status === statusFilter);
-    }
-    if (!sortBy) return list;
-    const sorted = [...list];
-    sorted.sort((a, b) => {
-      let result = 0;
-      if (sortBy.field === 'symbol') {
-        result = a.symbol.localeCompare(b.symbol);
-      } else if (sortBy.field === 'cmp') {
-        result = (a.cmp ?? -1) - (b.cmp ?? -1);
-      } else if (sortBy.field === 'amount') {
-        result = getActualOrderValue(a) - getActualOrderValue(b);
-      } else if (sortBy.field === 'status') {
-        result = a.status_severity - b.status_severity;
-      } else if (sortBy.field === 'strategy') {
-        result = (strategyLabel[a.strategy_type] ?? a.strategy_type).localeCompare(
-          strategyLabel[b.strategy_type] ?? b.strategy_type,
-        );
-      }
-      return sortBy.direction === 'asc' ? result : -result;
-    });
-    return sorted;
-  }, [filteredCandidates, strategyFilter, statusFilter, sortBy]);
+    if (statusFilter === 'SKIPPED') list = [];
+    else if (statusFilter !== 'ALL') list = list.filter(c => c.status === statusFilter);
+    return list;
+  }, [filteredCandidates, strategyFilter, statusFilter]);
+
+  const configSort: TradeSortState | null = useMemo(() => {
+    if (!sortBy) return tableConfig.defaultSort ?? null;
+    const col = tableConfig.columns.find((c) => c.id === sortBy.field);
+    if (!col || !col.sortable) return tableConfig.defaultSort ?? null;
+    return { field: sortBy.field, direction: sortBy.direction };
+  }, [sortBy, tableConfig]);
+
+  const configFilteredCandidates = useMemo(() => applyTradeFilters(domainFilteredCandidates as any, filters, tableConfig.columns as any) as NormalizedCandidate[], [domainFilteredCandidates, filters, tableConfig.columns]);
+  const visibleCandidates = useMemo(() => applyTradeSort(configFilteredCandidates as any, configSort, tableConfig.columns as any) as NormalizedCandidate[], [configFilteredCandidates, configSort, tableConfig.columns]);
 
   const visibleSkipped = useMemo(() => {
     if (statusFilter !== 'ALL' && statusFilter !== 'SKIPPED') return [];
@@ -284,6 +342,8 @@ export default function EntryCandidatesPage() {
       s => strategyFilter === 'ALL' || s.strategy_type === strategyFilter,
     );
   }, [skipped, strategyFilter, statusFilter]);
+
+  const selectableCount = visibleCandidates.filter(c => c.is_selectable && !existingOrderSymbols.has(c.symbol.toUpperCase())).length;
 
   const selectedOrderCandidates = useMemo(
     () =>
@@ -302,27 +362,31 @@ export default function EntryCandidatesPage() {
   );
 
   return (
-    <Box sx={{ pb: { xs: selected.length > 0 ? '76px' : 0, sm: 0 } }}>
-      <ResponsiveToolbar sx={{ alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-        <Typography variant="h5" fontWeight={700} sx={{ flexShrink: 0 }}>
-          Entry Candidates
-        </Typography>
-        <Box sx={{ display: 'flex', gap: 1 }}>
-          <Button
-            variant="contained"
-            startIcon={generating ? <CircularProgress size={16} /> : <GenerateIcon />}
-            onClick={handleGenerate}
-            disabled={generating || !sessionId}
-          >
-            {generating ? 'Generating...' : 'Generate Candidates'}
-          </Button>
-          <Tooltip title="Refresh">
-            <IconButton onClick={fetchCandidates} disabled={loading}>
-              <RefreshIcon />
-            </IconButton>
-          </Tooltip>
-        </Box>
-      </ResponsiveToolbar>
+    <TradePageLayout
+      sx={{ pb: { xs: selected.length > 0 ? '76px' : 0, sm: 0 } }}
+      header={
+        <ResponsivePageHeader
+          title="Entry Candidates"
+          primaryAction={
+            <Button
+              variant="contained"
+              startIcon={generating ? <CircularProgress size={16} /> : <GenerateIcon />}
+              onClick={handleGenerate}
+              disabled={generating || !sessionId}
+            >
+              {generating ? 'Generating...' : 'Generate Candidates'}
+            </Button>
+          }
+          actions={
+            <Tooltip title="Refresh">
+              <IconButton onClick={fetchCandidates} disabled={loading}>
+                <RefreshIcon />
+              </IconButton>
+            </Tooltip>
+          }
+        />
+      }
+    >
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
 
@@ -411,19 +475,39 @@ export default function EntryCandidatesPage() {
       )}
 
       {isMobile && (
-        <CandidateMobileControls
-          strategyFilter={strategyFilter}
-          statusFilter={statusFilter}
-          onStrategyFilterChange={setStrategyFilter}
-          onStatusFilterChange={setStatusFilter}
-          sortBy={sortBy}
-          onSort={handleSort}
-          onSelectReady={handleSelectReady}
-          onClearSelection={() => setSelected([])}
-          onClearFilters={handleClearMobileFilters}
-          selectedCount={selected.length}
-          busy={busy}
-        />
+        <>
+          <TradeTableToolbar
+            config={tableConfig}
+            search=""
+            onSearchChange={() => {}}
+            activeFilterCount={filters.length}
+            onClearFilters={() => setFilters([])}
+            onOpenMobileFilters={() => setMobileFiltersOpen(true)}
+            columnVisibility={columnVisibility}
+            onColumnVisibilityChange={(id, visible) => setColumnVisibility((prev) => ({ ...prev, [id]: visible }))}
+            onResetColumns={() => {
+              const next: Record<string, boolean> = {};
+              for (const col of tableConfig.columns) next[col.id] = col.visible;
+              for (const col of tableConfig.columns) if (col.required) next[col.id] = true;
+              setColumnVisibility(next);
+            }}
+            mobile
+          />
+          <CandidateMobileControls
+            strategyFilter={strategyFilter}
+            statusFilter={statusFilter}
+            onStrategyFilterChange={setStrategyFilter}
+            onStatusFilterChange={setStatusFilter}
+            sortBy={sortBy}
+            onSort={handleSort}
+            onSelectReady={handleSelectReady}
+            onClearSelection={() => setSelected([])}
+            onClearFilters={handleClearMobileFilters}
+            selectedCount={selected.length}
+            busy={busy}
+            sortableFields={tableConfig.columns.filter((c) => c.sortable).map((c) => c.id)}
+          />
+        </>
       )}
 
       {/* Candidates Table */}
@@ -468,7 +552,25 @@ export default function EntryCandidatesPage() {
           )}
         </Box>
       ) : (
-        <TableContainer component={Paper} sx={{ mb: 2 }}>
+        <Paper sx={{ mb: 2 }}>
+          <TradeTableToolbar
+            config={tableConfig}
+            search=""
+            onSearchChange={() => {}}
+            activeFilterCount={filters.length}
+            onClearFilters={() => setFilters([])}
+            onOpenMobileFilters={() => setMobileFiltersOpen(true)}
+            columnVisibility={columnVisibility}
+            onColumnVisibilityChange={(id, visible) => setColumnVisibility((prev) => ({ ...prev, [id]: visible }))}
+            onResetColumns={() => {
+              const next: Record<string, boolean> = {};
+              for (const col of tableConfig.columns) next[col.id] = col.visible;
+              for (const col of tableConfig.columns) if (col.required) next[col.id] = true;
+              setColumnVisibility(next);
+            }}
+            mobile={false}
+          />
+          <TableContainer>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -480,15 +582,26 @@ export default function EntryCandidatesPage() {
                     disabled={selectableCount === 0}
                   />
                 </TableCell>
-                <TableCell>Symbol</TableCell>
-                <TableCell>Strategy</TableCell>
-                <TableCell align="center">Signal</TableCell>
-                <TableCell align="right">CMP</TableCell>
-                <TableCell align="right">Trigger</TableCell>
-                <TableCell align="right">Qty</TableCell>
-                <TableCell align="right">Amount</TableCell>
-                <TableCell align="center">Δ vs Entry</TableCell>
-                <TableCell align="center">Status</TableCell>
+                {visibleColumns.map((col) => {
+                  const align = col.alignment ?? (col.dataType === 'number' ? 'right' : col.dataType === 'boolean' ? 'center' : 'left');
+                  const sortable = col.sortable;
+                  const active = sortBy?.field === col.id;
+                  return (
+                    <TableCell key={col.id} align={align} sortDirection={active ? sortBy?.direction : false} sx={{ width: col.width, minWidth: col.minWidth }}>
+                      {sortable ? (
+                        <TableSortLabel
+                          active={active}
+                          direction={active ? sortBy?.direction : 'asc'}
+                          onClick={() => handleSort(col.id)}
+                        >
+                          {col.label}
+                        </TableSortLabel>
+                      ) : (
+                        col.label
+                      )}
+                    </TableCell>
+                  );
+                })}
               </TableRow>
             </TableHead>
             <TableBody>
@@ -509,106 +622,99 @@ export default function EntryCandidatesPage() {
                         disabled={!c.is_selectable || hasOrder}
                       />
                     </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" fontWeight={600}>
-                        {c.symbol}
-                      </Typography>
-                      {c.exchange && (
-                        <Typography variant="caption" color="text.secondary">{c.exchange}</Typography>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <Chip
-                        label={strategyLabel[c.strategy_type] ?? c.strategy_type}
-                        size="small"
-                        color={strategyColor[c.strategy_type] ?? 'default'}
-                        variant="outlined"
-                      />
-                    </TableCell>
-                    <TableCell align="center">
-                      <Typography variant="body2" fontWeight={600}>
-                        {c.signal ?? '—'}
-                      </Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body2">{fmtCurrency(c.cmp)}</Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body2">{fmtCurrency(c.trigger_price)}</Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body2">{c.qty}</Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body2" fontWeight={600}>
-                        {fmtCurrency(c.amount)}
-                      </Typography>
-                    </TableCell>
-                    <TableCell align="center">
-                      {c.strategy_type === 'DYNAMIC_AVERAGING' && c.additional_details?.drop_from_avg_pct != null ? (
-                        <Chip
-                          size="small"
-                          label={`-${(c.additional_details.drop_from_avg_pct as number).toFixed(1)}%`}
-                          color="error"
-                          variant="outlined"
-                          sx={{ fontWeight: 600, minWidth: 64 }}
-                        />
-                      ) : (
-                        <DeltaChip cmp={c.cmp} entry={c.additional_details?.level_price as number ?? null} />
-                      )}
-                    </TableCell>
-                    <TableCell align="center">
-                      {hasOrder ? (
-                        <Chip label="Active Order" size="small" color="default" variant="filled" sx={{ fontWeight: 600 }} />
-                      ) : (
-                        <>
-                          <Chip
-                            label={c.status}
-                            size="small"
-                            color={statusColor[c.status] ?? 'default'}
-                            sx={{ fontWeight: 600 }}
-                          />
-                          {(c.reason_message || c.strategy_type === 'DYNAMIC_AVERAGING') && (
-                            <Tooltip
-                              title={
-                                <Box sx={{ p: 0.5 }}>
-                                  {c.reason_message && (
-                                    <Typography variant="body2" sx={{ mb: 1 }}>
-                                      {c.reason_message}
-                                    </Typography>
-                                  )}
-                                  {c.strategy_type === 'DYNAMIC_AVERAGING' && c.additional_details && (
-                                    <Box sx={{ fontSize: '0.8rem', lineHeight: 1.6 }}>
-                                      <div><strong>Avg Price:</strong> {fmtCurrency(c.additional_details.avg_price as number ?? null)}</div>
-                                      <div><strong>Drop from Avg %:</strong> {c.additional_details.drop_from_avg_pct != null ? `${(c.additional_details.drop_from_avg_pct as number).toFixed(1)}%` : '—'}</div>
-                                      <div><strong>Regime:</strong> {c.additional_details.regime as string ?? '—'}</div>
-                                      <div><strong>Offset %:</strong> {c.additional_details.trigger_offset_pct != null ? `${(c.additional_details.trigger_offset_pct as number).toFixed(2)}%` : '—'}</div>
-                                      <div><strong>DA Capacity:</strong> {fmtCurrency(c.additional_details.da_capacity as number ?? null)}</div>
-                                      <div><strong>Expected Benefit:</strong> {fmtCurrency(c.additional_details.expected_benefit as number ?? null)}</div>
-                                      <div><strong>Estimated Cost:</strong> {fmtCurrency(c.additional_details.estimated_cost as number ?? null)}</div>
-                                      <div><strong>Net Benefit:</strong> {fmtCurrency(c.additional_details.net_benefit as number ?? null)}</div>
-                                      <div><strong>Legs:</strong> {c.additional_details.total_legs as number ?? '—'} / Max: {c.additional_details.total_legs as number ?? '—'}</div>
-                                    </Box>
-                                  )}
-                                </Box>
-                              }
-                              arrow
-                              placement="left"
-                            >
-                              <IconButton size="small" sx={{ ml: 0.5 }}>
-                                <InfoIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-                          )}
-                        </>
-                      )}
-                    </TableCell>
+                    {visibleColumns.map((col) => {
+                      const align = col.alignment ?? (col.dataType === 'number' ? 'right' : col.dataType === 'boolean' ? 'center' : 'left');
+                      if (col.id === 'symbol') {
+                        return (
+                          <TableCell key={col.id} align={align}>
+                            <Typography variant="body2" fontWeight={600}>{c.symbol}</Typography>
+                            {c.exchange && <Typography variant="caption" color="text.secondary">{c.exchange}</Typography>}
+                          </TableCell>
+                        );
+                      }
+                      if (col.id === 'strategy') {
+                        return (
+                          <TableCell key={col.id} align={align}>
+                            <Chip label={strategyLabel[c.strategy_type] ?? c.strategy_type} size="small" color={strategyColor[c.strategy_type] ?? 'default'} variant="outlined" />
+                          </TableCell>
+                        );
+                      }
+                      if (col.id === 'signal') {
+                        return <TableCell key={col.id} align={align}><Typography variant="body2" fontWeight={600}>{c.signal ?? '\u2014'}</Typography></TableCell>;
+                      }
+                      if (col.id === 'cmp') {
+                        return <TableCell key={col.id} align={align}><Typography variant="body2">{fmtCurrency(c.cmp)}</Typography></TableCell>;
+                      }
+                      if (col.id === 'trigger') {
+                        return <TableCell key={col.id} align={align}><Typography variant="body2">{fmtCurrency(c.trigger_price)}</Typography></TableCell>;
+                      }
+                      if (col.id === 'qty') {
+                        return <TableCell key={col.id} align={align}><Typography variant="body2">{c.qty}</Typography></TableCell>;
+                      }
+                      if (col.id === 'amount') {
+                        return <TableCell key={col.id} align={align}><Typography variant="body2" fontWeight={600}>{fmtCurrency(getActualOrderValue(c))}</Typography></TableCell>;
+                      }
+                      if (col.id === 'delta_vs_entry') {
+                        return (
+                          <TableCell key={col.id} align={align}>
+                            {c.strategy_type === 'DYNAMIC_AVERAGING' && c.additional_details?.drop_from_avg_pct != null ? (
+                              <Chip size="small" label={`-${(c.additional_details.drop_from_avg_pct as number).toFixed(1)}%`} color="error" variant="outlined" sx={{ fontWeight: 600, minWidth: 64 }} />
+                            ) : (
+                              <DeltaChip cmp={c.cmp} entry={c.additional_details?.level_price as number ?? null} />
+                            )}
+                          </TableCell>
+                        );
+                      }
+                      if (col.id === 'status') {
+                        return (
+                          <TableCell key={col.id} align={align}>
+                            {hasOrder ? (
+                              <Chip label="Active Order" size="small" color="default" variant="filled" sx={{ fontWeight: 600 }} />
+                            ) : (
+                              <>
+                                <Chip label={c.status} size="small" color={statusColor[c.status] ?? 'default'} sx={{ fontWeight: 600 }} />
+                                {(c.reason_message || c.strategy_type === 'DYNAMIC_AVERAGING') && (
+                                  <Tooltip
+                                    title={
+                                      <Box sx={{ p: 0.5 }}>
+                                        {c.reason_message && <Typography variant="body2" sx={{ mb: 1 }}>{c.reason_message}</Typography>}
+                                        {c.strategy_type === 'DYNAMIC_AVERAGING' && c.additional_details && (
+                                          <Box sx={{ fontSize: '0.8rem', lineHeight: 1.6 }}>
+                                            <div><strong>Avg Price:</strong> {fmtCurrency(c.additional_details.avg_price as number ?? null)}</div>
+                                            <div><strong>Drop from Avg %:</strong> {c.additional_details.drop_from_avg_pct != null ? `${(c.additional_details.drop_from_avg_pct as number).toFixed(1)}%` : '\u2014'}</div>
+                                            <div><strong>Regime:</strong> {c.additional_details.regime as string ?? '\u2014'}</div>
+                                            <div><strong>Offset %:</strong> {c.additional_details.trigger_offset_pct != null ? `${(c.additional_details.trigger_offset_pct as number).toFixed(2)}%` : '\u2014'}</div>
+                                            <div><strong>DA Capacity:</strong> {fmtCurrency(c.additional_details.da_capacity as number ?? null)}</div>
+                                            <div><strong>Expected Benefit:</strong> {fmtCurrency(c.additional_details.expected_benefit as number ?? null)}</div>
+                                            <div><strong>Estimated Cost:</strong> {fmtCurrency(c.additional_details.estimated_cost as number ?? null)}</div>
+                                            <div><strong>Net Benefit:</strong> {fmtCurrency(c.additional_details.net_benefit as number ?? null)}</div>
+                                            <div><strong>Legs:</strong> {c.additional_details.total_legs as number ?? '\u2014'} / Max: {c.additional_details.total_legs as number ?? '\u2014'}</div>
+                                          </Box>
+                                        )}
+                                      </Box>
+                                    }
+                                    arrow
+                                    placement="left"
+                                  >
+                                    <IconButton size="small" sx={{ ml: 0.5 }}><InfoIcon fontSize="small" /></IconButton>
+                                  </Tooltip>
+                                )}
+                              </>
+                            )}
+                          </TableCell>
+                        );
+                      }
+                      const raw = (c as any)[col.id];
+                      return <TableCell key={col.id} align={align}>{raw == null || raw === '' ? '\u2014' : String(raw)}</TableCell>;
+                    })}
+
                   </TableRow>
                 );
               })}
             </TableBody>
           </Table>
-        </TableContainer>
+          </TableContainer>
+        </Paper>
       )}
 
       {/* Skipped Section */}
@@ -682,6 +788,16 @@ export default function EntryCandidatesPage() {
         onClear={() => setSelected([])}
       />
 
+      <TradeMobileFilterDialog
+        open={mobileFiltersOpen}
+        onClose={() => setMobileFiltersOpen(false)}
+        columns={filterableColumns}
+        rows={domainFilteredCandidates as any}
+        filters={filters}
+        onApply={(next) => { setFilters(next); setMobileFiltersOpen(false); }}
+        onClear={() => { setFilters([]); setMobileFiltersOpen(false); }}
+      />
+
       {/* Place Orders Dialog */}
       <PlaceOrdersDialog
         open={reviewDialogOpen}
@@ -692,6 +808,6 @@ export default function EntryCandidatesPage() {
         results={placeResults}
         placing={placing}
       />
-    </Box>
+    </TradePageLayout>
   );
 }
